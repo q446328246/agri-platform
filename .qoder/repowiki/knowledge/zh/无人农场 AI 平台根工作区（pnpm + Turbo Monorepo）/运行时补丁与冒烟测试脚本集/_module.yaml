@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: runtime_patches
+title: 运行时补丁与冒烟测试脚本集
+scope:
+    - .runtime/
+source_files: []
+depends_on: []
+related_to:
+    - path: infra

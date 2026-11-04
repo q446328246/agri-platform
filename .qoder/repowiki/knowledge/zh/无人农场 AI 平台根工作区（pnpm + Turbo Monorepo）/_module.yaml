@@ -1,0 +1,24 @@
+schema_version: 1
+module_path: ""
+title: 无人农场 AI 平台根工作区（pnpm + Turbo Monorepo）
+scope:
+    - README.md
+    - .gitignore
+    - .npmrc
+    - package.json
+    - pnpm-workspace.yaml
+    - turbo.json
+    - vitest.config.ts
+    - tsconfig.json
+    - IMPLEMENTATION_PROGRESS.md
+    - .env.example
+    - Node.js公共包接口定义与导出清单.docx
+    - Node.js公共包接口定义与导出清单_提取.txt
+    - Node.js微服务工程脚手架说明.docx
+    - Node.js微服务工程脚手架说明_提取.txt
+    - pnpm-lock.yaml
+    - 无人农场AI平台开发方案 (1).docx
+    - 无人农场AI平台开发方案_提取.txt
+source_files: []
+depends_on: []
+related_to: []
