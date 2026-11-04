@@ -1,0 +1,21 @@
+{
+  "extends": "@agri/tsconfig/nest.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "baseUrl": "./",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": ["src/&zwnj;**/*", "test/**&zwnj;/*"],
+  "references": [
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/config" },
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/plot-core" },
+    { "path": "../../packages/observability" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/mq" },
+    { "path": "../../packages/testing" }
+  ]
+}

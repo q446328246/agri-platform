@@ -1,0 +1,28 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared" },
+    { "path": "./packages/config" },
+    { "path": "./packages/contracts" },
+    { "path": "./packages/plot-core" },
+    { "path": "./packages/observability" },
+    { "path": "./packages/db" },
+    { "path": "./packages/mq" },
+    { "path": "./packages/testing" },
+    { "path": "./apps/plot-service" },
+    { "path": "./apps/auth-service" },
+    { "path": "./apps/control-service" },
+    { "path": "./apps/decision-service" },
+    { "path": "./apps/file-service" },
+    { "path": "./apps/finance-service" },
+    { "path": "./apps/gateway-service" },
+    { "path": "./apps/iot-service" },
+    { "path": "./apps/message-service" },
+    { "path": "./apps/operation-service" },
+    { "path": "./apps/platform-service" },
+    { "path": "./apps/telemetry-service" },
+    { "path": "./apps/trace-service" },
+    { "path": "./apps/video-service" },
+    { "path": "./apps/weather-service" }
+  ]
+}

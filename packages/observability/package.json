@@ -1,0 +1,26 @@
+{
+  "name": "@agri/observability",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "可观测性能力：结构化日志、链路追踪、指标采集与运行期采集器",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@agri/shared": "workspace:*",
+    "@nestjs/common": "^11.2.8"
+  },
+  "devDependencies": {
+    "@agri/tsconfig": "workspace:*",
+    "typescript": "^5.9.3"
+  }
+}

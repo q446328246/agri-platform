@@ -1,0 +1,26 @@
+{
+  "name": "@agri/plot-core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "地块领域模型与编码规则：六段式编码、校验位算法、网格换算、坐标系转换",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@agri/contracts": "workspace:*",
+    "@agri/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@agri/tsconfig": "workspace:*",
+    "typescript": "^5.9.3"
+  }
+}

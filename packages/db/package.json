@@ -1,0 +1,27 @@
+{
+  "name": "@agri/db",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "数据访问封装：客户端生命周期、事务、分库路由、分页与软删除",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@agri/contracts": "workspace:*",
+    "@agri/shared": "workspace:*",
+    "@nestjs/common": "^11.2.8"
+  },
+  "devDependencies": {
+    "@agri/tsconfig": "workspace:*",
+    "typescript": "^5.9.3"
+  }
+}

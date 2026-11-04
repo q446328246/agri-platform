@@ -1,0 +1,30 @@
+{
+  "name": "@agri/testing",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "测试工具与夹具：测试数据库、内存事件总线、可控时钟、模块构造器与数据夹具",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@agri/contracts": "workspace:*",
+    "@agri/db": "workspace:*",
+    "@agri/plot-core": "workspace:*",
+    "@agri/shared": "workspace:*",
+    "@nestjs/common": "^11.2.8",
+    "@nestjs/testing": "^11.2.8"
+  },
+  "devDependencies": {
+    "@agri/tsconfig": "workspace:*",
+    "typescript": "^5.9.3"
+  }
+}

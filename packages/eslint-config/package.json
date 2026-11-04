@@ -1,0 +1,28 @@
+{
+  "name": "@agri/eslint-config",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "代码规范配置，含架构约束规则（依赖方向与跨层引用校验）",
+  "exports": {
+    ".": "./index.mjs",
+    "./base": "./base.mjs",
+    "./typescript": "./typescript.mjs",
+    "./nest": "./nest.mjs",
+    "./vue": "./vue.mjs",
+    "./architecture": "./architecture.mjs"
+  },
+  "peerDependencies": {
+    "eslint": ">=9",
+    "@typescript-eslint/eslint-plugin": ">=8",
+    "eslint-plugin-import": ">=2"
+  },
+  "peerDependenciesMeta": {
+    "@typescript-eslint/eslint-plugin": {
+      "optional": true
+    },
+    "eslint-plugin-import": {
+      "optional": true
+    }
+  }
+}

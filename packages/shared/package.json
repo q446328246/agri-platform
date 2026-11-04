@@ -1,0 +1,22 @@
+{
+  "name": "@agri/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "通用工具与常量：异常基类、时间、单位换算、分页、标识生成",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "devDependencies": {
+    "@agri/tsconfig": "workspace:*",
+    "typescript": "^5.9.3"
+  }
+}

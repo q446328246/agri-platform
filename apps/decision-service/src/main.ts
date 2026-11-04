@@ -1,0 +1,58 @@
+import "reflect-metadata";
+
+import { PgClientAdapter, resolveDatabaseUrl } from "@agri/db";
+import { OutboxService, InMemoryEventPublisher, setDefaultPublisher } from "@agri/mq";
+import { configureDecorators, LoggerService } from "@agri/observability";
+
+import { createDecisionHttpServer } from "./http.js";
+import type { DecisionDependencies } from "./http.js";
+import { SqlPrescriptionRepository } from "./prescription.repository.js";
+import { SqlOutboxStore } from "./outbox.repository.js";
+import { defaultRule, InMemoryRuleRepository, SqlRuleRepository } from "./rule.repository.js";
+
+/** 日志级别白名单，缺省 info */
+function parseLogLevel(value?: string): "debug" | "info" | "warn" | "error" {
+  return value === "debug" || value === "warn" || value === "error" ? value : "info";
+}
+
+async function bootstrap(): Promise<void> {
+  const port = Number(process.env.PORT ?? 3006);
+  const logger = new LoggerService({ serviceName: "decision-service", level: parseLogLevel(process.env.LOG_LEVEL) });
+  configureDecorators({ logger });
+
+  // 默认连接数据库持久化规则与处方留痕；显式设置为 memory 时使用内存实现，
+  // 无数据库的本地演示仍可运行，但处方事件与留痕不再落库。
+  const mode = process.env.DECISION_REPOSITORY_MODE === "memory" || !process.env.DB_URL ? "memory" : "sql";
+
+  if (mode === "sql" && process.env.SERVICE_MODE === "http") {
+    const client = PgClientAdapter.fromUrl(resolveDatabaseUrl(process.env.DB_URL));
+    await client.$connect();
+    const rules = new SqlRuleRepository(client);
+    // 首次启动播种默认补灌规则，保证开箱可用
+    if ((await rules.count()) === 0) await rules.create({ ...defaultRule(new Date().toISOString()), condition: { ...defaultRule(new Date().toISOString()).condition }, action: { ...defaultRule(new Date().toISOString()).action } });
+    const prescriptions = new SqlPrescriptionRepository(client);
+    const outbox = new SqlOutboxStore(client);
+    const relay = new OutboxService(outbox, new InMemoryEventPublisher(), { tenantId: process.env.TENANT_ID ?? "tenant-demo", traceId: "decision-relay", producer: "decision" });
+    relay.start();
+    setDefaultPublisher(relay.publisher);
+    const server = createDecisionHttpServer({ rules, prescriptions, outbox, tenantId: process.env.TENANT_ID ?? "tenant-demo" } satisfies Partial<DecisionDependencies>);
+    server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
+    const shutdown = async (): Promise<void> => {
+      server.close();
+      relay.stop();
+      await client.$disconnect();
+    };
+    process.once("SIGINT", () => void shutdown());
+    process.once("SIGTERM", () => void shutdown());
+    return;
+  }
+
+  if (process.env.SERVICE_MODE === "http") {
+    const server = createDecisionHttpServer();
+    server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（内存实现）", { port }));
+    return;
+  }
+  logger.info("decision-service 已启动（demo 模式）");
+}
+
+await bootstrap();

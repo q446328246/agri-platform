@@ -1,0 +1,27 @@
+{
+  "name": "@agri/config",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "配置加载与校验：环境变量校验结构、启动期配置加载、密钥读取",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@agri/shared": "workspace:*",
+    "@nestjs/common": "^11.2.8",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@agri/tsconfig": "workspace:*",
+    "typescript": "^5.9.3"
+  }
+}

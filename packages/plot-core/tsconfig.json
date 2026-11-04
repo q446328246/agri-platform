@@ -1,0 +1,10 @@
+{
+  "extends": "@agri/tsconfig/library.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test"],
+  "references": [{ "path": "../shared" }, { "path": "../contracts" }]
+}

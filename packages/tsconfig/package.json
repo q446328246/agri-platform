@@ -1,0 +1,20 @@
+{
+  "name": "@agri/tsconfig",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TypeScript 编译配置基座，全工程以继承方式引用",
+  "files": [
+    "base.json",
+    "library.json",
+    "nest.json",
+    "vue.json",
+    "strict.json"
+  ],
+  "exports": {
+    "./base.json": "./base.json",
+    "./library.json": "./library.json",
+    "./nest.json": "./nest.json",
+    "./vue.json": "./vue.json",
+    "./strict.json": "./strict.json"
+  }
+}

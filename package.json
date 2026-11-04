@@ -1,0 +1,45 @@
+{
+  "name": "agri-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "智慧农业平台 Node.js 微服务公共包与示例工程（以地块为最小管理单元）",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "build:changed": "turbo run build",
+    "clean": "tsc -b --clean && node scripts/clean.mjs",
+    "typecheck": "tsc -b --dry 2>/dev/null || tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start:plot": "node apps/plot-service/dist/main.js",
+    "smoke:gateway": "pnpm run build && node scripts/smoke-gateway.mjs",
+    "smoke:services": "pnpm run build && node scripts/smoke-services.mjs",
+    "start:services": "pnpm run build && node scripts/start-services.mjs",
+    "health:services": "node scripts/health-check.mjs",
+    "init:minio": "pnpm run build && node scripts/init-minio.mjs",
+    "health:infra": "node scripts/health-infra.mjs",
+    "db:migrate": "node scripts/migrate-postgres.mjs",
+    "smoke:decision-telemetry": "node scripts/smoke-decision-telemetry.mjs"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^11.2.8",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "turbo": "^2.11.10",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7",
+    "zod": "^3.25.76"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
+  }
+}

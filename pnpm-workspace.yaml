@@ -1,0 +1,13 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+
+# esbuild 需要执行安装脚本以就位平台二进制。pnpm 默认拦截依赖的构建脚本，
+# 此处按白名单放行，避免测试运行器无法启动（未放行时安装会以
+# ERR_PNPM_IGNORED_BUILDS 失败）。
+allowBuilds:
+  esbuild: true
+  vue-demi: true
+  "@vue/devtools-api": true
+  element-plus: true
+  '@parcel/watcher': true
