@@ -62,6 +62,22 @@ pnpm --filter @agri/web dev
 > 说明：`pnpm install` 需要放行 esbuild 的安装脚本（已在 `pnpm-workspace.yaml` 的
 > `allowBuilds` 中白名单化）。若安装报 `ERR_PNPM_IGNORED_BUILDS`，检查该配置是否被改动。
 
+### 容器化部署（可选）
+
+仓库根目录的 `Dockerfile` 提供两个部署目标：`app`（15 个 HTTP 服务 + 网关）与 `edge`（nginx 静态资源、`/api` 反代、HTTPS 终止）。
+
+```powershell
+# 若 docker.io 不可直连，先把两个基础镜像经镜像源拉取并重打官方 tag（详见 infra/README.md）
+# 首次构建包含依赖安装与全量编译
+docker compose -f infra/docker-compose.yml --profile app up -d --build
+# 访问 https://localhost（自签证书需浏览器确认信任），默认账号 admin / admin123
+```
+
+- 应用容器启动时先执行数据库迁移与 MinIO bucket 初始化，再拉起 15 个服务；网关是唯一对外入口。
+- 部署环境固定 `AUTH_GUARD_MODE=enforce` 与 `GATEWAY_AUTH_ENABLED=true`，`INTERNAL_TOKEN`、`AUTH_SESSION_TTL_SECONDS` 可覆盖。
+- 地图 Key 用 `VITE_TIANDITU_KEY` 构建参数传入；生产证书放到 `infra/certs` 并启用 `edge` 的注释卷。
+- 构建需要能访问 Docker Hub 与 npm 源；若镜像拉取超时，先配置镜像加速或代理。
+
 ## 二、目录结构
 
 ```
@@ -225,3 +241,16 @@ agri-platform-nodejs-scaffold/
   ```
 - **`@agri/eslint-config`**：规范包已就位，但本次未安装 ESLint 运行；启用前需先在工程内加入
   `eslint` 依赖并按需引用 `base` / `typescript` / `nest` / `vue` / `architecture` 配置。
+
+
+
+
+
+
+
+
+
+docker compose -f infra/docker-compose.yml --profile app ps          # 状态
+docker compose -f infra/docker-compose.yml logs -f app               # 应用日志
+docker compose -f infra/docker-compose.yml --profile app up -d --build   # 改代码后重建
+docker compose -f infra/docker-compose.yml down                      # 停应用（不加 profile 只起 PostGIS/MinIO）

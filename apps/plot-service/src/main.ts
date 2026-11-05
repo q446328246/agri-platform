@@ -10,7 +10,7 @@ import "reflect-metadata";
 
 import type { DomainEvent, PlotCreatedPayload } from "@agri/contracts";
 import { loadConfig } from "@agri/config";
-import { PrismaService } from "@agri/db";
+import { PgClientAdapter, PrismaService } from "@agri/db";
 import {
   EventDispatcher,
   IdempotencyGuard,
@@ -80,6 +80,8 @@ async function bootstrap(): Promise<void> {
   await dispatcher.start();
 
   // 业务依赖
+  // SQL 模式下必须注入真实的 pg 适配器，示例客户端只在内存演示时使用
+  const repositoryMode = process.env.PLOT_REPOSITORY_MODE === "sql" ? "sql" : "memory";
   const prisma = new PrismaService(
     {
       url: appConfig.db.url,
@@ -87,11 +89,11 @@ async function bootstrap(): Promise<void> {
       poolSize: appConfig.db.poolSize,
       slowQueryMs: appConfig.db.slowQueryMs,
     },
-    createExamplePrismaFactory(),
+    repositoryMode === "sql" ? () => PgClientAdapter.fromUrl(appConfig.db.url) : createExamplePrismaFactory(),
   );
   await prisma.onModuleInit();
 
-  const repository = process.env.PLOT_REPOSITORY_MODE === "sql"
+  const repository = repositoryMode === "sql"
     ? new SqlPlotRepository(prisma.clientInstance)
     : new InMemoryPlotRepository();
 

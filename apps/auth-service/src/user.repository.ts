@@ -1,8 +1,11 @@
-import { createHash } from "node:crypto";
-
 import type { PageResult } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
 import { toIsoTimestamp } from "@agri/shared";
+
+import { hashPassword } from "./password.js";
+
+/** 口令能力对外仍从账号仓储导出，调用方不必关心实现文件位置 */
+export { hashPassword, needsRehash, verifyPassword } from "./password.js";
 
 /**
  * 系统账号仓储。
@@ -11,8 +14,8 @@ import { toIsoTimestamp } from "@agri/shared";
  * 两张表承载：账号属性在表上，角色只存角色编码，角色权限由 platform-service
  * 维护，避免两个服务各自定义一份权限清单。
  *
- * 口令以 sha256 散列保存（开发期方案），内存实现保存同一形态，
- * 因此登录与改密逻辑在两种存储下完全一致；生产接入时应替换为 bcrypt/argon2。
+ * 口令散列由 `password.ts` 提供（scrypt + 随机盐）；内存实现保存与 SQL 相同的
+ * 字符串形态，因此登录与改密逻辑在两种存储下完全一致。
  */
 
 export type UserStatus = "ACTIVE" | "DISABLED";
@@ -52,11 +55,6 @@ export interface UserRepository {
   remove(id: string): Promise<void>;
   /** 幂等写入初始账号，已存在同租户同名账号时跳过 */
   seed(records: UserRecord[]): Promise<void>;
-}
-
-/** 开发期口令散列；生产环境应替换为 bcrypt/argon2 等慢哈希 */
-export function hashPassword(password: string): string {
-  return createHash("sha256").update(`agri:${password}`).digest("hex");
 }
 
 /** 内置管理员账号：无数据库时用于本地演示与冒烟脚本 */

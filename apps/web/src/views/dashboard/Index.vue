@@ -134,13 +134,13 @@ function demoBoundaries(): PlotBoundary[] {
     name, parcelCode, rings: [coords], center: [0, 0], areaMu, crop,
   })
   return [
-    rect('智耘蜀芯示范田 · 大豆区', 'demo-soybean', 4860, '大豆', [[31.235, 107.435], [31.247, 107.458], [31.229, 107.472], [31.217, 107.447], [31.235, 107.435]]),
-    rect('智耘蜀芯示范田 · 玉米区', 'demo-corn', 2830, '玉米', [[31.188, 107.485], [31.202, 107.51], [31.181, 107.527], [31.168, 107.5], [31.188, 107.485]]),
+    rect('智耘蜀芯示范田 · 大豆区', 'demo-soybean', 4860, '大豆', [[30.9780, 107.4140], [30.9825, 107.4128], [30.9862, 107.4185], [30.9840, 107.4255], [30.9790, 107.4240], [30.9780, 107.4140]]),
+    rect('智耘蜀芯示范田 · 玉米区', 'demo-corn', 2830, '玉米', [[30.9868, 107.4268], [30.9910, 107.4252], [30.9932, 107.4305], [30.9898, 107.4352], [30.9860, 107.4318], [30.9868, 107.4268]]),
   ]
 }
 
 function initMap() {
-  map = L.map('tianditu-map', { center: [31.2096, 107.4679], zoom: 12, zoomControl: true, attributionControl: false })
+  map = L.map('tianditu-map', { center: [30.982425, 107.421325], zoom: 15, zoomControl: true, attributionControl: false })
   const vector = L.layerGroup([createTiles('vec'), createTiles('cva')])
   const imagery = L.layerGroup([createTiles('img'), createTiles('cia')])
   baseKey = visibleLayers.base ? 'imagery' : 'vector'

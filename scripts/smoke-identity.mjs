@@ -7,8 +7,8 @@ import path from "node:path";
  * 系统账号与角色落库冒烟。
  *
  * 以 SQL 模式启动 auth 与 platform，创建角色与用户后**重启两个进程**，
- * 再验证账号仍能登录、角色与审计日志仍在库中，最后清理测试数据。
- * 需要先执行 `pnpm db:migrate` 应用 004 迁移，并设置 DB_URL。
+ * 再验证账号仍能登录、旧会话 token 仍可解析、角色与审计日志仍在库中，最后清理测试数据。
+ * 需要先执行 `pnpm db:migrate` 应用 004/007 迁移，并设置 DB_URL。
  */
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -95,7 +95,18 @@ async function main() {
   await stopAll();
   await startAll();
 
-  // 重启后：账号仍可登录、角色与审计日志仍在
+  // 重启后：账号仍可登录、旧会话 token 仍有效、角色与审计日志仍在
+  const resumed = await call(`${authBase}/internal/auth/session`, {
+    method: "POST",
+    headers: jsonHeaders({ "x-internal-token": process.env.INTERNAL_TOKEN ?? "agri-internal" }),
+    body: JSON.stringify({ token }),
+  });
+  if (resumed.data?.userId !== login.data.user.id) throw new Error("重启后旧会话 token 已失效");
+  if (Date.parse(resumed.data.expiresAt) <= Date.now()) throw new Error("重启后会话过期时间异常");
+
+  const renewed = await call(`${authBase}/auth/refresh`, { method: "POST", headers: jsonHeaders({ authorization: `Bearer ${token}` }), body: JSON.stringify({}) });
+  if (renewed.data?.token !== token) throw new Error("会话续期未沿用原 token");
+
   const userLogin = await call(`${authBase}/auth/login`, { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ username, password: "smoke123" }) });
   if (userLogin.data.user.roles?.[0] !== role.data.code) throw new Error("重启后用户角色丢失");
 
@@ -114,7 +125,7 @@ async function main() {
   const after = await call(`${authBase}/auth/users?keyword=${encodeURIComponent(username)}`, { headers: adminHeaders });
   if (after.data.total !== 0) throw new Error("测试账号清理失败");
 
-  console.log("SMOKE PASS: 账号、角色、权限与审计日志均已落库，重启后仍可登录");
+  console.log("SMOKE PASS: 账号、角色、权限与审计日志均已落库，重启后仍可登录且旧 token 仍有效");
 }
 
 async function cleanup() {

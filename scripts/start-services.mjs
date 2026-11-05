@@ -13,8 +13,10 @@ const gatewayTargets = Object.fromEntries(services.filter(([name]) => name !== "
 
 function start([name, port, entry]) {
   const env = name === "gateway" ? { ...process.env, ...gatewayTargets } : { ...process.env };
+  // 只有网关对外暴露：容器部署时以 SERVICE_HOST=0.0.0.0 打开监听，其余服务始终留在回环地址
+  const exposed = name === "gateway" ? { ...env, SERVICE_HOST: process.env.SERVICE_HOST ?? "127.0.0.1" } : env;
   // 遥测越限默认发布事件：本机接入数据库时消息中心可直接消费，形成告警通知闭环
-  const serviceEnv = name === "telemetry" ? { ...env, TELEMETRY_PUBLISH_EVENTS: process.env.TELEMETRY_PUBLISH_EVENTS ?? "true" } : env;
+  const serviceEnv = name === "telemetry" ? { ...exposed, TELEMETRY_PUBLISH_EVENTS: process.env.TELEMETRY_PUBLISH_EVENTS ?? "true" } : exposed;
   const child = spawn(process.execPath, [path.join(root, entry)], { cwd: root, env: { ...serviceEnv, SERVICE_MODE: "http", PORT: String(port) }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   child.stdout.on("data", (chunk) => process.stdout.write(`[${name}] ${chunk}`));
   child.stderr.on("data", (chunk) => process.stderr.write(`[${name}] ${chunk}`));

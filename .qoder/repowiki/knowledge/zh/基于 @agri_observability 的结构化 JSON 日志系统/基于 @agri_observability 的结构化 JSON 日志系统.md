@@ -6,82 +6,75 @@ scope:
     - '**'
 source_files:
     - packages/observability/src/logger.ts
+    - packages/observability/src/decorators.ts
     - packages/observability/src/index.ts
     - packages/observability/package.json
-    - packages/config/src/env-schema.ts
     - apps/decision-service/src/main.ts
     - apps/telemetry-service/src/main.ts
     - apps/plot-service/src/app.module.ts
     - apps/plot-service/src/main.ts
 ---
 
-## 1. 使用的系统与框架
+## 1. 使用的框架与工具
 
-仓库没有引入第三方日志库（winston、pino、bunyan、log4js 等），而是自实现了一个轻量级的结构化日志器，封装在共享包 `@agri/observability` 中。所有业务微服务通过该包的 `LoggerService` 类统一输出日志。
+- 自研 `@agri/observability` 包提供结构化日志、指标采集、链路追踪与方法装饰器，不依赖第三方日志库（如 winston/pino/bunyan），仅依赖 `@nestjs/common`。
+- 日志输出为**单行 JSON**，直接写入 `process.stdout`（测试场景可通过 `sink` 选项替换为采集函数）。
+- 微服务统一通过 NestJS 模块注入 `LoggerService`，部分服务在 `main.ts` 中直接构造实例。
 
-日志格式为**单行 JSON**，字段固定，便于外部采集端解析与检索。日志级别采用数字权重过滤：`debug=10, info=20, warn=30, error=40`，默认级别为 `info`。
+## 2. 核心文件与包
 
-## 2. 关键文件
+- `packages/observability/src/logger.ts`：定义 `LOG_LEVELS`、`LogLevel`、`LogRecord`、`LoggerOptions` 与 `LoggerService` 类。
+- `packages/observability/src/decorators.ts`：`Traced` / `Metered` 方法装饰器，自动记录耗时并调用 `deps.logger.debug/error`。
+- `packages/observability/src/index.ts`：统一导出 logger/metrics/trace/collectors/decorators。
+- `apps/*/src/main.ts` 与各服务的 `app.module.ts`：构造 `LoggerService` 并注册到 DI 容器。
 
-- `packages/observability/src/logger.ts` — 核心日志器实现，定义 `LogRecord` 结构、`LoggerService` 类、`LOG_LEVELS` 常量与 `LogLevel` 类型。
-- `packages/observability/src/index.ts` — 统一导出 `logger`、`metrics`、`trace`、`collectors`、`decorators`。
-- `packages/observability/package.json` — 包名 `@agri/observability`，依赖 `@nestjs/common`（用于装饰器注入）。
-- `apps/*/src/main.ts` — 各微服务入口，实例化 `LoggerService` 并传入 `serviceName` 与 `level`。
-- `apps/plot-service/src/app.module.ts` — NestJS 模块中将 `LoggerService` 注册为可注入的 Provider，供 Service/Controller 使用。
-- `packages/config/src/env-schema.ts` — 通过 Zod 校验 `LOG_LEVEL` 环境变量，限定枚举值为 `debug|info|warn|error`，默认 `info`。
+## 3. 架构与约定
 
-## 3. 架构与设计约定
+### 3.1 日志记录结构
 
-### 3.1 结构化记录模型
-
-每条日志对应一个 `LogRecord` 对象，字段如下：
+`LogRecord` 固定字段：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `timestamp` | string (ISO) | 写入时间 |
-| `level` | `debug\|info\|warn\|error` | 日志级别 |
+| `timestamp` | string (ISO) | 记录时间 |
+| `level` | `debug`\|`info`\|`warn`\|`error` | 级别 |
 | `service` | string | 服务名（构造时传入） |
-| `message` | string | 人类可读消息 |
-| `traceId` | string? | 链路追踪标识（可选） |
-| `[key: string]` | unknown | 任意扩展字段（context） |
+| `message` | string | 业务消息 |
+| `traceId` | string? | 链路标识（可选） |
+| `[key: string]` | unknown | 扩展上下文字段 |
 
-所有字段最终通过 `JSON.stringify(record)` 输出到 sink。
+所有字段以 `JSON.stringify` 序列化后换行输出，便于外部采集端解析。
 
-### 3.2 输出 Sink 与测试替换
+### 3.2 级别策略
 
-`sink` 选项默认为 `process.stdout.write(line + '\n')`，即标准输出。构造函数允许传入自定义 `sink: (line: string) => void`，以便在单元测试中捕获日志内容而不污染控制台。
+- 内置四级：`debug` (10)、`info` (20)、`warn` (30)、`error` (40)，数值越大越严重。
+- 默认级别为 `info`；服务启动时通过 `parseLogLevel(process.env.LOG_LEVEL)` 从环境变量覆盖。
+- `write` 内部按权重比较，低于当前级别的日志直接丢弃。
 
-### 3.3 上下文继承与链路追踪
+### 3.3 上下文与子日志器
 
-- `child(context, level?)` — 派生子日志器，合并 `base` 上下文，支持覆盖级别。
-- `withTrace(traceId)` — 便捷方法，等价于 `child({ traceId })`。
-- 注释明确要求：**所有日志必须携带服务名与链路标识**，否则跨服务排查无法串联请求。
+- `child(context, level?)` 合并 base 上下文，支持派生带固定上下文的子 Logger。
+- `withTrace(traceId)` 是 `child({ traceId })` 的便捷方法，用于跨服务请求串联。
+- 每个 Logger 实例携带 `serviceName`、`base`、`sink`，通过构造函数注入。
 
-### 3.4 级别过滤
+### 3.4 可观测性集成
 
-`write()` 内部比较 `LEVEL_WEIGHT[level]` 与当前 logger 的 `LEVEL_WEIGHT[this.level]`，低于阈值的日志直接丢弃，不进入序列化流程。
+- `configureDecorators({ logger, metrics })` 将全局 logger/metrics 注入装饰器。
+- `@Traced()` 自动记录方法起止耗时，成功写 debug，失败写 error，附带 `span`、`durationMs`、`reason`。
+- `@Metered()` 记录 HTTP 请求时长与错误计数，标签取类名与方法名。
+- 文档注释明确：**不要在循环体内使用装饰器**，否则会产生大量跨度与指标标签拖慢服务。
 
-### 3.5 与 NestJS 集成
+### 3.5 服务侧装配模式
 
-`@agri/observability` 同时提供 `configureDecorators` 与 `@Loggable` 等装饰器（见 `decorators.ts`），可在方法执行前后自动打点；`plot-service` 将其作为 NestJS Provider 注入，其他服务也可按需复用。
+- `decision-service`、`telemetry-service`：在 `main.ts` 中直接 `new LoggerService({ serviceName, level })`。
+- `plot-service`：在 `AppModule` 中以 `provide: LoggerService, useFactory` 形式注册，并通过 `exports` 暴露给其他模块。
+- 各服务均通过 `@agri/observability` 导入 `LoggerService`、`MetricsService`、`configureDecorators`。
 
 ## 4. 约定与约束
 
-- **日志级别来源**：服务启动时从 `process.env.LOG_LEVEL` 读取，并通过 `parseLogLevel` 函数归一化为 `debug|info|warn|error` 之一，非法值回退为 `info`（见 `apps/decision-service/src/main.ts`、`apps/telemetry-service/src/main.ts`）。
-- **环境变量校验**：`packages/config/src/env-schema.ts` 用 Zod schema 强制 `LOG_LEVEL` 只能取 `debug|info|warn|error`，默认 `info`。
-- **结构化输出**：`logger.ts` 注释明确“日志以单行 JSON 输出，字段固定”，且 `write()` 始终调用 `JSON.stringify(record)`，因此任何非结构化输出都需绕过 LoggerService。
-- **必填字段**：`LogRecord` 接口要求 `timestamp`、`level`、`service`、`message` 四个字段，由 `LoggerService.write()` 自动填充；`traceId` 可选但被注释强调为跨服务排查必需。
-- **服务名绑定**：每个 `LoggerService` 实例构造时必须传入 `serviceName`，并在每条记录中固定写入，避免不同 logger 混用导致归属不清。
-- **扩展字段安全**：`LogRecord` 开放索引签名 `[key: string]: unknown`，允许业务代码附加任意 context 字段，但建议仅包含可序列化的基础类型或简单对象。
-- **无第三方依赖**：该日志子系统不依赖任何外部日志库，仅依赖 Node.js 内置 `process.stdout` 与 `Date`，降低运行时耦合。
-
-## 5. 观察到的使用模式
-
-各微服务在 `main.ts` 中统一创建 logger 并启动 HTTP 服务后记录启动信息，例如：
-
-```ts
-const logger = new LoggerService({ serviceName: "decision-service", level: parseLogLevel(process.env.LOG_LEVEL) });
-server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
-```
-
-NestJS 模块（如 `plot-service`）则通过 `useFactory` 将 `LoggerService` 注册为 Provider，使业务类可通过依赖注入获取 logger 实例。
+- **每条日志必须携带 `service` 与 `traceId`**：logger.ts 顶部注释明确要求“所有日志必须携带服务名与链路标识，否则跨服务排查时无法把一次请求串联起来”。
+- **日志级别由 `LOG_LEVELS` 常量枚举控制**，新增级别需同时更新 `LEVEL_WEIGHT` 映射。
+- **结构化字段扩展通过 `context` 参数传入**，而非拼接 message。
+- **sink 默认写 stdout**，测试或生产可替换为自定义采集函数（如写入文件、远端收集器）。
+- **装饰器需在应用启动时通过 `configureDecorators` 注入依赖**，否则装饰器内 `deps.logger` 为空，不会输出日志。
+- **禁止在循环体中使用 `@Traced` / `@Metered`**：decorators.ts 注释显式警告会产生大量跨度与指标标签拖慢服务。

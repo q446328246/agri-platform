@@ -109,7 +109,10 @@ function toPlotServiceInput(data: PlotForm): Record<string, unknown> {
 }
 
 function toPlotServicePatch(data: PlotForm): Record<string, unknown> {
-  return { parcelName: data.name, areaMu: data.areaMu, soilType: data.soilType, geom: coordinatesToGeom(data.coordinates) }
+  const patch: Record<string, unknown> = { parcelName: data.name, areaMu: data.areaMu, soilType: data.soilType }
+  // 老地块可能暂无边界，未重新绘制时不能用默认矩形覆盖原 geom
+  if (data.coordinates && data.coordinates.length >= 3) patch.geom = coordinatesToGeom(data.coordinates)
+  return patch
 }
 
 function coordinatesToGeom(coordinates?: [number, number][]): Record<string, unknown> {

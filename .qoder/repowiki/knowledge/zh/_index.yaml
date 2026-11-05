@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-11-04T09:34:31Z"
+exported_at: "2026-11-05T02:47:44Z"
 modules:
     "":
-        dir_name: 无人农场 AI 平台 Node.js 微服务 Monorepo
-        title: 无人农场 AI 平台 Node.js 微服务 Monorepo
+        dir_name: 无人农场 AI 平台 Monorepo 根编排
+        title: 无人农场 AI 平台 Monorepo 根编排
         scope:
             - README.md
             - IMPLEMENTATION_PROGRESS.md
@@ -35,8 +35,8 @@ modules:
         depends_on: []
         related_to: []
     infrastructure:
-        dir_name: 本地基础设施编排与数据库迁移
-        title: 本地基础设施编排与数据库迁移
+        dir_name: 基础设施编排与数据库迁移
+        title: 基础设施编排与数据库迁移
         scope:
             - infra/
         source_files: []
@@ -52,11 +52,10 @@ modules:
         source_files: []
         children: []
         depends_on: []
-        related_to:
-            - path: scripts
+        related_to: []
     scripts:
-        dir_name: 本地开发服务编排与冒烟测试脚本集
-        title: 本地开发服务编排与冒烟测试脚本集
+        dir_name: 多微服务运维与冒烟测试脚本集
+        title: 多微服务运维与冒烟测试脚本集
         scope:
             - scripts/
         source_files: []
@@ -64,10 +63,9 @@ modules:
         depends_on: []
         related_to:
             - path: infrastructure
-            - path: legacy_webapp
     shared_packages:
-        dir_name: 共享包与领域基础设施（@agri_ monorepo packages）
-        title: 共享包与领域基础设施（@agri/* monorepo packages）
+        dir_name: '@agri_ 共享 TypeScript 包集合'
+        title: '@agri/* 共享 TypeScript 包集合'
         scope:
             - packages/
         source_files: []

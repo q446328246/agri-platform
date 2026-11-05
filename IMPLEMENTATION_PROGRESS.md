@@ -7,7 +7,7 @@
 - 更新时间：2026-11-05
 - 当前阶段：全量验证与交付
 - 总体状态：首版交付完成（待验收）
-- 当前主线：事件日志总线打通跨进程链路，处方效果回流调优规则，系统管理用户/角色已落库，越限/处方事件已驱动控制指令与生产档案，消息中心按订阅偏好过滤并按来源主题去重，网关与服务侧已按角色权限拦截接口，控制指令来源与生产档案事件类型已在前端展示并可筛选，全量构建/测试/冒烟已复验通过
+- 当前主线：事件日志总线打通跨进程链路，处方效果回流调优规则，系统管理用户/角色已落库，越限/处方事件已驱动控制指令与生产档案，消息中心按订阅偏好过滤并按来源主题去重，网关与服务侧已按角色权限拦截接口，控制指令来源与生产档案事件类型已在前端展示并可筛选；登录会话已落 `auth_sessions`、口令改为 scrypt 并支持滑动续期；已完成本机容器化部署（`app` + `edge`，HTTPS 443）并逐接口复验
 
 ## 规格来源
 
@@ -21,28 +21,28 @@
 | --- | --- | --- |
 | 1. 文档提取与需求矩阵 | 已完成 | 本文件、需求矩阵 |
 | 2. 现状盘点 | 已完成 | 缺口清单、依赖顺序 |
-| 3. 公共契约与基础能力 | 进行中 | contracts/config/shared 等可复用能力 |
-| 4. 地块与平台基础服务 | 进行中 | 地块、平台、认证接口 |
+| 3. 公共契约与基础能力 | 已完成 | contracts/config/shared/db/mq/observability/testing 均有实现与单测 |
+| 4. 地块与平台基础服务 | 已完成 | 地块、平台、认证接口均为仓储化实现，可切 SQL |
 | 5. 感知与告警服务 | 已完成 | IoT、telemetry、weather、message |
-| 6. 作业、装备、水肥与决策 | 进行中 | operation/control/decision/finance |
-| 7. 视频、文件、溯源与网关 | 进行中 | video/file/trace/gateway |
-| 8. 前端功能接入 | 进行中 | 菜单、接口、页面和权限 |
+| 6. 作业、装备、水肥与决策 | 已完成（水肥配比除外） | operation/control/decision/finance |
+| 7. 视频、文件、溯源与网关 | 已完成（AI 联动除外） | video/file/trace/gateway |
+| 8. 前端功能接入 | 已完成 | 菜单、接口、页面和权限 |
 | 9. 全量验证与交付 | 已完成 | build/test/运行说明 |
 
 ## 需求矩阵（首版）
 
 | 需求域 | 文档要求 | 目标实现 | 当前判断 |
 | --- | --- | --- | --- |
-| 地块主数据 | 地块档案、六段式编码、CGCS2000、片区归属 | `plot-service` + `@agri/plot-core` | 公共能力已有，服务需扩展 |
-| 一张图 | 地块、线路、设备、天气、快捷入口 | web dashboard + plot/iot/weather API | 地图与看板已有基础，需要接口化 |
-| 基础信息 | 片区、导航、线路、水电网管线 | `platform-service` / `plot-service` | 待实现 |
-| 四情监控 | 墒情、苗情、虫情、灾情、气象、阈值告警 | `telemetry-service` / `weather-service` / `message-service` | 待实现 |
-| 视频监控 | 实时、云台、回放、AI 联动 | `video-service` / `file-service` | 待实现 |
-| 设备与作业 | 设备控制、播种、灌溉、除草、植保、路径调度 | `iot-service` / `control-service` / `operation-service` | 待实现 |
-| 水肥一体化 | 配比、搅拌、变量灌溉、联动策略 | `control-service` / `decision-service` | 待实现 |
-| 智能决策 | 规则、处方、识别、问答 | `decision-service` | 待实现 |
-| 核算与溯源 | 投入产出、农事记录、追溯 | `finance-service` / `trace-service` | 待实现 |
-| 系统支撑 | 认证、角色、区域权限、审计、文件 | `auth-service` / `gateway-service` / `file-service` | 待实现 |
+| 地块主数据 | 地块档案、六段式编码、CGCS2000、片区归属 | `plot-service` + `@agri/plot-core` | 已完成：CRUD/软删/边界统计/GeoJSON 边界与地图绘制，SQL 仓储可切 |
+| 一张图 | 地块、线路、设备、天气、快捷入口 | web dashboard + plot/iot/weather API | 部分完成：地块边界、设备点位、图层切换、天气与趋势已接口化；线路/管线图层未做 |
+| 基础信息 | 片区、导航、线路、水电网管线 | `platform-service` / `plot-service` | 部分完成：租户、角色权限、审计已落库；片区/线路/管线无独立模块 |
+| 四情监控 | 墒情、苗情、虫情、灾情、气象、阈值告警 | `telemetry-service` / `weather-service` / `message-service` | 部分完成：墒情读数/历史曲线/阈值告警/事件消息、达州气象已落地；苗情/虫情/灾情无采集与页面 |
+| 视频监控 | 实时、云台、回放、AI 联动 | `video-service` / `file-service` | 部分完成：摄像机、HLS 播放、云台、录像查询已实现；AI 识别联动未做 |
+| 设备与作业 | 设备控制、播种、灌溉、除草、植保、路径调度 | `iot-service` / `control-service` / `operation-service` | 已完成（不含真实农机调度）：指令队列、任务 CRUD 与流转、路径规划、二次确认与权限校验 |
+| 水肥一体化 | 配比、搅拌、变量灌溉、联动策略 | `control-service` / `decision-service` | 部分完成：水肥指令与墒情/降雨处方已联动；配比计算、搅拌策略、变量灌溉曲线未做 |
+| 智能决策 | 规则、处方、识别、问答 | `decision-service` | 部分完成：规则 CRUD 与热更新、处方留痕、效果回流调优、规则式问答；图像识别未做 |
+| 核算与溯源 | 投入产出、农事记录、追溯 | `finance-service` / `trace-service` | 已完成：投入产出与利润汇总、生产档案（含事件自动建档）、追溯码查询 |
+| 系统支撑 | 认证、角色、区域权限、审计、文件 | `auth-service` / `gateway-service` / `file-service` | 已完成：认证/会话/角色/权限/审计/对象存储；会话持久化与强口令散列本轮补强 |
 
 ## 已完成
 
@@ -204,14 +204,69 @@
 ### 2026-11-05（续）：菜单跳转与首页地图定位修复
 
 - 侧边菜单 404：`getRoutes()` 根记录的子项仍使用相对 `path`（如 `plot/list`），而 Element Plus 菜单 `router` 模式按当前路由做相对跳转，在深层页面会拼成 `/plot/plot/list`。`MainLayout.vue` 改为统一用 `resolvePath` 生成绝对地址，单页与分组子项均从 `/` 起算。
-- 首页地图：地图中心保持在四川达州（智耘蜀芯）一带（`31.2096, 107.4679`），演示边界与地块详情空态中心同步保持该坐标，仅将地图状态文案改为「天地图 · 智耘蜀芯农情中心」；上一步误改为黑龙江赵光农场的坐标、天气与地块默认值已全部回退。
+- 首页地图：地图中心保持在四川达州（智耘蜀芯）一带，默认中心改为 `30.982425, 107.421325`（Leaflet 纬度在前），演示边界同步围绕该坐标；地块详情空态中心同步；地图状态文案为「天地图 · 智耘蜀芯农情中心」；上一步误改为黑龙江赵光农场的坐标、天气与地块默认值已全部回退。
+- 地块边界绘制：新增 `components/PlotPolygonEditor.vue`，在新增/编辑地块页内嵌天地图，单击地图逐点添加顶点，自动闭合成支持任意顶点的不规则多边形；提供撤销上一点、清空、顶点序号与按边界计算的亩数。绘制结果以 `[经度, 纬度]` 写入 `form.coordinates`，提交时转为 GeoJSON Polygon；编辑已有地块时从 `geom` 反解边界继续编辑。新增地块要求至少 3 个顶点，编辑旧地块未重绘时不会覆盖原 `geom`。
+
+### 2026-11-05（续）：完成度审计与差异对比
+
+按「需求文档 → 旧进度表 → 当前代码」逐项核对：旧表把阶段 3/4/6/7/8 与多数需求域写成「进行中/待实现」，与代码实际严重不符，本节以代码为准重写结论。
+
+| 维度 | 旧文档写法 | 代码实际 | 处理 |
+| --- | --- | --- | --- |
+| 阶段 3 公共契约 | 进行中 | contracts/config/shared/db/mq/observability/testing 均有实现与单测 | 改「已完成」 |
+| 阶段 4 地块与平台 | 进行中 | plot/platform/auth 全部仓储化，内置数据与 SQL 两套实现 | 改「已完成」 |
+| 阶段 6 作业与决策 | 进行中 | operation/control/decision/finance 接口、事件消费、处方回流齐备 | 改「已完成」，水肥配比标注缺口 |
+| 阶段 7 视频文件溯源网关 | 进行中 | video/file/trace/gateway 接口与对象存储、鉴权齐备 | 改「已完成」，AI 联动标注缺口 |
+| 阶段 8 前端接入 | 进行中 | 全部业务页接真实接口，含权限收口、403 页、地图绘制 | 改「已完成」 |
+| 需求矩阵 | 多数「待实现」 | 十个需求域均有对应实现，其中 4 个完整、6 个部分完成 | 行内改写为真实判断 |
+| auth 会话 | 文档写「开发期内存会话」 | 仍是进程内 `Map`，重启即失效 | 本轮已改为 `auth_sessions` + `SessionRepository` |
+| auth 口令 | 文档写「sha256，待换」 | `sha256(agri:password)`，无盐 | 本轮已改 scrypt（随机盐，兼容旧散列） |
+| 刷新令牌 | `AUTH_POLICY` 已列 `/auth/refresh`，前端已调用 | 服务端无此路由，调用 404 | 本轮已补滑动续期接口 |
+| 部署编排 | 文档写「待补容器镜像」 | 无任何 Dockerfile，compose 仅 postgis/minio | 已补 Dockerfile 双目标，并已在本机起 `app`+`edge` 实测 |
+| 苗情/虫情/灾情 | 文档要求四情 | 只有墒情与气象链路 | 部分完成，列入下一步第 3 项 |
+| 视频 AI 联动 | 文档要求 AI 联动 | 只有取流与云台 | 部分完成，列入下一步第 3 项 |
+| 水肥配比/搅拌 | 文档要求配比与策略 | 只有水肥指令与处方 | 部分完成，列入下一步第 3 项 |
+| 一张图线路/管线 | 文档要求线路与管线 | 只有地块与设备点位 | 部分完成，列入下一步第 3 项 |
+
+已完成项的量化基线（本轮审计前复验）：15 个 HTTP 服务、37 个测试文件 / 149 个用例、8 个冒烟脚本（services/gateway/authz/decision-telemetry/events/identity/consumers/messages）全部通过。
+
+### 2026-11-05（续）：登录会话持久化与口令强散列
+
+- 新增迁移 `infra/postgres/migrations/007_auth_sessions.sql`：`auth_sessions`（`token_hash` 主键、`user_id` 外键级联、`expires_at`/`created_at`/`refreshed_at` 与两个索引）。库里只存 token 的 sha256 散列，token 本身是 32 字节随机串，库被读走也无法直接冒用。
+- 新增 `apps/auth-service/src/session.repository.ts`：`SessionRepository` 契约 + 内存实现 + `SqlSessionRepository`；过期判断下推到 SQL（`expires_at > now()`）并保留读取兜底，支持按账号回收（删号/改密）与启动期清理。
+- 新增 `apps/auth-service/src/password.ts`：口令改为 scrypt（N=16384、r=8、p=1、16 字节随机盐），存储格式 `scrypt$N$r$p$salt$hash`；`verifyPassword` 兼容旧的 `sha256(agri:password)`，`needsRehash` 识别旧散列，登录成功时就地升级，历史账号无需批量改密。
+- `auth-service` HTTP 改为注入会话仓储：登录写入 `auth_sessions`（TTL 由 `AUTH_SESSION_TTL_SECONDS` 控制，默认 7200s），内部会话接口、`userinfo`、`logout`、删号、改密全部走仓储；新增 `POST /api/v1/auth/refresh` 滑动续期（沿用同一 token，避免前端并发请求互相踢下线）。
+- `main.ts` 在 SQL 模式下注入 `SqlSessionRepository` 并在启动时清理过期会话；`.env.example` 增加 `AUTH_SESSION_TTL_SECONDS`。
+- 测试：新增 `test/password.spec.ts`（3 用例：随机盐、坏散列拒绝、旧 sha256 兼容）与 `test/session.repository.spec.ts`（6 用例：过期/续期/按账号回收/清理，SQL 侧固定「只写散列」「过期下推」「ISO 时间」）；`http.spec.ts` 增加 4 个用例（共享仓储跨实例仍可解析旧 token、refresh 续期与登出失效、改密回收会话、旧 sha256 登录升级）。
+- `scripts/smoke-identity.mjs` 增加重启后「旧 token 换会话 + refresh 沿用原 token」断言。
+
+### 2026-11-05（续）：部署编排与生产配置
+
+- 新增根目录 `Dockerfile`（两个目标）与 `.dockerignore`：`build` 阶段安装依赖、`tsc -b` 全量编译、前端打包并剔除 `node_modules`；`app` 阶段按生产依赖重装后运行 `scripts/start-services.mjs`，启动前先执行 `migrate-postgres.mjs` 与 `init-minio.mjs`；`edge` 阶段以 nginx 承载前端静态资源、`/api` 反代与 HTTPS 终止（镜像内置自签证书，可用卷覆盖）。
+- 新增 `infra/edge/nginx.conf`：80 跳转 443、TLS 1.2/1.3、安全响应头、gzip、SPA history 回落、静态资源长缓存、`/api` 转发到 `app:8080` 并附带 `X-Request-Id`。
+- `infra/docker-compose.yml` 新增 `app` 与 `edge`（`profiles: ["app"]`，默认仍只起 PostGIS/MinIO）：应用容器内固定 `AUTH_GUARD_MODE=enforce`、`GATEWAY_AUTH_ENABLED=true`，数据库与 S3 指向 compose 服务名，`INTERNAL_TOKEN`/`AUTH_SESSION_TTL_SECONDS`/连接池由环境变量覆盖；健康检查用 node fetch 探测网关 `/health`。
+- `gateway-service` 支持 `SERVICE_HOST`（默认 `127.0.0.1`），`scripts/start-services.mjs` 只把该变量作用于网关：容器里网关监听 `0.0.0.0`，其余服务保持回环地址，不随端口映射暴露。
+- 文档同步：根 `README.md` 增加「容器化部署」小节，`infra/README.md` 增加部署目标、命令、证书与单副本迁移约束。
+
+### 2026-11-05（续）：本机容器化部署实录
+
+- 构建：`docker compose -f infra/docker-compose.yml --profile app build app edge` 成功产出 `agri-platform:local`、`agri-platform-edge:local`。当前环境 `registry-1.docker.io` 不可达（解析到 `198.18.x` 且 TLS 失败），改为从 `docker.m.daocloud.io/library/*` 拉取 `node:24-bookworm-slim`、`nginx:1.27-alpine` 后重打官方 tag，Dockerfile 与 compose 不需要改成私有源。
+- 构建期两处缺陷已修：`Dockerfile` 的 `build` 阶段原先没有 `infra/postgres` 与 `scripts`，`app` 阶段 `COPY --from=build` 直接报 `not found`，改为从构建上下文直拷；前端地图 Key 的 `ARG` 为空时 `ENV` 会用空串盖掉 `apps/web/.env` 里的 Key，改为空值时 `unset`，避免打包出无 Key 的地图。
+- 运行期发现并修复真实缺陷：`plot-service` 在 `PLOT_REPOSITORY_MODE=sql` 下仍注入 `createExamplePrismaFactory()` 的示例内存客户端，`listByTenant` 拿到 `null` 后 `.map` 抛错（`GET /api/v1/plots` 返回 `PLOT-400`），新建地块也不落库；现将 SQL 模式改为注入 `PgClientAdapter.fromUrl(...)`，内存模式保持不变。
+- 实测结果：`app`（15 服务，网关 `0.0.0.0:8080`）与 `edge`（80→443）均 healthy；登录、`userinfo`、`refresh`、地块列表/边界/统计、设备、农事任务、角色/权限、遥测、天气、控制指令、财务、溯源、视频、消息共 22 个接口全部 200；新建地块返回 201 并在 `plot_records` 落库（含中文名称与多边形边界）；`docker compose restart app` 后旧 token 与地块数据均仍可用。
+- 沿用约定：`app` 与 `edge` 挂在 `profiles: ["app"]`，不写 profile 时 compose 仍只起 PostGIS/MinIO；`apps/web` 的 `dashboardApi` 为无引用的死代码，`/api/v1/dashboard/*` 404 不影响页面。
 
 ## 下一步（中断后从这里继续）
 
-首版功能已全部交付，无阻塞项。以下为上线前可选增强（未列入本轮范围）：
+首版业务链路已闭环，剩余工作是业务子项补齐：
 
-1. 会话与口令加固：将 auth-service 的内存会话替换为持久化/JWT 方案，口令由 sha256 换成 bcrypt/argon2。
-2. 部署编排：补充容器镜像、网关 HTTPS、数据库连接池与 `AUTH_GUARD_MODE=enforce` 的部署配置。
+1. **已完成**：会话持久化与口令强散列（`007` 迁移 + `SessionRepository` + scrypt + `POST /auth/refresh`），旧 token 重启后仍有效，改密/删号即时回收会话。
+2. **已完成**：部署编排（`Dockerfile` 双目标、compose `app`/`edge`、HTTPS 终止、`AUTH_GUARD_MODE=enforce`、连接池与内部凭证配置）；已在本机完成镜像构建与容器实跑复验（详见「本机容器化部署实录」）。环境侧约束：`docker.io` 直连不可用，需先把基础镜像经镜像源拉取并重打 tag。
+3. **待办**：业务增强（补齐需求矩阵中部分完成项）
+   - 苗情/虫情/灾情：采集指标、阈值规则与页面；
+   - 视频 AI 联动：识别事件 → 告警/消息；
+   - 水肥配比与搅拌策略、变量灌溉曲线；
+   - 一张图的线路/管线图层。
 
 ## 验证记录
 
@@ -398,5 +453,21 @@
 | 2026-11-05 | `$env:DB_URL=...; node scripts/smoke-identity.mjs` | 通过：重启后仍可登录 |
 | 2026-11-05 | `$env:DB_URL=...; node scripts/smoke-consumers.mjs` | 通过：`SMOKE PASS` |
 | 2026-11-05 | `$env:DB_URL=...; node scripts/smoke-message-preferences.mjs` | 通过：`SMOKE PASS` |
-| 2026-11-05 | `pnpm --filter @agri/web build` | 通过：菜单绝对路径修复、地图保持四川智耘蜀芯定位后（built in 10.59s） |
+| 2026-11-05 | `pnpm --filter @agri/web build` | 通过：地图中心 `30.982425, 107.421325` 与地图绘制多边形后（built in 17.74s） |
 | 2026-11-05 | `npx tsc -b` | 通过（黑龙江相关改动已回退） |
+| 2026-11-05 | `npx vitest run apps/auth-service` | 通过：4 个测试文件、23 个用例（口令/会话/账号） |
+| 2026-11-05 | `$env:DB_URL=...; node scripts/migrate-postgres.mjs` | 通过：007_auth_sessions.sql 已应用（13 ms） |
+| 2026-11-05 | `$env:DB_URL=...; node scripts/smoke-identity.mjs` | 通过：重启后旧 token 仍可换会话、refresh 沿用原 token |
+| 2026-11-05 | `npx tsc -b` | 通过（会话/口令加固与网关监听改造后） |
+| 2026-11-05 | `$env:DB_URL=...; npx vitest run` | 通过：39 个测试文件、162 个用例 |
+| 2026-11-05 | `$env:TEMP=...\.tmp; pnpm --filter @agri/web build` | 通过：built in 11.08s |
+| 2026-11-05 | `$env:DB_URL=...; node scripts/smoke-services.mjs` | 通过：15 个服务健康 |
+| 2026-11-05 | `node scripts/smoke-authz.mjs` | 通过：网关 401/403 与服务侧守卫无回归 |
+| 2026-11-05 | `$env:DB_URL=...; node scripts/smoke-gateway.mjs` | 通过：登录→401/403→地块→控制确认→角色/用户管理 |
+| 2026-11-05 | `docker compose -f infra/docker-compose.yml --profile app config` | 通过：app/edge/postgres/minio 四个服务解析正常 |
+| 2026-11-05 | `docker compose ... build app edge` | 通过：`agri-platform:local`、`agri-platform-edge:local` 构建成功（基础镜像经 `docker.m.daocloud.io` 拉取后重打 tag） |
+| 2026-11-05 | `docker compose ... up -d` | 通过：app/edge 两容器 healthy，postgres/minio 复用既有容器 |
+| 2026-11-05 | `curl -k https://localhost/`、`/healthz` | 通过：SPA 200、健康检查 200、http 301 跳 https |
+| 2026-11-05 | 经 edge 登录 + 22 个业务接口 | 通过：登录/userinfo/refresh/plots(stats,bounds,list)/devices/farm-tasks/platform/telemetry/weather/control/finance/trace/video/messages 全部 200 |
+| 2026-11-05 | `POST /api/v1/plots` 经 edge | 通过：201，`plot_records` 落库 1 行（中文名称、多边形 geom） |
+| 2026-11-05 | `docker compose ... restart app` | 通过：重启后旧 token 仍可 `userinfo`、地块数据仍在 |

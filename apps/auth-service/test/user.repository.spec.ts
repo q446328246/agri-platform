@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PrismaClientLike, Tx } from "@agri/db";
 
-import { hashPassword, InMemoryUserRepository, seedUsers, SqlUserRepository } from "../src/user.repository.js";
+import { hashPassword, InMemoryUserRepository, seedUsers, SqlUserRepository, verifyPassword } from "../src/user.repository.js";
 import type { UserRecord } from "../src/user.repository.js";
 
 /**
@@ -58,7 +58,10 @@ describe("内存账号仓储", () => {
 
     await repository.updatePassword("user-2", hashPassword("newpass123"), "2026-11-05T01:00:00.000Z");
     const updated = await repository.findById("user-2");
-    expect(updated?.passwordHash).toBe(hashPassword("newpass123"));
+    // scrypt 每次加随机盐，不能按字符串比对，只能按口令校验
+    expect(updated?.passwordHash).not.toBe(hashPassword("newpass123"));
+    expect(verifyPassword("newpass123", updated?.passwordHash ?? "")).toBe(true);
+    expect(verifyPassword("123456", updated?.passwordHash ?? "")).toBe(false);
     expect(updated?.updatedAt).toBe("2026-11-05T01:00:00.000Z");
 
     await repository.remove("user-2");

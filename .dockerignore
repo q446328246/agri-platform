@@ -1,0 +1,13 @@
+# 构建上下文裁剪：依赖与产物都在镜像内重新生成，不随上下文传入
+.git
+.gitignore
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.tmp
+.runtime
+Microsoft
+zhao-guang-farm-master
+*.log
+*.docx
+*_提取.txt

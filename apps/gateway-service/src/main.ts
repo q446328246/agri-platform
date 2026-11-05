@@ -23,7 +23,10 @@ async function bootstrap(): Promise<void> {
         })
       : undefined;
     const server = createGatewayHttpServer(authorizer ? { authorizer } : {});
-    server.listen(port, '127.0.0.1', () => console.log(`gateway-service HTTP started on ${port}${authEnabled ? '（鉴权开启）' : '（鉴权关闭）'}`));
+    // 容器部署时网关是唯一对外入口，需要 SERVICE_HOST=0.0.0.0 才能被反代或端口映射访问；
+    // 本机默认仍只监听回环地址，不把接口暴露到局域网。
+    const host = process.env.SERVICE_HOST ?? '127.0.0.1';
+    server.listen(port, host, () => console.log(`gateway-service HTTP started on ${host}:${port}${authEnabled ? '（鉴权开启）' : '（鉴权关闭）'}`));
     return;
   }
   console.log('gateway-service service started (demo mode)');

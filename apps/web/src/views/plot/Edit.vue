@@ -87,15 +87,10 @@
         <el-form-item label="当前作物">
           <el-input v-model="form.currentCrop" placeholder="请输入当前种植作物" />
         </el-form-item>
-        <el-form-item label="地块边界">
-          <div class="coordinate-input">
-            <el-button type="primary" plain @click="drawBoundary">
-              <el-icon><EditPen /></el-icon>地图绘制
-            </el-button>
-            <span v-if="form.coordinates && form.coordinates.length > 0" class="ml-10">
-              已绘制 {{ form.coordinates.length }} 个坐标点
-            </span>
-            <span v-else class="text-gray ml-10">暂未绘制</span>
+        <el-form-item label="地块边界" prop="coordinates">
+          <div class="boundary-editor">
+            <PlotPolygonEditor v-model="form.coordinates" @area-change="handleBoundaryArea" />
+            <div class="boundary-editor__hint">单击地图逐个添加顶点，至少 3 个点自动闭合成不规则多边形；面积会按边界自动回填，可再手动修正。</div>
           </div>
         </el-form-item>
         <el-form-item label="备注">
@@ -122,6 +117,8 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { plotApi } from '@/api'
+import PlotPolygonEditor from '@/components/PlotPolygonEditor.vue'
+import { parsePlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 import type { Plot, PlotForm } from '@/types'
 import { PlotType as PT, SoilType as ST } from '@/types'
 
@@ -186,7 +183,17 @@ const rules: FormRules = {
   type: [{ required: true, message: '请选择地块类型', trigger: 'change' }],
   regionCode: [{ required: true, message: '请选择行政区', trigger: 'change' }],
   villageCode: [{ required: true, message: '请选择村组', trigger: 'change' }],
-  areaMu: [{ required: true, message: '请输入面积', trigger: 'blur' }]
+  areaMu: [{ required: true, message: '请输入面积', trigger: 'blur' }],
+  coordinates: [{
+    validator: (_rule, value, callback) => {
+      const count = Array.isArray(value) ? value.length : 0
+      // 编辑旧数据时允许尚未补全边界，但已绘制的边界不能退化成线段/点
+      if (count > 0 && count < 3) callback(new Error('多边形至少需要 3 个顶点'))
+      else if (!isEdit.value && count < 3) callback(new Error('请在地图上绘制地块边界'))
+      else callback()
+    },
+    trigger: 'change'
+  }]
 }
 
 function handleRegionChange(value: string[]) {
@@ -195,8 +202,8 @@ function handleRegionChange(value: string[]) {
   }
 }
 
-function drawBoundary() {
-  ElMessage.info('地图绘制功能请接入实际地图组件（如高德/百度地图）后使用')
+function handleBoundaryArea(area: number) {
+  if (area > 0) form.areaMu = Number(area.toFixed(2))
 }
 
 async function handleSubmit() {
@@ -231,6 +238,11 @@ async function loadDetail() {
   try {
     const res: Plot = await plotApi.getById(route.params.id as string)
     Object.assign(form, res)
+    const boundary = parsePlotBoundary(res as unknown as PlotBoundarySource)
+    if (boundary?.rings[0]?.length) {
+      // 服务端存的是 GeoJSON [经度, 纬度]，转回表单坐标后可直接继续编辑
+      form.coordinates = boundary.rings[0].map(([lat, lng]) => [Number(lng.toFixed(6)), Number(lat.toFixed(6))] as [number, number])
+    }
     if (res.regionCode) {
       regionPath.value = ['510000', '511700', res.regionCode]
     }
@@ -245,14 +257,13 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.coordinate-input {
-  display: flex;
-  align-items: center;
+.boundary-editor {
+  width: 100%;
 }
-.ml-10 {
-  margin-left: 10px;
-}
-.text-gray {
+.boundary-editor__hint {
+  margin-top: 6px;
   color: #909399;
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

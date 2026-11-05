@@ -37,7 +37,7 @@ function render(boundary: PlotBoundary | null) {
   if (!boundary) {
     empty.value = true
     message.value = '服务端暂无地块边界，可先补全边界后查看'
-    map.setView([31.2096, 107.4679], 11)
+    map.setView([30.982425, 107.421325], 15)
     return
   }
   empty.value = false
