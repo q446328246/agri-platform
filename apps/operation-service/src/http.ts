@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { ApiResponse, PageResult } from "@agri/contracts";
+import { authorizeRequest } from "@agri/shared";
 
 type TaskStatus = "PENDING" | "RUNNING" | "COMPLETED" | "CANCELLED";
 interface Task { id: string; tenantId: string; plotCode: string; type: "TILLAGE" | "SEEDING" | "IRRIGATION" | "WEEDING" | "SPRAYING"; name: string; status: TaskStatus; scheduledAt?: string; createdAt: string }
@@ -12,6 +13,8 @@ async function json(req: IncomingMessage): Promise<Record<string, unknown>> { co
 function page(query: URLSearchParams): PageResult<Task> { const pageNo = Math.max(1, Number(query.get("page") || 1)); const size = Math.min(200, Math.max(1, Number(query.get("size") || 20))); const keyword = (query.get("keyword") || "").trim().toLowerCase(); const status = query.get("status"); const filtered = tasks.filter((task) => (!keyword || `${task.name} ${task.plotCode}`.toLowerCase().includes(keyword)) && (!status || task.status === (status === "IN_PROGRESS" ? "RUNNING" : status))); const start = (pageNo - 1) * size; return { items: filtered.slice(start, start + size), total: filtered.length, page: pageNo, size, pages: Math.ceil(filtered.length / size) }; }
 export function createOperationHttpServer(): Server { return createServer(async (req, res) => { const traceId = trace(req); const url = new URL(req.url ?? "/", "http://localhost"); try {
   if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "operation" }, traceId); return; }
+  const denied = authorizeRequest(req, { read: "operation:read", write: "operation:write" });
+  if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
   if (req.method === "GET" && url.pathname === "/api/v1/farm-tasks") { send(res, 200, page(url.searchParams), traceId); return; }
   if (req.method === "POST" && url.pathname === "/api/v1/farm-tasks") { const body = await json(req); const task: Task = { id: randomUUID(), tenantId: req.headers["x-tenant-id"]?.toString() || "tenant-demo", plotCode: String(body.plotCode ?? ""), type: (body.type as Task["type"]) || "IRRIGATION", name: String(body.name ?? "未命名农事任务"), status: "PENDING", createdAt: new Date().toISOString() }; if (typeof body.scheduledAt === "string") task.scheduledAt = body.scheduledAt; tasks.unshift(task); send(res, 201, task, traceId); return; }
   const statusMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/status$/); const taskId = statusMatch?.[1];

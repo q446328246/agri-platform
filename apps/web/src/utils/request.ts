@@ -17,14 +17,6 @@ service.interceptors.request.use(
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
-    const userInfo = localStorage.getItem('userInfo')
-    if (userInfo) {
-      try {
-        config.headers['X-User-Id'] = JSON.parse(userInfo).id
-      } catch {
-        localStorage.removeItem('userInfo')
-      }
-    }
     const requestId = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`
     config.headers['X-Request-Id'] = requestId
     return config
@@ -62,11 +54,19 @@ service.interceptors.response.use(
         case 400:
           message = '请求参数错误'
           break
-        case 401:
-          message = '未授权，请登录'
+        case 401: {
+          // token 失效：清掉本地身份并回到登录页；登录失败本身不跳转，保留服务端提示
+          message = error.response.data?.message || '未授权，请登录'
+          const hadToken = Boolean(localStorage.getItem('token'))
+          localStorage.removeItem('token')
+          localStorage.removeItem('userInfo')
+          if (hadToken && window.location.pathname !== '/login') {
+            window.location.href = '/login'
+          }
           break
+        }
         case 403:
-          message = '拒绝访问'
+          message = error.response.data?.message || '无权限执行该操作'
           break
         case 404:
           message = '请求资源不存在'

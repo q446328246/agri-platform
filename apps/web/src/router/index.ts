@@ -1,5 +1,10 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
+import { cachedPermissions, checkPermission } from '@/utils/permission'
 
+/**
+ * 路由与权限的对应关系：父级看守菜单是否展示，子级看守具体页面。
+ * 权限码与 packages/contracts 的权限目录一致，缺省表示仅需登录。
+ */
 const routes: RouteRecordRaw[] = [
   {
     path: '/login',
@@ -16,37 +21,37 @@ const routes: RouteRecordRaw[] = [
         path: 'dashboard',
         name: 'Dashboard',
         component: () => import('@/views/dashboard/Index.vue'),
-        meta: { title: '数据看板', icon: 'Odometer' }
+        meta: { title: '数据看板', icon: 'Odometer', permission: 'dashboard:read' }
       },
       {
         path: 'plot',
         name: 'Plot',
         redirect: '/plot/list',
-        meta: { title: '地块管理', icon: 'MapLocation' },
+        meta: { title: '地块管理', icon: 'MapLocation', permission: 'plot:read' },
         children: [
           {
             path: 'list',
             name: 'PlotList',
             component: () => import('@/views/plot/List.vue'),
-            meta: { title: '地块列表' }
+            meta: { title: '地块列表', permission: 'plot:read' }
           },
           {
             path: 'create',
             name: 'PlotCreate',
             component: () => import('@/views/plot/Edit.vue'),
-            meta: { title: '新增地块', hidden: true }
+            meta: { title: '新增地块', hidden: true, permission: 'plot:write' }
           },
           {
             path: 'edit/:id',
             name: 'PlotEdit',
             component: () => import('@/views/plot/Edit.vue'),
-            meta: { title: '编辑地块', hidden: true }
+            meta: { title: '编辑地块', hidden: true, permission: 'plot:write' }
           },
           {
             path: 'detail/:id',
             name: 'PlotDetail',
             component: () => import('@/views/plot/Detail.vue'),
-            meta: { title: '地块详情', hidden: true }
+            meta: { title: '地块详情', hidden: true, permission: 'plot:read' }
           }
         ]
       },
@@ -54,19 +59,19 @@ const routes: RouteRecordRaw[] = [
         path: 'farm',
         name: 'Farm',
         redirect: '/farm/task',
-        meta: { title: '农事管理', icon: 'Calendar' },
+        meta: { title: '农事管理', icon: 'Calendar', permission: 'operation:read' },
         children: [
           {
             path: 'task',
             name: 'FarmTask',
             component: () => import('@/views/farm/Task.vue'),
-            meta: { title: '农事任务' }
+            meta: { title: '农事任务', permission: 'operation:read' }
           },
           {
             path: 'record',
             name: 'FarmRecord',
             component: () => import('@/views/farm/Record.vue'),
-            meta: { title: '农事记录' }
+            meta: { title: '农事记录', permission: 'operation:read' }
           }
         ]
       },
@@ -74,19 +79,25 @@ const routes: RouteRecordRaw[] = [
         path: 'device',
         name: 'Device',
         redirect: '/device/list',
-        meta: { title: '设备管理', icon: 'Monitor' },
+        meta: { title: '设备管理', icon: 'Monitor', permission: 'device:read' },
         children: [
           {
             path: 'list',
             name: 'DeviceList',
             component: () => import('@/views/device/List.vue'),
-            meta: { title: '设备列表' }
+            meta: { title: '设备列表', permission: 'device:read' }
           },
           {
             path: 'monitor',
             name: 'DeviceMonitor',
             component: () => import('@/views/device/Monitor.vue'),
-            meta: { title: '实时监控' }
+            meta: { title: '实时监控', permission: 'device:read' }
+          },
+          {
+            path: 'commands',
+            name: 'DeviceCommands',
+            component: () => import('@/views/device/Commands.vue'),
+            meta: { title: '控制指令', permission: 'device:read' }
           }
         ]
       },
@@ -94,19 +105,25 @@ const routes: RouteRecordRaw[] = [
         path: 'finance',
         name: 'Finance',
         component: () => import('@/views/finance/Index.vue'),
-        meta: { title: '投入产出', icon: 'Money' }
+        meta: { title: '投入产出', icon: 'Money', permission: 'finance:read' }
       },
       {
         path: 'trace',
         name: 'Trace',
         component: () => import('@/views/trace/Index.vue'),
-        meta: { title: '生产溯源', icon: 'Tickets' }
+        meta: { title: '生产溯源', icon: 'Tickets', permission: 'trace:read' }
       },
       {
         path: 'video',
         name: 'Video',
         component: () => import('@/views/video/Index.vue'),
-        meta: { title: '视频监控', icon: 'VideoCamera' }
+        meta: { title: '视频监控', icon: 'VideoCamera', permission: 'device:read' }
+      },
+      {
+        path: 'message',
+        name: 'Message',
+        component: () => import('@/views/message/Index.vue'),
+        meta: { title: '消息中心', icon: 'Bell', permission: 'message:read' }
       },
       {
         path: 'system',
@@ -118,17 +135,23 @@ const routes: RouteRecordRaw[] = [
             path: 'user',
             name: 'SystemUser',
             component: () => import('@/views/system/User.vue'),
-            meta: { title: '用户管理' }
+            meta: { title: '用户管理', permission: 'system:user' }
           },
           {
             path: 'role',
             name: 'SystemRole',
             component: () => import('@/views/system/Role.vue'),
-            meta: { title: '角色管理' }
+            meta: { title: '角色管理', permission: 'system:role' }
           }
         ]
       }
     ]
+  },
+  {
+    path: '/403',
+    name: 'Forbidden',
+    component: () => import('@/views/system/403.vue'),
+    meta: { title: '无访问权限' }
   },
   {
     path: '/:pathMatch(.*)*',
@@ -148,9 +171,15 @@ router.beforeEach((to, _from, next) => {
   const token = localStorage.getItem('token')
   if (to.meta.requiresAuth !== false && !token) {
     next('/login')
-  } else {
-    next()
+    return
   }
+  // 页面级权限：未授予时直接进 403，避免页面先渲染再被接口拒绝
+  const required = to.meta.permission as string | undefined
+  if (required && !checkPermission(cachedPermissions(), required)) {
+    next({ path: '/403', replace: true })
+    return
+  }
+  next()
 })
 
 export default router

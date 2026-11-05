@@ -1,0 +1,24 @@
+schema_version: 1
+module_path: ""
+title: 无人农场 AI 平台 Node.js 微服务 Monorepo
+scope:
+    - README.md
+    - IMPLEMENTATION_PROGRESS.md
+    - .gitignore
+    - .npmrc
+    - package.json
+    - pnpm-workspace.yaml
+    - pnpm-lock.yaml
+    - turbo.json
+    - vitest.config.ts
+    - tsconfig.json
+    - Node.js公共包接口定义与导出清单_提取.txt
+    - Node.js微服务工程脚手架说明_提取.txt
+    - 无人农场AI平台开发方案_提取.txt
+    - .env.example
+    - Node.js公共包接口定义与导出清单.docx
+    - Node.js微服务工程脚手架说明.docx
+    - 无人农场AI平台开发方案 (1).docx
+source_files: []
+depends_on: []
+related_to: []

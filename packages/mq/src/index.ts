@@ -33,6 +33,20 @@ export {
 } from "./outbox.js";
 export type { OutboxContext, OutboxRecord, OutboxStore } from "./outbox.js";
 
+export {
+  EventLogConsumer,
+  EventLogPublisher,
+  InMemoryEventLogStore,
+  PgEventLogStore,
+} from "./event-bus.js";
+export type {
+  EventLogConsumerOptions,
+  EventLogEntry,
+  EventLogPublisherDefaults,
+  EventLogSqlClient,
+  EventLogStore,
+} from "./event-bus.js";
+
 export { buildHandlers, getHandlerRegistrations, HANDLER_METADATA, registerHandler } from "./decorators.js";
 export type { HandlerRegistration } from "./decorators.js";
 

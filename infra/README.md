@@ -6,7 +6,7 @@
 docker compose -f infra/docker-compose.yml up -d
 ```
 
-PostgreSQL 使用 `agri/agri` 账号创建 `agri` 数据库，并自动执行 `infra/postgres/001_initial_schema.sql`。MinIO 控制台地址为 `http://127.0.0.1:9001`，默认账号为 `minioadmin/minioadmin`。
+PostgreSQL 使用 `agri/agri` 账号创建 `agri` 数据库，并自动执行 `infra/postgres/001_initial_schema.sql`。后续变更在 `infra/postgres/migrations` 下按编号递增追加（当前已到 006，包含决策/遥测、事件总线、账号角色、控制指令与消息偏好）。MinIO 控制台地址为 `http://127.0.0.1:9001`，默认账号为 `minioadmin/minioadmin`。
 
 数据库已运行时，也可以使用标准迁移命令：
 

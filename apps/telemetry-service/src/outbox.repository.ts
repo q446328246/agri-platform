@@ -1,6 +1,7 @@
 import type { PrismaClientLike, Tx } from "@agri/db";
 import type { EventTopicValue } from "@agri/contracts";
 import type { OutboxRecord, OutboxStore } from "@agri/mq";
+import { toIsoTimestamp } from "@agri/shared";
 
 /**
  * 遥测服务的本地消息表存储。
@@ -44,10 +45,10 @@ export class TelemetryOutboxStore implements OutboxStore {
         tenantId: String(row.tenant_id),
         traceId: String(row.trace_id),
         producer: String(row.producer),
-        createdAt: String(row.created_at),
+        createdAt: toIsoTimestamp(row.created_at),
         retryCount: Number(row.retry_count),
       };
-      if (row.published_at !== null && row.published_at !== undefined) record.publishedAt = String(row.published_at);
+      if (row.published_at !== null && row.published_at !== undefined) record.publishedAt = toIsoTimestamp(row.published_at);
       if (row.last_error !== null && row.last_error !== undefined) record.lastError = String(row.last_error);
       return record;
     });

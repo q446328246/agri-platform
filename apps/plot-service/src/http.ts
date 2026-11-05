@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 
 import type { ApiResponse, PageResult } from "@agri/contracts";
+import { authorizeRequest } from "@agri/shared";
 
 import type { PlotPatch, PlotRecord } from "./plot.repository.js";
 import type { PlotService, RegisterPlotInput } from "./plot.service.js";
@@ -46,6 +47,8 @@ export function createPlotHttpServer(service: PlotService): Server {
         send(response, 200, { status: "ok", service: "plot" }, requestTraceId);
         return;
       }
+      const denied = authorizeRequest(request, { read: "plot:read", write: "plot:write" });
+      if (denied) { send(response, denied.status, null, requestTraceId, denied.message); return; }
       if (url.pathname === `${API_PREFIX}/plots/stats` && request.method === "GET") {
         const plots = await service.listByTenant(request.headers["x-tenant-id"]?.toString() || "tenant-demo");
         const totalAreaMu = plots.reduce((sum, item) => sum + item.areaMu, 0);

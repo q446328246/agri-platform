@@ -11,6 +11,7 @@ import {
   omitUndefined,
   snowflakeId,
   squareMeterToMu,
+  toIsoTimestamp,
   toPageResult,
   ulid,
   ValidationError,
@@ -25,6 +26,19 @@ describe("共享工具", () => {
     expect(toPageResult({ items: [1, 2], total: 5, page: 1, size: 2 }).pages).toBe(3);
     expect(toPageResult({ items: [], total: 0, page: 0, size: 0 }).page).toBe(1);
     expect(toPageResult({ items: [], total: 0, page: 0, size: 0 }).size).toBe(1);
+  });
+
+  it("数据库时间值统一转 ISO，避免本地化文本写回 SQL", () => {
+    const date = new Date("2026-11-05T00:33:12.000Z");
+    expect(toIsoTimestamp(date)).toBe("2026-11-05T00:33:12.000Z");
+    expect(toIsoTimestamp("2026-11-05T08:33:12.000+08:00")).toBe("2026-11-05T00:33:12.000Z");
+    expect(toIsoTimestamp(date.getTime())).toBe("2026-11-05T00:33:12.000Z");
+    expect(toIsoTimestamp(null)).toBe("");
+    expect(toIsoTimestamp(undefined)).toBe("");
+    // 无法解析的字符串原样返回，保留排查线索
+    expect(toIsoTimestamp("not-a-time")).toBe("not-a-time");
+    // pg 返回的 Date 直接 String() 会得到带时区名称的本地化文本，必须经 toIsoTimestamp
+    expect(String(date)).not.toBe("2026-11-05T00:33:12.000Z");
   });
 
   it("单位换算符合亩与公顷的定义", () => {

@@ -294,6 +294,51 @@ export interface Recording {
   endedAt: string
   playbackUrl: string
 }
+
+/** 消息级别（与 @agri/contracts 一致） */
+export type MessageLevel = 'INFO' | 'WARNING' | 'CRITICAL'
+
+/** 消息订阅偏好：按来源主题控制是否接收与最低级别 */
+export interface MessagePreference {
+  topic: string
+  label: string
+  type: 'ALERT' | 'NOTICE'
+  enabled: boolean
+  minLevel: MessageLevel
+  updatedAt: string
+}
+// 系统用户（auth-service 返回，不含密码）
+export interface SystemUser {
+  id: string
+  username: string
+  name: string
+  phone: string
+  roles: string[]
+  permissions: string[]
+  tenantId: string
+  status: 'ACTIVE' | 'DISABLED'
+  createdAt: string
+  updatedAt: string
+}
+
+// 平台角色（platform-service 返回）
+export interface PlatformRole {
+  id: string
+  name: string
+  code: string
+  description: string
+  permissions: string[]
+  status: 'ACTIVE' | 'DISABLED'
+  createdAt: string
+  updatedAt: string
+}
+
+// 权限目录分组
+export interface PermissionGroup {
+  group: string
+  items: Array<{ code: string; name: string }>
+}
+
 // 菜单项
 export interface MenuItem {
   path: string;

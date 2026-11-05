@@ -7,6 +7,7 @@ import { InMemoryEventPublisher, InMemoryOutboxStore, OutboxService } from "@agr
 import type { OutboxStore } from "@agri/mq";
 import { EventTopic } from "@agri/contracts";
 import type { ThresholdBreachedPayload } from "@agri/contracts";
+import { authorizeRequest } from "@agri/shared";
 
 import { newReadingId } from "./reading.repository.js";
 import { InMemoryAlertRepository, InMemoryReadingRepository } from "./reading.repository.js";
@@ -76,6 +77,9 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
       if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "telemetry" }, traceId); return; }
+      // 设备直连上报不走用户身份，其余接口需要遥测读写权限
+      const denied = authorizeRequest(req, { read: "telemetry:read", write: "telemetry:write", publicPaths: ["/api/v1/telemetry/report"] });
+      if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
 
       // 最新读数：按设备过滤，每个设备每个指标只取最近一次
       if (req.method === "GET" && url.pathname === "/api/v1/telemetry/latest") {

@@ -1,5 +1,5 @@
 import type { PrismaClientLike, Tx } from "@agri/db";
-import { ulid } from "@agri/shared";
+import { toIsoTimestamp, ulid } from "@agri/shared";
 
 /** 遥测读数 */
 export interface Reading {
@@ -74,7 +74,7 @@ function toReading(row: Record<string, unknown>): Reading {
     metric: String(row.metric),
     value: Number(row.value),
     unit: String(row.unit),
-    recordedAt: String(row.recorded_at),
+    recordedAt: toIsoTimestamp(row.recorded_at),
   };
 }
 
@@ -86,10 +86,10 @@ function toAlert(row: Record<string, unknown>): TelemetryAlert {
     level: String(row.level),
     metric: String(row.metric),
     message: String(row.message),
-    createdAt: String(row.created_at),
+    createdAt: toIsoTimestamp(row.created_at),
     handled: Boolean(row.handled),
   };
-  if (row.handled_at !== null && row.handled_at !== undefined) alert.handledAt = String(row.handled_at);
+  if (row.handled_at !== null && row.handled_at !== undefined) alert.handledAt = toIsoTimestamp(row.handled_at);
   return alert;
 }
 

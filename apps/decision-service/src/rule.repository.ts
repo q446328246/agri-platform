@@ -1,4 +1,5 @@
 import type { PrismaClientLike, Tx } from "@agri/db";
+import { toIsoTimestamp } from "@agri/shared";
 
 /**
  * 决策规则仓储。
@@ -196,10 +197,10 @@ export class SqlRuleRepository implements RuleRepository {
       priority: Number(row.priority),
       condition: normalizeCondition(row.condition_json),
       action: normalizeAction(row.action_json, isRuleType(row.rule_type) ? row.rule_type : "IRRIGATION"),
-      createdAt: String(row.created_at),
-      updatedAt: String(row.updated_at),
+      createdAt: toIsoTimestamp(row.created_at),
+      updatedAt: toIsoTimestamp(row.updated_at),
     };
-    if (row.deleted_at !== null && row.deleted_at !== undefined) rule.deletedAt = String(row.deleted_at);
+    if (row.deleted_at !== null && row.deleted_at !== undefined) rule.deletedAt = toIsoTimestamp(row.deleted_at);
     return rule;
   }
 
@@ -259,7 +260,7 @@ export class SqlRuleRepository implements RuleRepository {
       priority: patch.priority ?? Number(row.priority),
       condition,
       action,
-      createdAt: String(row.created_at),
+      createdAt: toIsoTimestamp(row.created_at),
       updatedAt: patch.updatedAt,
     };
     await this.client.$executeRawUnsafe(

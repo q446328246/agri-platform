@@ -162,6 +162,34 @@ a {
   background: var(--bg-color);
 }
 
+// 页面容器与卡片：所有业务页统一使用，避免内容贴边
+.page-container {
+  padding: 20px;
+}
+
+.card-container {
+  background: white;
+  border-radius: 8px;
+  padding: 20px;
+  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.06);
+}
+
+// 通用工具类
+.mt-20 { margin-top: 20px; }
+.mb-20 { margin-bottom: 20px; }
+.text-center { text-align: center; }
+.flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+.flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 // 通用卡片样式
 .page-card {
   background: white;

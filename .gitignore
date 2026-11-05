@@ -7,3 +7,4 @@ zhao-guang-farm-master/
 .env
 .env.local
 coverage/
+.tmp/

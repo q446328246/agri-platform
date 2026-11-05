@@ -7,6 +7,8 @@ import type {
   PageResult, LoginParams, LoginResult,
   Camera, PlotStats, Recording,
   TelemetryHistoryPoint, TelemetryAlert,
+  MessagePreference, MessageLevel,
+  SystemUser, PlatformRole, PermissionGroup,
 } from '@/types'
 
 // 认证相关API
@@ -22,6 +24,22 @@ export const authApi = {
   },
   refreshToken(): Promise<LoginResult> {
     return post<LoginResult>('/auth/refresh')
+  },
+  /** 平台用户分页查询（与登录账号同一份数据） */
+  getUsers(params?: { page?: number; size?: number; keyword?: string; status?: 'ACTIVE' | 'DISABLED' }): Promise<PageResult<SystemUser>> {
+    return get<PageResult<SystemUser>>('/auth/users', params)
+  },
+  createUser(data: { username: string; name: string; phone?: string; password?: string; roles: string[]; status?: 'ACTIVE' | 'DISABLED' }): Promise<SystemUser> {
+    return post<SystemUser>('/auth/users', data)
+  },
+  updateUser(id: string, data: { name?: string; phone?: string; roles?: string[]; status?: 'ACTIVE' | 'DISABLED' }): Promise<SystemUser> {
+    return put<SystemUser>(`/auth/users/${encodeURIComponent(id)}`, data)
+  },
+  resetPassword(id: string, password: string): Promise<void> {
+    return post<void>(`/auth/users/${encodeURIComponent(id)}/password`, { password })
+  },
+  deleteUser(id: string): Promise<void> {
+    return del<void>(`/auth/users/${encodeURIComponent(id)}`)
   }
 }
 
@@ -167,8 +185,21 @@ export const iotApi = {
 }
 
 export const platformApi = {
-  getRoles(params?: { page?: number; size?: number }): Promise<PageResult<any>> {
-    return get<PageResult<any>>('/platform/roles', params)
+  getRoles(params?: { page?: number; size?: number; keyword?: string }): Promise<PageResult<PlatformRole>> {
+    return get<PageResult<PlatformRole>>('/platform/roles', params)
+  },
+  createRole(data: { name: string; code: string; description?: string; permissions: string[] }): Promise<PlatformRole> {
+    return post<PlatformRole>('/platform/roles', data)
+  },
+  updateRole(id: string, data: { name?: string; description?: string; permissions?: string[]; status?: 'ACTIVE' | 'DISABLED' }): Promise<PlatformRole> {
+    return put<PlatformRole>(`/platform/roles/${encodeURIComponent(id)}`, data)
+  },
+  deleteRole(id: string): Promise<void> {
+    return del<void>(`/platform/roles/${encodeURIComponent(id)}`)
+  },
+  /** 权限目录：角色弹窗按分组渲染勾选项 */
+  getPermissions(): Promise<PermissionGroup[]> {
+    return get<PermissionGroup[]>('/platform/permissions')
   }
 }
 
@@ -212,7 +243,7 @@ export const operationApi = {
 }
 
 export const controlApi = {
-  getCommands(params?: { page?: number; size?: number }): Promise<PageResult<any>> {
+  getCommands(params?: { plotCode?: string; origin?: 'EVENT' | 'MANUAL'; page?: number; size?: number }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/control/commands', params)
   },
   sendCommand(data: { deviceId: string; plotCode?: string; type: string; parameters?: Record<string, unknown> }): Promise<any> {
@@ -233,7 +264,7 @@ export const financeApi = {
 }
 
 export const traceApi = {
-  getRecords(params?: { plotCode?: string; page?: number; size?: number }): Promise<PageResult<any>> {
+  getRecords(params?: { plotCode?: string; event?: string; page?: number; size?: number }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/trace/records', params)
   },
   createRecord(data: { plotCode: string; event: string; detail: string; operator: string }): Promise<any> {
@@ -259,4 +290,37 @@ export const videoApi = {
   }
 }
 
-export type { TelemetryHistoryPoint, TelemetryAlert }
+export type { TelemetryHistoryPoint, TelemetryAlert, MessagePreference, MessageLevel }
+
+export interface MessageQuery {
+  page?: number
+  size?: number
+  type?: 'ALERT' | 'NOTICE'
+  read?: boolean
+  plotCode?: string
+  keyword?: string
+}
+
+/** 消息中心：页面通知与事件消费生成的告警共用同一份消息 */
+export const messageApi = {
+  getList(params?: MessageQuery): Promise<PageResult<any>> {
+    return get<PageResult<any>>('/messages', params)
+  },
+  getUnreadCount(): Promise<{ unread: number }> {
+    return get<{ unread: number }>('/messages/unread-count')
+  },
+  markRead(id: string): Promise<any> {
+    return post<any>(`/messages/${encodeURIComponent(id)}/read`)
+  },
+  /** 订阅偏好：返回模板目录全量，未配置的主题按默认值展示 */
+  getPreferences(): Promise<{ items: MessagePreference[] }> {
+    return get<{ items: MessagePreference[] }>('/messages/preferences')
+  },
+  /** 更新单个主题的订阅偏好，事件消费按新配置过滤 */
+  updatePreference(topic: string, data: { enabled?: boolean; minLevel?: MessageLevel }): Promise<MessagePreference> {
+    return put<MessagePreference>(`/messages/preferences/${encodeURIComponent(topic)}`, data)
+  },
+  create(data: { title: string; content?: string; type?: 'ALERT' | 'NOTICE'; level?: 'INFO' | 'WARNING' | 'CRITICAL'; plotCode?: string }): Promise<any> {
+    return post<any>('/messages', data)
+  }
+}

@@ -26,7 +26,12 @@
     "init:minio": "pnpm run build && node scripts/init-minio.mjs",
     "health:infra": "node scripts/health-infra.mjs",
     "db:migrate": "node scripts/migrate-postgres.mjs",
-    "smoke:decision-telemetry": "node scripts/smoke-decision-telemetry.mjs"
+    "smoke:decision-telemetry": "node scripts/smoke-decision-telemetry.mjs",
+    "smoke:events": "pnpm run build && node scripts/smoke-events.mjs",
+    "smoke:consumers": "pnpm run build && node scripts/smoke-consumers.mjs",
+    "smoke:messages": "pnpm run build && node scripts/smoke-message-preferences.mjs",
+    "smoke:authz": "pnpm run build && node scripts/smoke-authz.mjs",
+    "smoke:identity": "pnpm run build && node scripts/smoke-identity.mjs"
   },
   "devDependencies": {
     "@nestjs/common": "^11.2.8",

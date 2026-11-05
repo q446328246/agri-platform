@@ -1,11 +1,12 @@
 import "reflect-metadata";
 
 import { PgClientAdapter, resolveDatabaseUrl } from "@agri/db";
-import { OutboxService, InMemoryEventPublisher, setDefaultPublisher } from "@agri/mq";
+import { EventLogPublisher, OutboxService, PgEventLogStore, setDefaultPublisher } from "@agri/mq";
 import { configureDecorators, LoggerService } from "@agri/observability";
 
 import { createDecisionHttpServer } from "./http.js";
 import type { DecisionDependencies } from "./http.js";
+import { SqlOutcomeRepository } from "./outcome.repository.js";
 import { SqlPrescriptionRepository } from "./prescription.repository.js";
 import { SqlOutboxStore } from "./outbox.repository.js";
 import { defaultRule, InMemoryRuleRepository, SqlRuleRepository } from "./rule.repository.js";
@@ -31,11 +32,15 @@ async function bootstrap(): Promise<void> {
     // 首次启动播种默认补灌规则，保证开箱可用
     if ((await rules.count()) === 0) await rules.create({ ...defaultRule(new Date().toISOString()), condition: { ...defaultRule(new Date().toISOString()).condition }, action: { ...defaultRule(new Date().toISOString()).action } });
     const prescriptions = new SqlPrescriptionRepository(client);
+    const outcomes = new SqlOutcomeRepository(client);
     const outbox = new SqlOutboxStore(client);
-    const relay = new OutboxService(outbox, new InMemoryEventPublisher(), { tenantId: process.env.TENANT_ID ?? "tenant-demo", traceId: "decision-relay", producer: "decision" });
+    const tenantId = process.env.TENANT_ID ?? "tenant-demo";
+    // 中继把本地消息表投递到共享事件日志，其他服务据此消费处方事件
+    const publisher = new EventLogPublisher(new PgEventLogStore(client), { tenantId, traceId: "decision-relay", producer: "decision" });
+    const relay = new OutboxService(outbox, publisher, { tenantId, traceId: "decision-relay", producer: "decision" });
     relay.start();
-    setDefaultPublisher(relay.publisher);
-    const server = createDecisionHttpServer({ rules, prescriptions, outbox, tenantId: process.env.TENANT_ID ?? "tenant-demo" } satisfies Partial<DecisionDependencies>);
+    setDefaultPublisher(publisher);
+    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, outbox, publisher, tenantId } satisfies Partial<DecisionDependencies>);
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
     const shutdown = async (): Promise<void> => {
       server.close();

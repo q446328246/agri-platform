@@ -1,7 +1,7 @@
 import "reflect-metadata";
 
 import { PgClientAdapter, resolveDatabaseUrl } from "@agri/db";
-import { InMemoryEventPublisher, OutboxService, setDefaultPublisher } from "@agri/mq";
+import { EventLogPublisher, PgEventLogStore, setDefaultPublisher } from "@agri/mq";
 import { configureDecorators, LoggerService } from "@agri/observability";
 
 import { createTelemetryHttpServer } from "./http.js";
@@ -27,14 +27,14 @@ async function bootstrap(): Promise<void> {
       const client = PgClientAdapter.fromUrl(resolveDatabaseUrl(process.env.DB_URL));
       await client.$connect();
       const outbox = new TelemetryOutboxStore(client);
-      const relay = new OutboxService(outbox, new InMemoryEventPublisher(), { tenantId, traceId: "telemetry-relay", producer: "telemetry" });
-      relay.start();
-      setDefaultPublisher(relay.publisher);
+      // 越限事件经本地消息表中继写入共享事件日志，供消息中心等消费方订阅
+      const publisher = new EventLogPublisher(new PgEventLogStore(client), { tenantId, traceId: "telemetry-relay", producer: "telemetry" });
+      setDefaultPublisher(publisher);
       const dependencies: TelemetryDependencies = {
         readings: new SqlReadingRepository(client),
         alerts: new SqlAlertRepository(client),
         outbox,
-        publisher: relay.publisher,
+        publisher,
         tenantId,
         publishEvents: process.env.TELEMETRY_PUBLISH_EVENTS === "true",
       };
@@ -42,7 +42,6 @@ async function bootstrap(): Promise<void> {
       server.listen(port, "127.0.0.1", () => logger.info("telemetry-service HTTP 已启动（SQL 持久化）", { port }));
       const shutdown = async (): Promise<void> => {
         server.close();
-        relay.stop();
         await client.$disconnect();
       };
       process.once("SIGINT", () => void shutdown());

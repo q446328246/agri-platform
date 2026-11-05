@@ -5,6 +5,7 @@ import { BizError } from "@agri/shared";
 import {
   DbHealthIndicator,
   paginate,
+  PgClientAdapter,
   softDeleteExtension,
   SOFT_DELETE_FIELD,
   transactionHost,
@@ -82,6 +83,26 @@ describe("事务封装", () => {
     expect(inside).toBeDefined();
     expect(fake.executed).toEqual(["BEGIN", "COMMIT"]);
     expect(transactionHost.current()).toBeUndefined();
+  });
+
+  it("pg 适配器事务回调拿到带原生方法的 Tx", async () => {
+    const statements: string[] = [];
+    const adapter = new PgClientAdapter({
+      async query(sql: string) {
+        statements.push(sql);
+        return { rows: [{ ok: 1 }], rowCount: 1 };
+      },
+      async end() {},
+    } as never);
+
+    const result = await adapter.$transaction(async (tx) => {
+      const rows = await tx.$queryRawUnsafe<Array<{ ok: number }>>("SELECT 1");
+      const affected = await tx.$executeRawUnsafe("UPDATE plot_records SET parcel_name = $1", "新名称");
+      return { ok: rows[0]?.ok, affected };
+    });
+
+    expect(result).toEqual({ ok: 1, affected: 1 });
+    expect(statements).toEqual(["BEGIN", "SELECT 1", "UPDATE plot_records SET parcel_name = $1", "COMMIT"]);
   });
 
   it("异常时回滚并把原始异常上抛", async () => {

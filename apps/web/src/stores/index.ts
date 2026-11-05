@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import { cachedUserInfo, checkPermission } from '@/utils/permission'
 
 export interface UserInfo {
   id: string
@@ -14,7 +15,9 @@ export interface UserInfo {
 
 export const useUserStore = defineStore('user', () => {
   const token = ref<string>(localStorage.getItem('token') || '')
-  const userInfo = ref<UserInfo | null>(null)
+  // 刷新页面后从缓存恢复，菜单过滤与按钮权限不依赖是否重新请求个人信息
+  const userInfo = ref<UserInfo | null>(cachedUserInfo())
+  const permissions = computed(() => userInfo.value?.permissions ?? [])
 
   function setToken(newToken: string) {
     token.value = newToken
@@ -33,12 +36,19 @@ export const useUserStore = defineStore('user', () => {
     localStorage.removeItem('userInfo')
   }
 
+  /** 是否具备某项权限，未传时视为无需校验 */
+  function hasPermission(required?: string): boolean {
+    return checkPermission(permissions.value, required)
+  }
+
   return {
     token,
     userInfo,
+    permissions,
     setToken,
     setUserInfo,
-    logout
+    logout,
+    hasPermission
   }
 })
 

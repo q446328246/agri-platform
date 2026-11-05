@@ -26,6 +26,14 @@
     "./enums": {
       "types": "./dist/enums/index.d.ts",
       "import": "./dist/enums/index.js"
+    },
+    "./messages": {
+      "types": "./dist/messages/index.d.ts",
+      "import": "./dist/messages/index.js"
+    },
+    "./authz": {
+      "types": "./dist/authz/index.d.ts",
+      "import": "./dist/authz/index.js"
     }
   },
   "scripts": {

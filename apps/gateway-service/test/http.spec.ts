@@ -60,3 +60,46 @@ describe("gateway HTTP API", () => {
     expect((await response.json() as { code: string }).code).toBe("GATEWAY-404");
   });
 });
+
+describe("gateway 鉴权", () => {
+  it("鉴权拒绝时直接返回 401/403，不转发下游", async () => {
+    let forwarded = 0;
+    const upstream = await start(createServer((_request, response) => {
+      forwarded += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    }));
+    const routes = [{ prefix: "/api/v1/test", target: upstream }];
+
+    const unauthorized = await start(createGatewayHttpServer({ routes, authorizer: { authorize: async () => ({ allowed: false, status: 401, message: "未登录或登录已失效" }) } }));
+    const forbidden = await start(createGatewayHttpServer({ routes, authorizer: { authorize: async () => ({ allowed: false, status: 403, message: "无权限执行该操作（需要 plot:write）" }) } }));
+
+    const first = await fetch(`${unauthorized}/api/v1/test/list`);
+    expect(first.status).toBe(401);
+    expect((await first.json() as { code: string }).code).toBe("GATEWAY-401");
+
+    const second = await fetch(`${forbidden}/api/v1/test/list`);
+    expect(second.status).toBe(403);
+    expect((await second.json() as { code: string }).code).toBe("GATEWAY-403");
+    expect(forwarded).toBe(0);
+  });
+
+  it("放行后下发网关解析的身份头，丢弃客户端伪造的权限头", async () => {
+    const upstream = await start(createServer((request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ userId: request.headers["x-user-id"], tenantId: request.headers["x-tenant-id"], permissions: request.headers["x-permissions"] }));
+    }));
+    const gateway = await start(createGatewayHttpServer({
+      routes: [{ prefix: "/api/v1/test", target: upstream }],
+      authorizer: {
+        authorize: async () => ({
+          allowed: true,
+          session: { userId: "user-agro", tenantId: "tenant-demo", username: "agronomist01", name: "张农技", roles: ["agronomist"], permissions: ["plot:read", "telemetry:read"] },
+        }),
+      },
+    }));
+    const response = await fetch(`${gateway}/api/v1/test/list`, { headers: { authorization: "Bearer token-agronomist", "x-user-id": "user-forged", "x-tenant-id": "tenant-forged", "x-permissions": "*" } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ userId: "user-agro", tenantId: "tenant-demo", permissions: "plot:read,telemetry:read" });
+  });
+});

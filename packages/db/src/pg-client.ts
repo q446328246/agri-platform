@@ -59,11 +59,21 @@ export class PgClientAdapter implements PrismaClientLike {
     await this.client.end();
   }
 
-  /** 在事务中执行回调；异常时回滚并抛出，避免部分写入 */
+  /**
+   * 在事务中执行回调；异常时回滚并抛出，避免部分写入。
+   *
+   * 回调拿到的是包装后的 Tx，而不是原生 pg.Client：仓储层在事务中同样使用
+   * $queryRawUnsafe / $executeRawUnsafe，直接把原生客户端当 Tx 传出去会让
+   * 这些方法缺失。
+   */
   async $transaction<R>(handler: (tx: Tx) => Promise<R>): Promise<R> {
     await this.client.query("BEGIN");
     try {
-      const result = await handler(this.client as unknown as Tx);
+      const tx: Tx = {
+        $queryRawUnsafe: this.$queryRawUnsafe.bind(this),
+        $executeRawUnsafe: this.$executeRawUnsafe.bind(this),
+      };
+      const result = await handler(tx);
       await this.client.query("COMMIT");
       return result;
     } catch (error) {

@@ -1,5 +1,6 @@
 import type { GeoPolygon } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
+import { toIsoTimestamp } from "@agri/shared";
 
 /**
  * 地块仓储契约与示例实现。
@@ -108,11 +109,11 @@ export class SqlPlotRepository implements PlotRepository {
       farmId: String(row.farm_id),
       areaMu: Number(row.area_mu),
       geom: row.geom as GeoPolygon,
-      createdAt: String(row.created_at),
-      updatedAt: String(row.updated_at),
+      createdAt: toIsoTimestamp(row.created_at),
+      updatedAt: toIsoTimestamp(row.updated_at),
     };
     if (row.soil_type !== null && row.soil_type !== undefined) record.soilType = String(row.soil_type);
-    if (row.deleted_at !== null && row.deleted_at !== undefined) record.deletedAt = String(row.deleted_at);
+    if (row.deleted_at !== null && row.deleted_at !== undefined) record.deletedAt = toIsoTimestamp(row.deleted_at);
     return record;
   }
 

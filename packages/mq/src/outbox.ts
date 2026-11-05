@@ -1,4 +1,4 @@
-import type { EventTopicValue } from "@agri/contracts";
+import type { DomainEvent, EventTopicValue } from "@agri/contracts";
 import { ulid } from "@agri/shared";
 
 import type { EventPublisher } from "./types.js";
@@ -101,7 +101,22 @@ export class OutboxService {
     let published = 0;
     for (const record of pending) {
       try {
-        await this.publisherRef.publish(record.topic, record.payload, record.tenantId);
+        // 事件日志类传输层需要完整信封，直接按记录还原，避免中继丢失追踪字段
+        const event: DomainEvent = {
+          eventId: record.id,
+          topic: record.topic,
+          version: 1,
+          occurredAt: record.createdAt,
+          producer: record.producer,
+          tenantId: record.tenantId,
+          traceId: record.traceId,
+          payload: record.payload,
+        };
+        if (this.publisherRef.publishEnvelope) {
+          await this.publisherRef.publishEnvelope(event);
+        } else {
+          await this.publisherRef.publish(record.topic, record.payload, record.tenantId);
+        }
         await this.store.markPublished(record.id);
         published += 1;
       } catch (error) {

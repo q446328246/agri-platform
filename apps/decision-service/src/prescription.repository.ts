@@ -1,5 +1,5 @@
 import type { PrismaClientLike, Tx } from "@agri/db";
-import { ulid } from "@agri/shared";
+import { toIsoTimestamp, ulid } from "@agri/shared";
 
 /** 处方状态：RECOMMENDED 已生成建议，NO_ACTION 评估后无需作业 */
 export type PrescriptionStatus = "RECOMMENDED" | "NO_ACTION";
@@ -74,11 +74,11 @@ function toRecord(row: Record<string, unknown>): PrescriptionRecord {
     inputs: (row.inputs_json ?? {}) as Record<string, unknown>,
     matchedRules: (row.matched_rules_json ?? []) as PrescriptionRecord["matchedRules"],
     actions: (row.actions_json ?? []) as PrescriptionItem[],
-    generatedAt: String(row.generated_at),
+    generatedAt: toIsoTimestamp(row.generated_at),
   };
   if (soilMoisture !== undefined) record.soilMoisture = soilMoisture;
   if (rainProbability !== undefined) record.rainProbability = rainProbability;
-  if (row.issued_at !== null && row.issued_at !== undefined) record.issuedAt = String(row.issued_at);
+  if (row.issued_at !== null && row.issued_at !== undefined) record.issuedAt = toIsoTimestamp(row.issued_at);
   return record;
 }
 

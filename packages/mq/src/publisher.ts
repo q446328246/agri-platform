@@ -1,4 +1,4 @@
-import type { EventTopicValue } from "@agri/contracts";
+import type { DomainEvent, EventTopicValue } from "@agri/contracts";
 import { ulid } from "@agri/shared";
 
 import type { EventPublisher, PublishResult } from "./types.js";
@@ -52,6 +52,11 @@ export async function publishEvent<T>(input: PublishEventInput<T>, publisher?: E
     traceId: input.traceId,
     payload: input.payload,
   };
+  // 事件日志等传输层直接接收信封，避免二次包装丢失追踪字段
+  if (target.publishEnvelope) {
+    const result = await target.publishEnvelope(event);
+    return { ...result, eventId: event.eventId };
+  }
   const result = await target.publish(input.topic, event, input.key);
   return { ...result, eventId: event.eventId };
 }

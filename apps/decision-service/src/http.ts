@@ -5,12 +5,15 @@ import type { ApiResponse, PageResult } from "@agri/contracts";
 import { EventTopic } from "@agri/contracts";
 import type { PrescriptionIssuedPayload } from "@agri/contracts";
 import { OutboxService, InMemoryEventPublisher, InMemoryOutboxStore, publishEvent, setDefaultPublisher } from "@agri/mq";
-import type { OutboxStore } from "@agri/mq";
+import type { EventPublisher, OutboxStore } from "@agri/mq";
 import { snowflakeId } from "@agri/shared";
+import { authorizeRequest } from "@agri/shared";
 
-import { InMemoryPrescriptionRepository, SqlPrescriptionRepository } from "./prescription.repository.js";
+import { InMemoryPrescriptionRepository } from "./prescription.repository.js";
 import type { CreatePrescriptionInput, PrescriptionQuery, PrescriptionRecord, PrescriptionRepository, PrescriptionStatus } from "./prescription.repository.js";
 import { newPrescriptionId } from "./prescription.repository.js";
+import { evaluateOutcome, formatCondition, InMemoryOutcomeRepository, newOutcomeId } from "./outcome.repository.js";
+import type { OutcomeRepository, PrescriptionOutcome } from "./outcome.repository.js";
 import { RuleEngine } from "./rule.engine.js";
 import type { RuleEvaluationInput } from "./rule.engine.js";
 import { defaultRule, InMemoryRuleRepository, isRuleType, normalizeAction, normalizeCondition } from "./rule.repository.js";
@@ -21,7 +24,10 @@ const API_PREFIX = "/api/v1/decision";
 export interface DecisionDependencies {
   rules?: RuleRepository;
   prescriptions?: PrescriptionRepository;
+  outcomes?: OutcomeRepository;
   outbox?: OutboxStore;
+  /** 事件发布器：接入事件日志时由启动层注入，缺省进程内发布 */
+  publisher?: EventPublisher;
   /** 处方生成时向遥测服务补齐最新墒情，缺省直接使用请求体中的数值 */
   fetchSoilMoisture?: (plotCode: string) => Promise<number | undefined>;
   tenantId?: string;
@@ -92,10 +98,11 @@ const PLAN_TYPE_BY_RULE: Record<RuleType, "irrigation" | "fertilization" | "pest
 export function createDecisionHttpServer(dependencies?: Partial<DecisionDependencies>): Server {
   const rules = dependencies?.rules ?? new InMemoryRuleRepository([defaultRule(new Date().toISOString())]);
   const prescriptions = dependencies?.prescriptions ?? new InMemoryPrescriptionRepository();
+  const outcomes = dependencies?.outcomes ?? new InMemoryOutcomeRepository();
   const tenantId = dependencies?.tenantId ?? "tenant-demo";
   const engine = new RuleEngine(rules);
   const fetchSoilMoisture = dependencies?.fetchSoilMoisture;
-  const publisher = new InMemoryEventPublisher();
+  const publisher = dependencies?.publisher ?? new InMemoryEventPublisher();
   const outbox = dependencies?.outbox;
   // 有本地消息表时先落表再由中继投递；无表时直接进程内发布，便于本地联调
   const outboxService = new OutboxService(outbox ?? new InMemoryOutboxStore(), publisher, { tenantId, traceId: "decision", producer: "decision" });
@@ -106,6 +113,8 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
       if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "decision" }, traceId); return; }
+      const denied = authorizeRequest(req, { read: "decision:read", write: "decision:write" });
+      if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
 
       // 规则列表：读取最新规则集，支持分页
       if (req.method === "GET" && url.pathname === `${API_PREFIX}/rules`) {
@@ -206,6 +215,58 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
           await publishEvent({ topic: EventTopic.DecisionPrescriptionIssued, payload, tenantId, traceId, producer: "decision", key: plotCode }, publisher);
         }
         send(res, 201, record, traceId);
+        return;
+      }
+
+      // 效果回流：记录处方执行后的实测效果，可选把阈值建议写回规则
+      const outcomeMatch = url.pathname.match(/^\/api\/v1\/decision\/prescriptions\/([^/]+)\/outcome$/);
+      const outcomeId = outcomeMatch?.[1] ? decodeURIComponent(outcomeMatch[1]) : undefined;
+      if (outcomeId && req.method === "GET") {
+        const outcome = await outcomes.findLatest(outcomeId);
+        if (!outcome) { send(res, 404, null, traceId, "尚未记录效果评估"); return; }
+        send(res, 200, outcome, traceId);
+        return;
+      }
+      if (outcomeId && req.method === "POST") {
+        const body = await json(req);
+        const after = Number(body.soilMoistureAfter);
+        if (!Number.isFinite(after)) { send(res, 400, null, traceId, "soilMoistureAfter 必须是数字"); return; }
+        const prescription = await prescriptions.findById(outcomeId);
+        if (!prescription) { send(res, 404, null, traceId, "处方不存在"); return; }
+        const now = new Date().toISOString();
+        const ruleId = prescription.matchedRules[0]?.id;
+        const rule = ruleId ? await rules.findById(ruleId) : null;
+        const target = Number(body.target);
+        const evaluation = evaluateOutcome({
+          prescription,
+          ...(rule ? { rule } : {}),
+          soilMoistureAfter: after,
+          ...(Number.isFinite(target) ? { target } : {}),
+          evaluatedAt: now,
+        });
+        // 建议写回规则即完成规则调优：条件与展示表达式同时更新，保持可解释
+        let appliedRule = null;
+        if (evaluation.suggestion && body.applySuggestion === true && rule) {
+          const condition = { ...rule.condition, soilMoistureBelow: evaluation.suggestion.suggestedThreshold };
+          appliedRule = await rules.update(evaluation.suggestion.ruleId, { condition, expression: formatCondition(condition), updatedAt: now });
+        }
+        const outcome: PrescriptionOutcome = {
+          id: newOutcomeId(),
+          prescriptionId: prescription.id,
+          plotCode: prescription.plotCode,
+          ...(ruleId ? { ruleId } : {}),
+          soilMoistureBefore: evaluation.soilMoistureBefore,
+          soilMoistureAfter: after,
+          target: evaluation.target,
+          delta: evaluation.delta,
+          effective: evaluation.effective,
+          ...(evaluation.suggestion ? { suggestion: evaluation.suggestion } : {}),
+          applied: appliedRule !== null,
+          note: String(body.note ?? ""),
+          evaluatedAt: now,
+        };
+        await outcomes.create(outcome);
+        send(res, 201, { outcome, rule: appliedRule }, traceId);
         return;
       }
 

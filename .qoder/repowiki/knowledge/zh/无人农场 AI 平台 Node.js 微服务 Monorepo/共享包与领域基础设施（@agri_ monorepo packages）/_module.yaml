@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: shared_packages
+title: 共享包与领域基础设施（@agri/* monorepo packages）
+scope:
+    - packages/
+source_files: []
+depends_on: []
+related_to: []

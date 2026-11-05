@@ -16,6 +16,8 @@ export interface EventPublisher {
   publish<T>(topic: EventTopicValue, payload: T, key?: string): Promise<PublishResult>;
   publishBatch(events: Array<{ topic: EventTopicValue; payload: unknown }>): Promise<void>;
   close(): Promise<void>;
+  /** 可选：直接投递完整信封，保留 eventId、occurredAt、producer 等追踪字段 */
+  publishEnvelope?(event: DomainEvent): Promise<PublishResult>;
 }
 
 /** 事件处理器 */

@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: legacy_webapp
+title: 赵光农场智慧农业前端应用（Vue3 + Vite）
+scope:
+    - zhao-guang-farm-master/
+source_files: []
+depends_on: []
+related_to:
+    - path: scripts

@@ -7,7 +7,7 @@
           <span class="map-tool__icon">{{ item.icon }}</span><span>{{ item.label }}</span>
         </button>
       </div>
-      <div class="map-status"><span class="status-dot"></span><span>天地图 · 达州农情中心</span><i></i><span>{{ mapMessage }}</span><i></i><span>{{ weatherSummary }}</span></div>
+      <div class="map-status"><span class="status-dot"></span><span>天地图 · 智耘蜀芯农情中心</span><i></i><span>{{ mapMessage }}</span><i></i><span>{{ weatherSummary }}</span></div>
     </div>
 
     <aside class="data-panel data-panel--left">
@@ -134,8 +134,8 @@ function demoBoundaries(): PlotBoundary[] {
     name, parcelCode, rings: [coords], center: [0, 0], areaMu, crop,
   })
   return [
-    rect('达州示范田 · 大豆区', 'demo-soybean', 4860, '大豆', [[31.235, 107.435], [31.247, 107.458], [31.229, 107.472], [31.217, 107.447], [31.235, 107.435]]),
-    rect('达州示范田 · 玉米区', 'demo-corn', 2830, '玉米', [[31.188, 107.485], [31.202, 107.51], [31.181, 107.527], [31.168, 107.5], [31.188, 107.485]]),
+    rect('智耘蜀芯示范田 · 大豆区', 'demo-soybean', 4860, '大豆', [[31.235, 107.435], [31.247, 107.458], [31.229, 107.472], [31.217, 107.447], [31.235, 107.435]]),
+    rect('智耘蜀芯示范田 · 玉米区', 'demo-corn', 2830, '玉米', [[31.188, 107.485], [31.202, 107.51], [31.181, 107.527], [31.168, 107.5], [31.188, 107.485]]),
   ]
 }
 

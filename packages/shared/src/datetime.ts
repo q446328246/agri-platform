@@ -22,6 +22,27 @@ export function toUtcIso(input: Date | number | string): string {
 }
 
 /**
+ * 把数据库驱动返回的时间值统一转为 ISO 8601 UTC 字符串。
+ *
+ * pg 驱动默认把 TIMESTAMPTZ 解析为 Date，直接 String() 会得到带时区名称的
+ * 本地化文本（如 "Thu Nov 05 2026 08:33:12 GMT+0800 (中国标准时间)"），
+ * 写回 SQL 会报类型错误，返回接口也与契约不一致，因此映射层统一经过本函数。
+ * @param value 数据库列值：Date、字符串、时间戳或空值
+ * @returns ISO 字符串；空值返回空串，无法解析时原样返回
+ */
+export function toIsoTimestamp(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? "" : value.toISOString();
+  if (typeof value === "number") return new Date(value).toISOString();
+  if (typeof value === "string") {
+    if (value === "") return "";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toISOString();
+  }
+  return String(value);
+}
+
+/**
  * 安全解析日期，非法输入返回 null 而不抛出。
  * @param input 待解析字符串
  * @returns 日期对象或 null

@@ -9,3 +9,5 @@ export * from "./events/index.js";
 export * from "./errors/index.js";
 export * from "./dto/index.js";
 export * from "./enums/index.js";
+export * from "./messages/index.js";
+export * from "./authz/index.js";

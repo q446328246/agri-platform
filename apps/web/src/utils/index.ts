@@ -91,6 +91,56 @@ export function getTaskStatusType(status: FarmTaskStatus): '' | 'success' | 'war
   return map[status] || ''
 }
 
+/** 控制指令来源：事件自动生成与人工确认下达 */
+export function getControlOriginText(origin: string): string {
+  return origin === 'EVENT' ? '自动' : '人工'
+}
+
+export function getControlOriginType(origin: string): 'success' | 'warning' {
+  return origin === 'EVENT' ? 'success' : 'warning'
+}
+
+export function getControlTypeText(type: string): string {
+  const map: Record<string, string> = {
+    SEEDING: '播种',
+    IRRIGATION: '灌溉',
+    WEEDING: '除草',
+    FERTILIZATION: '水肥'
+  }
+  return map[type] || type
+}
+
+export function getControlStatusText(status: string): string {
+  const map: Record<string, string> = {
+    QUEUED: '已入队',
+    SENT: '已下发',
+    FAILED: '下发失败'
+  }
+  return map[status] || status
+}
+
+export function getControlStatusType(status: string): 'warning' | 'success' | 'danger' {
+  if (status === 'SENT') return 'success'
+  if (status === 'FAILED') return 'danger'
+  return 'warning'
+}
+
+/** 生产档案事件类型：事件自动写入与人工录入并存 */
+export function getTraceEventText(event: string): string {
+  const map: Record<string, string> = {
+    PRESCRIPTION_ISSUED: '处方生成',
+    FARM_OPERATION: '农事作业',
+    OPERATION_COMPLETED: '作业完成'
+  }
+  return map[event] || event || '-'
+}
+
+export function getTraceEventType(event: string): 'success' | 'warning' | 'info' {
+  if (event === 'PRESCRIPTION_ISSUED') return 'success'
+  if (event === 'OPERATION_COMPLETED') return 'warning'
+  return 'info'
+}
+
 export function formatArea(mu: number): string {
   return `${mu.toFixed(2)} 亩`
 }

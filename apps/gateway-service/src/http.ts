@@ -1,7 +1,23 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { serializePermissions } from "@agri/contracts";
+
+import type { GatewayAuthorizer } from "./authz.js";
+
+/**
+ * 网关 HTTP 入口。
+ *
+ * 路由按最长前缀匹配转发；开启鉴权后先解析 token 与权限，再把可信身份头下发给下游。
+ * 客户端自带的 `x-user-id` / `x-tenant-id` / `x-permissions` 一律丢弃，避免越权。
+ */
 
 export interface GatewayRoute { prefix: string; target: string }
+
+export interface GatewayOptions {
+  routes?: GatewayRoute[];
+  /** 缺省不鉴权，仅用于单元测试；main.ts 在启用鉴权时注入 */
+  authorizer?: GatewayAuthorizer;
+}
 
 function defaultRoutes(): GatewayRoute[] {
   return [
@@ -23,18 +39,59 @@ function defaultRoutes(): GatewayRoute[] {
   ];
 }
 
-async function body(request: IncomingMessage): Promise<Buffer> { const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk)); return Buffer.concat(chunks); }
-export function createGatewayHttpServer(options: { routes?: GatewayRoute[] } = {}): Server { const activeRoutes = options.routes ?? defaultRoutes(); return createServer(async (request, response) => {
-  const url = new URL(request.url ?? "/", "http://localhost");
-  if (request.method === "GET" && url.pathname === "/health") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ code: "OK", data: { status: "ok", service: "gateway" }, timestamp: Date.now() })); return; }
-  // 最长前缀优先，避免 `/plots` 抢先匹配 `/plots/bounds` 这类更具体的路由
-  const pathname = url.pathname.replace(/\/+$/, "") || "/";
-  const route = [...activeRoutes].sort((a, b) => b.prefix.length - a.prefix.length).find((item) => pathname === item.prefix || pathname.startsWith(`${item.prefix}/`));
-  if (!route) { response.writeHead(404, { "content-type": "application/json" }); response.end(JSON.stringify({ code: "GATEWAY-404", message: "接口不存在", data: null, timestamp: Date.now() })); return; }
-  try {
-    const init: RequestInit = { method: request.method ?? "GET", headers: { "content-type": request.headers["content-type"]?.toString() || "application/json", "authorization": request.headers.authorization?.toString() || "", "x-request-id": request.headers["x-request-id"]?.toString() || "", "x-tenant-id": request.headers["x-tenant-id"]?.toString() || "", "x-user-id": request.headers["x-user-id"]?.toString() || "", "x-confirm-action": request.headers["x-confirm-action"]?.toString() || "" } };
-    if (request.method !== "GET" && request.method !== "HEAD") init.body = await body(request);
-    const upstream = await fetch(`${route.target}${url.pathname}${url.search}`, init);
-    response.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") || "application/json" }); response.end(Buffer.from(await upstream.arrayBuffer()));
-  } catch (error) { response.writeHead(502, { "content-type": "application/json" }); response.end(JSON.stringify({ code: "GATEWAY-502", message: error instanceof Error ? error.message : "下游服务不可用", data: null, timestamp: Date.now() })); }
-}); }
+async function body(request: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+function reply(response: ServerResponse, status: number, code: string, message: string): void {
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify({ code, message, data: null, timestamp: Date.now() }));
+}
+
+export function createGatewayHttpServer(options: GatewayOptions = {}): Server {
+  const activeRoutes = options.routes ?? defaultRoutes();
+  const authorizer = options.authorizer;
+  return createServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    if (request.method === "GET" && url.pathname === "/health") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ code: "OK", data: { status: "ok", service: "gateway" }, timestamp: Date.now() }));
+      return;
+    }
+
+    const method = request.method ?? "GET";
+    const authorization = request.headers.authorization?.toString();
+    let session: { userId: string; tenantId: string; permissions: string[] } | null = null;
+    if (authorizer) {
+      const outcome = await authorizer.authorize({ method, pathname: url.pathname, authorization });
+      if (!outcome.allowed) { reply(response, outcome.status, `GATEWAY-${outcome.status}`, outcome.message); return; }
+      session = outcome.session;
+    }
+
+    // 最长前缀优先，避免 `/plots` 抢先匹配 `/plots/bounds` 这类更具体的路由
+    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+    const route = [...activeRoutes].sort((a, b) => b.prefix.length - a.prefix.length).find((item) => pathname === item.prefix || pathname.startsWith(`${item.prefix}/`));
+    if (!route) { reply(response, 404, "GATEWAY-404", "接口不存在"); return; }
+    try {
+      const headers: Record<string, string> = {
+        "content-type": request.headers["content-type"]?.toString() || "application/json",
+        "authorization": authorization || "",
+        "x-request-id": request.headers["x-request-id"]?.toString() || "",
+        "x-confirm-action": request.headers["x-confirm-action"]?.toString() || "",
+        // 身份头只接受网关解析结果；未鉴权（测试模式）时才透传客户端提供的租户
+        "x-tenant-id": session ? session.tenantId : request.headers["x-tenant-id"]?.toString() || "",
+        "x-user-id": session ? session.userId : request.headers["x-user-id"]?.toString() || "",
+      };
+      if (session) headers["x-permissions"] = serializePermissions(session.permissions);
+      const init: RequestInit = { method, headers };
+      if (method !== "GET" && method !== "HEAD") init.body = await body(request);
+      const upstream = await fetch(`${route.target}${url.pathname}${url.search}`, init);
+      response.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") || "application/json" });
+      response.end(Buffer.from(await upstream.arrayBuffer()));
+    } catch (error) {
+      reply(response, 502, "GATEWAY-502", error instanceof Error ? error.message : "下游服务不可用");
+    }
+  });
+}

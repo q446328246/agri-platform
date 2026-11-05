@@ -13,7 +13,9 @@ const gatewayTargets = Object.fromEntries(services.filter(([name]) => name !== "
 
 function start([name, port, entry]) {
   const env = name === "gateway" ? { ...process.env, ...gatewayTargets } : { ...process.env };
-  const child = spawn(process.execPath, [path.join(root, entry)], { cwd: root, env: { ...env, SERVICE_MODE: "http", PORT: String(port) }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  // 遥测越限默认发布事件：本机接入数据库时消息中心可直接消费，形成告警通知闭环
+  const serviceEnv = name === "telemetry" ? { ...env, TELEMETRY_PUBLISH_EVENTS: process.env.TELEMETRY_PUBLISH_EVENTS ?? "true" } : env;
+  const child = spawn(process.execPath, [path.join(root, entry)], { cwd: root, env: { ...serviceEnv, SERVICE_MODE: "http", PORT: String(port) }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   child.stdout.on("data", (chunk) => process.stdout.write(`[${name}] ${chunk}`));
   child.stderr.on("data", (chunk) => process.stderr.write(`[${name}] ${chunk}`));
   child.on("exit", (code, signal) => { if (code !== 0 && signal === null) console.error(`[${name}] exited with code ${code}`); });
