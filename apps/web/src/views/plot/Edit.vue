@@ -84,9 +84,25 @@
             </el-form-item>
           </el-col>
         </el-row>
-        <el-form-item label="当前作物">
-          <el-input v-model="form.currentCrop" placeholder="请输入当前种植作物" />
-        </el-form-item>
+        <el-row :gutter="20">
+          <el-col :span="12">
+            <el-form-item label="当前作物">
+              <el-input v-model="form.currentCrop" placeholder="请输入当前种植作物" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="地块状态">
+              <el-select v-model="form.status" placeholder="请选择地块状态" style="width: 100%">
+                <el-option
+                  v-for="item in plotStatusOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
         <el-form-item label="地块边界" prop="coordinates">
           <div class="boundary-editor">
             <PlotPolygonEditor v-model="form.coordinates" @area-change="handleBoundaryArea" />
@@ -120,7 +136,7 @@ import { plotApi } from '@/api'
 import PlotPolygonEditor from '@/components/PlotPolygonEditor.vue'
 import { parsePlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 import type { Plot, PlotForm } from '@/types'
-import { PlotType as PT, SoilType as ST } from '@/types'
+import { PlotStatus as PS, PlotType as PT, SoilType as ST } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -133,6 +149,7 @@ const form = reactive<PlotForm & { id?: string }>({
   regionCode: '',
   villageCode: '',
   type: PT.FIELD,
+  status: PS.ACTIVE,
   areaMu: 1,
   soilType: undefined,
   ownerName: '',
@@ -168,6 +185,13 @@ const plotTypeOptions = [
   { label: '大棚', value: PT.GREENHOUSE },
   { label: '果园', value: PT.ORCHARD },
   { label: '水产养殖', value: PT.AQUACULTURE }
+]
+
+const plotStatusOptions = [
+  { label: '草稿', value: PS.DRAFT },
+  { label: '种植中', value: PS.ACTIVE },
+  { label: '休耕', value: PS.FALLOW },
+  { label: '已归档', value: PS.ARCHIVED }
 ]
 
 const soilTypeOptions = [

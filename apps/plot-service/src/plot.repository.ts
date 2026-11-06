@@ -20,6 +20,20 @@ export interface PlotRecord {
   areaMu: number;
   /** 土壤类型编码，可选 */
   soilType?: string;
+  /** 所属片区编码，为空表示未划入片区 */
+  zoneCode?: string;
+  /** 地块类型：FIELD / GREENHOUSE / ORCHARD / AQUACULTURE，与前端 PlotType 枚举同源 */
+  plotType?: string;
+  /** 地块状态：DRAFT / ACTIVE / FALLOW / ARCHIVED，与前端 PlotStatus 枚举同源 */
+  plotStatus?: string;
+  /** 当前种植作物，自由文本 */
+  currentCrop?: string;
+  /** 负责人姓名 */
+  ownerName?: string;
+  /** 负责人联系电话 */
+  ownerPhone?: string;
+  /** 备注 */
+  remark?: string;
   /** 边界几何，库内统一 CGCS2000（EPSG:4490） */
   geom: GeoPolygon;
   createdAt: string;
@@ -46,9 +60,22 @@ export interface PlotPatch {
   parcelName?: string;
   areaMu?: number;
   soilType?: string;
+  /** 传入 null 表示移出片区 */
+  zoneCode?: string | null;
+  plotType?: string | null;
+  plotStatus?: string | null;
+  /** 以下字段传 null 表示清空，传 undefined 表示不改动 */
+  currentCrop?: string | null;
+  ownerName?: string | null;
+  ownerPhone?: string | null;
+  remark?: string | null;
   geom?: GeoPolygon;
   updatedAt: string;
 }
+
+/** 查询与写入共用的列清单，新增字段只改这一处，避免三处 SELECT 漂移 */
+const PLOT_COLUMNS =
+  "parcel_id, parcel_code, parcel_name, tenant_id, farm_id, area_mu, soil_type, zone_code, plot_type, plot_status, current_crop, owner_name, owner_phone, remark, geom, created_at, updated_at, deleted_at";
 
 /** 内存实现，用于示例与测试 */
 export class InMemoryPlotRepository implements PlotRepository {
@@ -69,6 +96,21 @@ export class InMemoryPlotRepository implements PlotRepository {
     if (patch.parcelName !== undefined) row.parcelName = patch.parcelName;
     if (patch.areaMu !== undefined) row.areaMu = patch.areaMu;
     if (patch.soilType !== undefined) row.soilType = patch.soilType;
+    if (patch.zoneCode !== undefined) {
+      if (patch.zoneCode === null) delete row.zoneCode;
+      else row.zoneCode = patch.zoneCode;
+    }
+    const assign = (key: "plotType" | "plotStatus" | "currentCrop" | "ownerName" | "ownerPhone" | "remark", value: string | null | undefined) => {
+      if (value === undefined) return;
+      if (value === null) delete row[key];
+      else row[key] = value;
+    };
+    assign("plotType", patch.plotType);
+    assign("plotStatus", patch.plotStatus);
+    assign("currentCrop", patch.currentCrop);
+    assign("ownerName", patch.ownerName);
+    assign("ownerPhone", patch.ownerPhone);
+    assign("remark", patch.remark);
     if (patch.geom !== undefined) row.geom = patch.geom;
     row.updatedAt = patch.updatedAt;
     return row;
@@ -113,13 +155,20 @@ export class SqlPlotRepository implements PlotRepository {
       updatedAt: toIsoTimestamp(row.updated_at),
     };
     if (row.soil_type !== null && row.soil_type !== undefined) record.soilType = String(row.soil_type);
+    if (row.zone_code !== null && row.zone_code !== undefined) record.zoneCode = String(row.zone_code);
+    if (row.plot_type !== null && row.plot_type !== undefined) record.plotType = String(row.plot_type);
+    if (row.plot_status !== null && row.plot_status !== undefined) record.plotStatus = String(row.plot_status);
+    if (row.current_crop !== null && row.current_crop !== undefined) record.currentCrop = String(row.current_crop);
+    if (row.owner_name !== null && row.owner_name !== undefined) record.ownerName = String(row.owner_name);
+    if (row.owner_phone !== null && row.owner_phone !== undefined) record.ownerPhone = String(row.owner_phone);
+    if (row.remark !== null && row.remark !== undefined) record.remark = String(row.remark);
     if (row.deleted_at !== null && row.deleted_at !== undefined) record.deletedAt = toIsoTimestamp(row.deleted_at);
     return record;
   }
 
   async findByCode(tx: unknown, parcelCode: string): Promise<PlotRecord | null> {
     const rows = await this.executor(tx).$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT parcel_id, parcel_code, parcel_name, tenant_id, farm_id, area_mu, soil_type, geom, created_at, updated_at, deleted_at
+      `SELECT ${PLOT_COLUMNS}
        FROM plot_records WHERE parcel_code = $1 AND deleted_at IS NULL LIMIT 1`,
       parcelCode,
     );
@@ -130,8 +179,8 @@ export class SqlPlotRepository implements PlotRepository {
   async create(tx: unknown, record: PlotRecord): Promise<PlotRecord> {
     await this.executor(tx).$executeRawUnsafe(
       `INSERT INTO plot_records
-       (parcel_id, parcel_code, parcel_name, tenant_id, farm_id, area_mu, soil_type, geom, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)`,
+       (parcel_id, parcel_code, parcel_name, tenant_id, farm_id, area_mu, soil_type, zone_code, plot_type, plot_status, current_crop, owner_name, owner_phone, remark, geom, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17)`,
       record.parcelId,
       record.parcelCode,
       record.parcelName,
@@ -139,6 +188,13 @@ export class SqlPlotRepository implements PlotRepository {
       record.farmId,
       record.areaMu,
       record.soilType ?? null,
+      record.zoneCode ?? null,
+      record.plotType ?? null,
+      record.plotStatus ?? null,
+      record.currentCrop ?? null,
+      record.ownerName ?? null,
+      record.ownerPhone ?? null,
+      record.remark ?? null,
       JSON.stringify(record.geom),
       record.createdAt,
       record.updatedAt,
@@ -146,26 +202,50 @@ export class SqlPlotRepository implements PlotRepository {
     return record;
   }
 
+  /**
+   * 按 patch 里实际出现的字段动态拼 SET 子句：undefined 不改、null 清空。
+   * 字段从 5 个涨到 11 个后，固定占位符写法既要一堆 CASE WHEN 布尔开关，
+   * 又容易漏改某一位，这里改成循环拼参数，列名到行键的对应关系一次声明。
+   */
   async update(tx: unknown, parcelCode: string, patch: PlotPatch): Promise<PlotRecord | null> {
     const executor = this.executor(tx);
     const rows = await executor.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT parcel_id, parcel_code, parcel_name, tenant_id, farm_id, area_mu, soil_type, geom, created_at, updated_at, deleted_at
+      `SELECT ${PLOT_COLUMNS}
        FROM plot_records WHERE parcel_code = $1 AND deleted_at IS NULL LIMIT 1`,
       parcelCode,
     );
     if (!rows[0]) return null;
+    // rowValue 用于回传给 toRecord：geom 的参数是 JSON 字符串，返回值要保留对象
+    const assignments: Array<{ column: string; rowKey: string; value: unknown; rowValue?: unknown; cast?: string }> = [
+      { column: "parcel_name", rowKey: "parcel_name", value: patch.parcelName },
+      { column: "area_mu", rowKey: "area_mu", value: patch.areaMu },
+      { column: "soil_type", rowKey: "soil_type", value: patch.soilType },
+      { column: "zone_code", rowKey: "zone_code", value: patch.zoneCode },
+      { column: "plot_type", rowKey: "plot_type", value: patch.plotType },
+      { column: "plot_status", rowKey: "plot_status", value: patch.plotStatus },
+      { column: "current_crop", rowKey: "current_crop", value: patch.currentCrop },
+      { column: "owner_name", rowKey: "owner_name", value: patch.ownerName },
+      { column: "owner_phone", rowKey: "owner_phone", value: patch.ownerPhone },
+      { column: "remark", rowKey: "remark", value: patch.remark },
+      { column: "geom", rowKey: "geom", value: patch.geom ? JSON.stringify(patch.geom) : undefined, rowValue: patch.geom, cast: "::jsonb" },
+    ];
+    const params: unknown[] = [parcelCode];
+    const sets: string[] = [];
+    const next: Record<string, unknown> = { ...rows[0] };
+    for (const item of assignments) {
+      if (item.value === undefined) continue;
+      params.push(item.value);
+      sets.push(`${item.column} = $${params.length}${item.cast ?? ""}`);
+      next[item.rowKey] = item.rowValue ?? item.value;
+    }
+    params.push(patch.updatedAt);
+    sets.push(`updated_at = $${params.length}`);
+    next.updated_at = patch.updatedAt;
     await executor.$executeRawUnsafe(
-      `UPDATE plot_records SET parcel_name = COALESCE($2, parcel_name), area_mu = COALESCE($3, area_mu),
-       soil_type = COALESCE($4, soil_type), geom = COALESCE($5::jsonb, geom), updated_at = $6
-       WHERE parcel_code = $1 AND deleted_at IS NULL`,
-      parcelCode,
-      patch.parcelName ?? null,
-      patch.areaMu ?? null,
-      patch.soilType ?? null,
-      patch.geom ? JSON.stringify(patch.geom) : null,
-      patch.updatedAt,
+      `UPDATE plot_records SET ${sets.join(", ")} WHERE parcel_code = $1 AND deleted_at IS NULL`,
+      ...params,
     );
-    return this.toRecord({ ...rows[0], parcel_name: patch.parcelName ?? rows[0].parcel_name, area_mu: patch.areaMu ?? rows[0].area_mu, soil_type: patch.soilType ?? rows[0].soil_type, geom: patch.geom ?? rows[0].geom, updated_at: patch.updatedAt });
+    return this.toRecord(next);
   }
 
   async remove(tx: unknown, parcelCode: string, deletedAt: string): Promise<boolean> {
@@ -178,7 +258,7 @@ export class SqlPlotRepository implements PlotRepository {
 
   async listByTenant(tenantId: string): Promise<PlotRecord[]> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT parcel_id, parcel_code, parcel_name, tenant_id, farm_id, area_mu, soil_type, geom, created_at, updated_at, deleted_at
+      `SELECT ${PLOT_COLUMNS}
        FROM plot_records WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC`,
       tenantId,
     );

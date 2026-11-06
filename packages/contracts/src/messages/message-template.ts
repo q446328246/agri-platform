@@ -1,4 +1,4 @@
-import type { PrescriptionIssuedPayload, ThresholdBreachedPayload } from "../events/payload.js";
+import type { PestDetectedPayload, PrescriptionIssuedPayload, ThresholdBreachedPayload } from "../events/payload.js";
 import { EventTopic } from "../events/topic.js";
 
 /**
@@ -33,6 +33,16 @@ const METRIC_LABELS: Record<string, string> = {
   airHumidity: "空气湿度",
   windSpeed: "风速",
   rainfall: "降雨量",
+  canopyCoverage: "苗情覆盖度",
+  pestCount: "虫口密度",
+  diseaseIndex: "病情指数",
+};
+
+/** 虫情等级中文名 */
+const PEST_LEVEL_LABELS: Record<PestDetectedPayload["level"], string> = {
+  1: "轻微",
+  2: "中等",
+  3: "严重",
 };
 
 /** 处方类型中文名 */
@@ -120,9 +130,32 @@ const prescriptionTemplate: MessageTemplate<PrescriptionIssuedPayload> = {
   },
 };
 
+/** 虫情识别事件：严重级按告警处理，轻微级仅通知 */
+const pestDetectedTemplate: MessageTemplate<PestDetectedPayload> = {
+  topic: EventTopic.TelemetryPestDetected,
+  label: "虫情识别告警",
+  type: "ALERT",
+  render(payload, context) {
+    const plotCode = payload.parcelId || "未绑定地块";
+    const levelLabel = PEST_LEVEL_LABELS[payload.level] ?? `${payload.level} 级`;
+    const occurredAt = payload.detectedAt || context.occurredAt;
+    const image = payload.imageFileId ? `，现场影像 ${payload.imageFileId}` : "";
+    return {
+      type: payload.level >= 2 ? "ALERT" : "NOTICE",
+      level: payload.level >= 3 ? "CRITICAL" : payload.level === 2 ? "WARNING" : "INFO",
+      title: `虫情识别：${plotCode} ${levelLabel}`,
+      content: `识别到 ${payload.pestType}，发生等级 ${levelLabel}，置信度 ${(payload.confidence * 100).toFixed(1)}%，识别时间 ${occurredAt}${image}。请安排田间核查与防治。`,
+      plotCode: payload.parcelId,
+      occurredAt,
+      dedupeKey: `${EventTopic.TelemetryPestDetected}:${payload.parcelId}:${payload.pestType}:${payload.level}:${hourOf(occurredAt)}`,
+    };
+  },
+};
+
 /** 主题到模板的映射，新增消费主题时在这里登记 */
 export const MESSAGE_TEMPLATES = {
   [EventTopic.TelemetryThresholdBreached]: thresholdTemplate,
+  [EventTopic.TelemetryPestDetected]: pestDetectedTemplate,
   [EventTopic.DecisionPrescriptionIssued]: prescriptionTemplate,
 } as const;
 
@@ -152,6 +185,8 @@ export function buildMessageDraft(
   switch (topic) {
     case EventTopic.TelemetryThresholdBreached:
       return thresholdTemplate.render(payload as ThresholdBreachedPayload, context);
+    case EventTopic.TelemetryPestDetected:
+      return pestDetectedTemplate.render(payload as PestDetectedPayload, context);
     case EventTopic.DecisionPrescriptionIssued:
       return prescriptionTemplate.render(payload as PrescriptionIssuedPayload, context);
     default:

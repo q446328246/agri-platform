@@ -71,6 +71,10 @@ service.interceptors.response.use(
         case 404:
           message = '请求资源不存在'
           break
+        case 409:
+          // 冲突（编码重复、片区下仍有地块）需要把服务端原因直接给用户
+          message = error.response.data?.message || '操作冲突，请检查后重试'
+          break
         case 500:
           message = '服务器内部错误'
           break

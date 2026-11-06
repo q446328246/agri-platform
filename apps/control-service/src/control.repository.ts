@@ -42,6 +42,12 @@ export interface ControlCommand {
 export interface ControlCommandQuery {
   plotCode?: string;
   origin?: ControlOrigin;
+  type?: ControlCommandType;
+  status?: ControlCommandStatus;
+  deviceId?: string;
+  /** 创建时间区间，由 HTTP 层扩展为完整 ISO 后传入，按字典序比较 */
+  from?: string;
+  to?: string;
   page: number;
   size: number;
 }
@@ -113,6 +119,26 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
       values.push(query.origin);
       conditions.push(`origin = $${values.length}`);
     }
+    if (query.type) {
+      values.push(query.type);
+      conditions.push(`type = $${values.length}`);
+    }
+    if (query.status) {
+      values.push(query.status);
+      conditions.push(`status = $${values.length}`);
+    }
+    if (query.deviceId) {
+      values.push(query.deviceId);
+      conditions.push(`device_id = $${values.length}`);
+    }
+    if (query.from) {
+      values.push(query.from);
+      conditions.push(`created_at >= $${values.length}`);
+    }
+    if (query.to) {
+      values.push(query.to);
+      conditions.push(`created_at <= $${values.length}`);
+    }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const totalRows = await this.client.$queryRawUnsafe<Array<{ total: number }>>(
       `SELECT COUNT(*)::int AS total FROM control_commands ${where}`,
@@ -151,7 +177,12 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
   async page(query: ControlCommandQuery): Promise<PageResult<ControlCommand>> {
     const filtered = this.rows
       .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
-      .filter((row) => (query.origin ? row.origin === query.origin : true));
+      .filter((row) => (query.origin ? row.origin === query.origin : true))
+      .filter((row) => (query.type ? row.type === query.type : true))
+      .filter((row) => (query.status ? row.status === query.status : true))
+      .filter((row) => (query.deviceId ? row.deviceId === query.deviceId : true))
+      .filter((row) => (query.from ? row.createdAt >= query.from : true))
+      .filter((row) => (query.to ? row.createdAt <= query.to : true));
     const start = (query.page - 1) * query.size;
     return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
   }

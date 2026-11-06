@@ -23,6 +23,8 @@ function defaultRoutes(): GatewayRoute[] {
   return [
     { prefix: "/api/v1/auth", target: process.env.AUTH_SERVICE_URL ?? "http://127.0.0.1:3001" },
     { prefix: "/api/v1/plots", target: process.env.PLOT_SERVICE_URL ?? "http://127.0.0.1:3002" },
+    // 片区台账与地块同源，都落在 plot-service
+    { prefix: "/api/v1/zones", target: process.env.PLOT_SERVICE_URL ?? "http://127.0.0.1:3002" },
     { prefix: "/api/v1/platform", target: process.env.PLATFORM_SERVICE_URL ?? "http://127.0.0.1:3014" },
     { prefix: "/api/v1/devices", target: process.env.IOT_SERVICE_URL ?? "http://127.0.0.1:3003" },
     { prefix: "/api/v1/telemetry", target: process.env.TELEMETRY_SERVICE_URL ?? "http://127.0.0.1:3004" },

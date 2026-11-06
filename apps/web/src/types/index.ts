@@ -93,6 +93,8 @@ export interface Plot {
   updatedAt: string;
   /** 地块边界几何，CGCS2000 GeoJSON Polygon */
   geom?: unknown;
+  /** 所属片区编码（plot_zones.zone_code），未划分时为空 */
+  zoneCode?: string;
 }
 
 // 地块查询参数
@@ -105,6 +107,10 @@ export interface PlotQuery {
   type?: PlotType | undefined;
   status?: PlotStatus | undefined;
   soilType?: SoilType | undefined;
+  /** 当前作物模糊匹配 */
+  currentCrop?: string;
+  /** 按片区过滤 */
+  zoneCode?: string;
 }
 
 // 创建/编辑地块参数
@@ -113,6 +119,8 @@ export interface PlotForm {
   regionCode: string;
   villageCode: string;
   type: PlotType;
+  /** 地块状态，迁移 011 后可在编辑页维护 */
+  status?: PlotStatus;
   areaMu: number;
   soilType?: SoilType | undefined;
   ownerName?: string;
@@ -145,6 +153,10 @@ export interface DeviceQuery {
   pageSize?: number;
   keyword?: string;
   status?: DeviceStatus | undefined;
+  /** 设备类型，与 iot-service 台账 type 字段同源（WEATHER_STATION / SOIL_SENSOR 等） */
+  type?: string | undefined;
+  /** 所属地块编码，精确匹配 */
+  plotCode?: string | undefined;
 }
 export interface DeviceRealtimeData {
   deviceId: string;
@@ -197,9 +209,9 @@ export interface FarmTaskQuery {
   page?: number;
   pageSize?: number;
   keyword?: string;
-  parcelCode?: string;
+  parcelCode?: string | undefined;
   status?: FarmTaskStatus | undefined;
-  taskType?: string;
+  taskType?: string | undefined;
   startDate?: string;
   endDate?: string;
 }

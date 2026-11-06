@@ -54,6 +54,7 @@ services:
       MESSAGE_REPOSITORY_MODE: sql
       CONTROL_REPOSITORY_MODE: sql
       TRACE_REPOSITORY_MODE: sql
+      FINANCE_REPOSITORY_MODE: sql
       # 部署环境开启服务侧二次校验，网关始终强制鉴权
       AUTH_GUARD_MODE: enforce
       GATEWAY_AUTH_ENABLED: "true"

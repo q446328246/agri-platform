@@ -72,6 +72,8 @@ function queryOf(params: URLSearchParams): MessageQuery {
   };
   const type = params.get("type");
   if (type === "ALERT" || type === "NOTICE") query.type = type;
+  const level = parseLevel(params.get("level"));
+  if (level) query.level = level;
   const read = params.get("read");
   if (read === "true") query.read = true;
   if (read === "false") query.read = false;
@@ -79,6 +81,11 @@ function queryOf(params: URLSearchParams): MessageQuery {
   if (plotCode) query.plotCode = plotCode;
   const keyword = params.get("keyword");
   if (keyword) query.keyword = keyword;
+  const from = params.get("from");
+  if (from) query.from = from;
+  const to = params.get("to");
+  // 纯日期（YYYY-MM-DD）扩展为当日 23:59:59.999，使「截止日」含当天全部消息
+  if (to) query.to = /^\d{4}-\d{2}-\d{2}$/.test(to) ? `${to}T23:59:59.999Z` : to;
   return query;
 }
 

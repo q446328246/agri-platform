@@ -58,13 +58,14 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="assigneeName" label="负责人" width="120" />
-          <el-table-column prop="startTime" label="开始时间" width="170">
+          <el-table-column prop="plotCode" label="地块编码" width="240" />
+          <el-table-column prop="scheduledAt" label="计划时间" width="170">
             <template #default="{ row }">
-              {{ formatDateTime(row.startTime) }}
+              {{ formatDateTime(row.scheduledAt || row.createdAt) }}
             </template>
           </el-table-column>
         </el-table>
+        <el-empty v-if="!recentTasks.length" description="该地块暂无农事任务" :image-size="80" />
       </div>
     </div>
   </div>
@@ -74,9 +75,8 @@
 import { ref, onMounted } from 'vue'
 import PlotBoundaryMap from '@/components/PlotBoundaryMap.vue'
 import { useRoute, useRouter } from 'vue-router'
-import { plotApi } from '@/api'
+import { plotApi, operationApi } from '@/api'
 import type { Plot } from '@/types'
-import { FarmTaskStatus } from '@/types'
 import {
   formatDateTime, formatArea,
   getPlotStatusText, getPlotStatusType, getPlotTypeText,
@@ -85,12 +85,12 @@ import {
 
 const getTaskTypeText = (type: string) => {
   const map: Record<string, string> = {
-    'SOWING': '播种',
-    'FERTILIZING': '施肥',
+    'TILLAGE': '翻耕',
+    'SEEDING': '播种',
     'IRRIGATION': '灌溉',
-    'PEST_CONTROL': '病虫害防治',
-    'HARVEST': '收获',
-    'OTHER': '其他'
+    'WEEDING': '除草',
+    'SPRAYING': '植保',
+    'FERTILIZATION': '施肥'
   }
   return map[type] || type
 }
@@ -105,24 +105,12 @@ async function loadDetail() {
   loading.value = true
   try {
     plotData.value = await plotApi.getById(route.params.id as string)
-    // 模拟近期农事数据
-    recentTasks.value = [
-      {
-        id: '1',
-        plotId: plotData.value.id,
-        plotName: plotData.value.name,
-        type: 'FERTILIZING',
-        name: '春季追肥',
-        status: FarmTaskStatus.COMPLETED,
-        assigneeName: '张三',
-        startTime: '2026-03-15T08:00:00Z',
-        seasonId: '',
-        operatorId: '',
-        endTime: '2026-03-15T12:00:00Z',
-        createdAt: '2026-03-10T10:00:00Z',
-        updatedAt: '2026-03-15T12:00:00Z'
-      }
-    ]
+    // 按地块编码关联农事任务，后端 keyword 同时匹配任务名与地块编码
+    const result = await operationApi.getTasks({ page: 1, size: 50, keyword: plotData.value.parcelCode })
+    recentTasks.value = result.items.map((task) => ({
+      ...task,
+      status: task.status === 'RUNNING' ? 'IN_PROGRESS' : task.status
+    }))
   } catch (error) {
     console.error('加载地块详情失败', error)
   } finally {

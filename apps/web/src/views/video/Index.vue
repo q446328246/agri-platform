@@ -8,6 +8,20 @@
       <el-tooltip content="刷新"><el-button circle size="small" @click="load"><el-icon><Refresh /></el-icon></el-button></el-tooltip>
     </div>
 
+    <div class="search-bar">
+      <el-form :inline="true" :model="query" @submit.prevent="search">
+        <el-form-item label="关键词"><el-input v-model="query.keyword" placeholder="摄像机名称/编号" clearable style="width: 180px" /></el-form-item>
+        <el-form-item label="地块编码"><el-input v-model="query.plotCode" placeholder="可选" clearable style="width: 170px" /></el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="query.status" placeholder="全部" clearable style="width: 110px">
+            <el-option label="在线" value="ONLINE" />
+            <el-option label="离线" value="OFFLINE" />
+          </el-select>
+        </el-form-item>
+        <el-form-item><el-button type="primary" @click="search">查询</el-button><el-button @click="resetQuery">重置</el-button></el-form-item>
+      </el-form>
+    </div>
+
     <el-skeleton v-if="loading && !cameras.length" :rows="4" animated />
 
     <el-empty v-else-if="!cameras.length" description="暂无摄像机" />
@@ -77,6 +91,7 @@ type PlayState = 'loading' | 'playing' | 'error' | 'idle'
 const loading = ref(false)
 const cameras = ref<Camera[]>([])
 const total = ref(0)
+const query = reactive<{ keyword: string; plotCode: string; status: string }>({ keyword: '', plotCode: '', status: '' })
 const playableCount = computed(() => cameras.value.filter((camera) => playable(camera)).length)
 const playState = reactive<Record<string, PlayState>>({})
 const videoEls = new Map<string, HTMLVideoElement>()
@@ -155,7 +170,13 @@ function retry(camera: Camera) {
 async function load() {
   loading.value = true
   try {
-    const res = await videoApi.getCameras({ page: 1, size: 100 })
+    const res = await videoApi.getCameras({
+      page: 1,
+      size: 100,
+      ...(query.keyword ? { keyword: query.keyword } : {}),
+      ...(query.plotCode ? { plotCode: query.plotCode } : {}),
+      ...(query.status ? { status: query.status } : {})
+    })
     cameras.value = res.items ?? []
     total.value = res.total
     for (const camera of cameras.value) playState[camera.id] = playable(camera) ? 'loading' : 'idle'
@@ -168,6 +189,9 @@ async function load() {
     loading.value = false
   }
 }
+
+function search() { void load() }
+function resetQuery() { query.keyword = ''; query.plotCode = ''; query.status = ''; load() }
 
 async function sendPtz(cameraId: string, action: string) {
   try {

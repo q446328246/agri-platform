@@ -9,11 +9,23 @@ function send<T>(res: ServerResponse, status: number, data: T | null, traceId: s
 function trace(req: IncomingMessage): string { return req.headers["x-request-id"]?.toString() || randomUUID(); }
 async function json(req: IncomingMessage): Promise<Record<string, unknown>> { const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const value: unknown = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}; if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("请求体必须是 JSON 对象"); return value as Record<string, unknown>; }
 function page(rows: TraceRecord[], query: URLSearchParams): PageResult<TraceRecord> { const pageNo = Math.max(1, Number(query.get("page") || 1)); const size = Math.min(200, Math.max(1, Number(query.get("size") || 20))); const start = (pageNo - 1) * size; return { items: rows.slice(start, start + size), total: rows.length, page: pageNo, size, pages: Math.ceil(rows.length / size) }; }
+/** 在仓储的 plotCode/event 条件之外，补充关键词（追溯码/详情/操作人）与记录时间区间过滤 */
+function filterRecords(rows: TraceRecord[], query: URLSearchParams): TraceRecord[] {
+  const keyword = (query.get("keyword") || "").trim().toLowerCase();
+  const from = (query.get("from") || "").trim();
+  const to = (query.get("to") || "").trim();
+  const toEnd = /^\d{4}-\d{2}-\d{2}$/.test(to) ? `${to}T23:59:59.999Z` : to;
+  return rows.filter((row) => {
+    if (from !== "" && row.createdAt < from) return false;
+    if (to !== "" && row.createdAt > toEnd) return false;
+    return keyword.length === 0 || `${row.traceCode} ${row.detail} ${row.operator}`.toLowerCase().includes(keyword);
+  });
+}
 export function createTraceHttpServer(repository: TraceRepository = new InMemoryTraceRepository()): Server { return createServer(async (req, res) => { const traceId = trace(req); const url = new URL(req.url ?? "/", "http://localhost"); try {
   if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "trace" }, traceId); return; }
   const denied = authorizeRequest(req, { read: "trace:read", write: "trace:write" });
   if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
-  if (req.method === "GET" && url.pathname === "/api/v1/trace/records") { send(res, 200, page(await repository.list(url.searchParams.get("plotCode") ?? undefined, url.searchParams.get("event") ?? undefined), url.searchParams), traceId); return; }
+  if (req.method === "GET" && url.pathname === "/api/v1/trace/records") { const rows = await repository.list(url.searchParams.get("plotCode") ?? undefined, url.searchParams.get("event") ?? undefined); send(res, 200, page(filterRecords(rows, url.searchParams), url.searchParams), traceId); return; }
   if (req.method === "POST" && url.pathname === "/api/v1/trace/records") { const body = await json(req); const item: TraceRecord = { id: randomUUID(), traceCode: `TR-${Date.now()}-${Math.floor(Math.random() * 1000)}`, plotCode: String(body.plotCode ?? ""), event: String(body.event ?? "FARM_OPERATION"), detail: String(body.detail ?? ""), operator: String(body.operator ?? "system"), createdAt: new Date().toISOString() }; await repository.create(item); send(res, 201, item, traceId); return; }
   const match = url.pathname.match(/^\/api\/v1\/trace\/([^/]+)$/); const code = match?.[1]; if (code && req.method === "GET") { send(res, 200, await repository.findByCode(code), traceId); return; }
   send(res, 404, null, traceId, "接口不存在");

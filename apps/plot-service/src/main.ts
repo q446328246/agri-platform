@@ -25,6 +25,8 @@ import { ulid } from "@agri/shared";
 
 import { PlotCodeService } from "./plot-code.service.js";
 import { PlotEventConsumer } from "./plot.consumer.js";
+import { InMemoryInfraLineRepository, SqlInfraLineRepository } from "./infra-line.repository.js";
+import { InMemoryZoneRepository, SqlZoneRepository } from "./zone.repository.js";
 import { InMemoryPlotRepository, SqlPlotRepository } from "./plot.repository.js";
 import { PlotService } from "./plot.service.js";
 import { createExamplePrismaFactory } from "./prisma.factory.js";
@@ -96,12 +98,18 @@ async function bootstrap(): Promise<void> {
   const repository = repositoryMode === "sql"
     ? new SqlPlotRepository(prisma.clientInstance)
     : new InMemoryPlotRepository();
+  const infraLines = repositoryMode === "sql"
+    ? new SqlInfraLineRepository(prisma.clientInstance)
+    : new InMemoryInfraLineRepository();
+  const zones = repositoryMode === "sql"
+    ? new SqlZoneRepository(prisma.clientInstance)
+    : new InMemoryZoneRepository();
 
   const codeService = new PlotCodeService();
   const plotService = new PlotService(repository, outbox, codeService, prisma);
 
   if (process.env.SERVICE_MODE === "http") {
-    const server = createPlotHttpServer(plotService);
+    const server = createPlotHttpServer(plotService, infraLines, zones);
     const port = Number(process.env.PORT ?? 3002);
     server.listen(port, "127.0.0.1", () => logger.info("地块服务 HTTP 已启动", { port }));
     const shutdown = async (): Promise<void> => {

@@ -2,20 +2,32 @@
   <div class="page-container">
     <div class="card-container">
       <div class="search-bar">
-        <el-form :inline="true" :model="queryForm">
+        <el-form :inline="true" :model="queryForm" @submit.prevent="handleSearch">
           <el-form-item label="设备名称">
             <el-input v-model="queryForm.keyword" placeholder="设备名称/编号" clearable style="width: 200px" />
           </el-form-item>
+          <el-form-item label="设备类型">
+            <el-select v-model="queryForm.type" placeholder="请选择" clearable style="width: 160px">
+              <el-option
+                v-for="item in deviceTypeOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
           <el-form-item label="设备状态">
-            <el-select v-model="queryForm.status" placeholder="请选择" clearable style="width: 150px">
+            <el-select v-model="queryForm.status" placeholder="请选择" clearable style="width: 120px">
               <el-option label="在线" value="ONLINE" />
               <el-option label="离线" value="OFFLINE" />
-              <el-option label="故障" value="FAULT" />
-              <el-option label="维护中" value="MAINTENANCE" />
             </el-select>
+          </el-form-item>
+          <el-form-item label="所属地块">
+            <el-input v-model="queryForm.plotCode" placeholder="地块编码" clearable style="width: 160px" />
           </el-form-item>
           <el-form-item>
             <el-button type="primary" @click="handleSearch">查询</el-button>
+            <el-button @click="handleReset">重置</el-button>
           </el-form-item>
         </el-form>
       </div>
@@ -54,8 +66,11 @@
         <el-pagination
           v-model:current-page="queryForm.page"
           v-model:page-size="queryForm.pageSize"
+          :page-sizes="[10, 20, 50, 100]"
           :total="total"
-          layout="total, prev, pager, next"
+          layout="total, sizes, prev, pager, next"
+          @size-change="fetchList"
+          @current-change="fetchList"
         />
       </div>
     </div>
@@ -89,18 +104,39 @@ const queryForm = reactive<DeviceQuery>({
   page: 1,
   pageSize: 20,
   keyword: '',
-  status: undefined
+  status: undefined,
+  type: undefined,
+  plotCode: ''
 })
+
+// 与 iot-service 设备台账的 type 取值保持同源
+const deviceTypeOptions = [
+  { label: '气象站', value: 'WEATHER_STATION' },
+  { label: '墒情传感器', value: 'SOIL_SENSOR' },
+  { label: '综合监测站', value: 'INTEGRATED_STATION' },
+  { label: '遥感反演节点', value: 'REMOTE_SENSE' },
+  { label: '虫情测报灯', value: 'INSECT_LAMP' },
+  { label: '水肥阀', value: 'FERTILIZER_VALVE' },
+  { label: '灌溉阀门', value: 'IRRIGATION_VALVE' },
+  { label: '灌溉泵站', value: 'IRRIGATION_PUMP' },
+  { label: '植保无人机', value: 'AGRICULTURAL_DRONE' },
+  { label: '无人驾驶拖拉机', value: 'AUTO_TRACTOR' }
+]
 
 async function fetchList() {
   loading.value = true
   try {
-    const result = await iotApi.getDevices()
+    const result = await iotApi.getDevices({
+      page: queryForm.page,
+      size: queryForm.pageSize,
+      keyword: queryForm.keyword || undefined,
+      type: queryForm.type,
+      status: queryForm.status,
+      plotCode: queryForm.plotCode || undefined
+    })
     tableData.value = result.items
-      .filter((device) => !queryForm.keyword || `${device.name}${device.deviceNo}`.includes(queryForm.keyword))
-      .filter((device) => !queryForm.status || device.status === queryForm.status)
       .map((device) => ({ ...device, serialNo: device.deviceNo, plotName: device.plotCode || '-', lastReportAt: device.lastSeenAt, createdAt: device.lastSeenAt }))
-    total.value = tableData.value.length
+    total.value = result.total
   } catch (error) {
     tableData.value = []
     total.value = 0
@@ -111,6 +147,15 @@ async function fetchList() {
 }
 
 function handleSearch() {
+  queryForm.page = 1
+  fetchList()
+}
+
+function handleReset() {
+  queryForm.keyword = ''
+  queryForm.status = undefined
+  queryForm.type = undefined
+  queryForm.plotCode = ''
   queryForm.page = 1
   fetchList()
 }

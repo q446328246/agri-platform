@@ -53,6 +53,9 @@ pnpm --filter @agri/web dev
 | `pnpm smoke:consumers` | 需 `DB_URL`：越限/处方事件 → 自动水肥指令与生产档案 |
 | `pnpm smoke:messages` | 需 `DB_URL`：消息订阅偏好过滤与来源主题去重 |
 | `pnpm smoke:identity` | 需 `DB_URL`：角色/用户落库，重启后仍可登录与查询 |
+| `pnpm smoke:zones` | 片区建档/划入/凸包与机耕道导航（默认经 `https://localhost`，可用 `BASE_URL` 覆盖） |
+| `pnpm smoke:demo` | 逐页校验演示数据（地块/四情/设备/任务/指令/处方/视频/消息/核算/溯源/系统管理），同样默认 `https://localhost` |
+| `pnpm smoke:filters` | 逐服务校验各页面查询条的筛选参数真实生效（枚举/关键词/时间区间/分页/汇总联动），默认 `https://localhost` |
 | `pnpm init:minio` | 创建 S3/MinIO bucket |
 | `pnpm health:infra` | 检查 PostgreSQL 和 MinIO |
 | `pnpm db:migrate` | 使用 `DB_URL` 执行 PostgreSQL 初始化迁移 |
@@ -76,6 +79,7 @@ docker compose -f infra/docker-compose.yml --profile app up -d --build
 - 应用容器启动时先执行数据库迁移与 MinIO bucket 初始化，再拉起 15 个服务；网关是唯一对外入口。
 - 部署环境固定 `AUTH_GUARD_MODE=enforce` 与 `GATEWAY_AUTH_ENABLED=true`，`INTERNAL_TOKEN`、`AUTH_SESSION_TTL_SECONDS` 可覆盖。
 - 地图 Key 用 `VITE_TIANDITU_KEY` 构建参数传入；生产证书放到 `infra/certs` 并启用 `edge` 的注释卷。
+- 演示数据：迁移 `010_demo_data.sql` 会灌入一套达川丘区（地图中心 `30.982425, 107.421325`）的完整数据，含 12 块地块与 3 个片区、3024 条遥测读数、告警/虫情/处方/指令/消息/投入产出/溯源记录，设备、摄像头与农事任务由 iot/video/operation 服务的内存种子提供，各业务页面登录即有内容。演示账号：`agronomist`、`operator01`、`viewer01`（口令均为 `demo123`，`temp01` 为已停用账号）；需重置时删除主键带 `demo` 前缀的行后重跑迁移即可。
 - 构建需要能访问 Docker Hub 与 npm 源；若镜像拉取超时，先配置镜像加速或代理。
 
 ## 二、目录结构
@@ -173,18 +177,21 @@ agri-platform-nodejs-scaffold/
   拦截路由（`meta.permission` → `/403`）；平台服务不可用时退回直授权限，不阻断登录。
 - **消费结果可直接核对**：设备管理下的「控制指令」页按地块与来源（自动/人工）筛选，展示指令缘由与
   `sourceEventId` 便于回溯；生产档案页可按事件类型（处方生成/农事作业/作业完成）筛选，事件列以标签区分。
+- **全站统一条件查询**：地块、设备、农事任务、控制指令、投入产出、溯源档案、视频监控、四情、消息等页面
+  统一提供「关键词 + 枚举下拉 + 时间区间 + 重置 + 分页」查询条，筛选全部下沉服务端；
+  地块台账补充类型/状态/当前作物/负责人字段（迁移 011），投入产出页汇总卡片与列表同一套条件联动。
 - **错误码分段**：域缩写-分类码-序号（如 `PLOT-409-001`），含义一经发布不得修改。
 - **时序数据不在 `@agri/db` 范围内**：由物联感知服务直连时序库；缓存由各服务自行使用缓存中间件。
 
 ## 五、已验证结果
 
 在本机 Node.js 24.16.0 / pnpm 12.16.1 环境下实际执行；2026-11-05 按交付清单完成全量复验
-（build、test、web build 与下方 8 个冒烟脚本全部通过）：
+（build、test、web build、9 个冒烟脚本与业务增强冒烟全部通过）：
 
 | 验证项 | 命令 | 结果 |
 | --- | --- | --- |
 | 全量编译 | `pnpm run build` | 通过 |
-| 测试 | `pnpm test` | 37 个测试文件、149 个用例全部通过（带 `DB_URL` 时 SQL 用例不再跳过） |
+| 测试 | `pnpm test` | 45 个测试文件、183 个用例全部通过（带 `DB_URL` 时 SQL 用例不再跳过） |
 | 前端类型检查 | `pnpm --filter @agri/web exec vue-tsc -b` | 通过 |
 | 事件闭环联调 | `pnpm exec vitest run apps/message-service/test/event-closure.spec.ts` | 通过：越限/处方事件 → 消息 → 已读 → 效果回流 → 规则阈值写回 |
 | 全量服务冒烟 | `pnpm smoke:services` | 15 个 HTTP 服务启动并健康检查通过 |
@@ -194,6 +201,10 @@ agri-platform-nodejs-scaffold/
 | 账号角色落库 | `pnpm smoke:identity` | 通过：创建角色与用户后重启服务，仍可登录且角色权限、审计日志仍在 |
 | 事件消费方 | `pnpm smoke:consumers` | 通过：越限与处方各生成一条自动指令，处方写入追溯档案，重复轮询不重复下发 |
 | 消息订阅偏好 | `pnpm smoke:messages` | 通过：关闭订阅零消息、最低级别门槛、同小时去重、偏好持久化 |
+| 业务增强 | `node .runtime/verify-agro.mjs` | 通过：四情规则 7 条、虫情上报与处置、视频 AI 回调、灌溉方案预演（133.34 m³ / 400 min）、水肥参数拦截、管网增删 |
+| 片区与导航 | `pnpm smoke:zones` | 通过：示例片区就绪、建档/重码 409、划入与凸包、按片区过滤、机耕道沿路导航与历史方案、有地块时删片区 409、清理 |
+| 演示数据逐页校验 | `pnpm smoke:demo` | 通过：37 项全 PASS（迁移 011 与条件查询改造后无回归） |
+| 条件查询冒烟 | `pnpm smoke:filters` | 通过：38 项全 PASS——地块类型/状态/土壤/作物/面积/非法枚举 400、设备类型/状态/地块/分页、任务与指令枚举+时间区间、核算筛选+汇总联动、溯源、视频、四情（指标/级别/虫情/总览联动）、消息级别与时间区间 |
 | 示例服务 | `pnpm run start:plot` | 建档、中继、消费、幂等链路跑通，输出如下 |
 
 ```json

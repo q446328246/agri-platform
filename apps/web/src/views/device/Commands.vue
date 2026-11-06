@@ -11,6 +11,36 @@
             <el-option label="人工" value="MANUAL" />
           </el-select>
         </el-form-item>
+        <el-form-item label="指令类型">
+          <el-select v-model="query.type" placeholder="全部" clearable style="width: 120px">
+            <el-option label="播种" value="SEEDING" />
+            <el-option label="灌溉" value="IRRIGATION" />
+            <el-option label="除草" value="WEEDING" />
+            <el-option label="水肥" value="FERTILIZATION" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="query.status" placeholder="全部" clearable style="width: 120px">
+            <el-option label="已入队" value="QUEUED" />
+            <el-option label="已下发" value="SENT" />
+            <el-option label="失败" value="FAILED" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="设备编号">
+          <el-input v-model="query.deviceId" placeholder="设备 ID" clearable style="width: 170px" />
+        </el-form-item>
+        <el-form-item label="下达时间">
+          <el-date-picker
+            v-model="query.range"
+            type="daterange"
+            value-format="YYYY-MM-DD"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            clearable
+            style="width: 240px"
+          />
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="reload">查询</el-button>
           <el-button @click="reset">重置</el-button>
@@ -83,9 +113,22 @@ import {
 const loading = ref(false)
 const commands = ref<any[]>([])
 const total = ref(0)
-const query = reactive<{ plotCode: string; origin: '' | 'EVENT' | 'MANUAL'; page: number; size: number }>({
+const query = reactive<{
+  plotCode: string
+  origin: '' | 'EVENT' | 'MANUAL'
+  type: string
+  status: string
+  deviceId: string
+  range: [string, string] | null
+  page: number
+  size: number
+}>({
   plotCode: '',
   origin: '',
+  type: '',
+  status: '',
+  deviceId: '',
+  range: null,
   page: 1,
   size: 20
 })
@@ -96,6 +139,11 @@ async function load() {
     const result = await controlApi.getCommands({
       ...(query.plotCode ? { plotCode: query.plotCode } : {}),
       ...(query.origin ? { origin: query.origin } : {}),
+      ...(query.type ? { type: query.type } : {}),
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.deviceId ? { deviceId: query.deviceId } : {}),
+      ...(query.range?.[0] ? { from: query.range[0] } : {}),
+      ...(query.range?.[1] ? { to: query.range[1] } : {}),
       page: query.page,
       size: query.size
     })
@@ -114,6 +162,10 @@ function reload() {
 function reset() {
   query.plotCode = ''
   query.origin = ''
+  query.type = ''
+  query.status = ''
+  query.deviceId = ''
+  query.range = null
   reload()
 }
 

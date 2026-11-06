@@ -44,6 +44,12 @@ export class MessageEventConsumer {
     await this.deliver(event);
   }
 
+  /** 虫情识别：视频 AI 与田间上报共用，按发生等级生成告警或提醒 */
+  @registerHandler(EventTopic.TelemetryPestDetected)
+  async onPestDetected(event: DomainEvent<unknown>): Promise<void> {
+    await this.deliver(event);
+  }
+
   /**
    * 通用投递：模板渲染 → 偏好过滤 → 落库。
    * 未登记模板的主题直接跳过，便于后续扩展主题时先加模板再加订阅。

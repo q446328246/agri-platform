@@ -37,10 +37,15 @@ export interface MessageRecord {
 export interface MessageQuery {
   tenantId?: string;
   type?: MessageType;
+  /** 告警级别筛选，缺省不过滤 */
+  level?: MessageLevel;
   /** true 仅看已读，false 仅看未读，缺省不过滤 */
   read?: boolean;
   plotCode?: string;
   keyword?: string;
+  /** 创建时间区间，由 HTTP 层扩展为完整 ISO 后传入 */
+  from?: string;
+  to?: string;
   page: number;
   size: number;
 }
@@ -115,6 +120,18 @@ export class SqlMessageRepository implements MessageRepository {
     if (query.type) {
       values.push(query.type);
       conditions.push(`type = $${values.length}`);
+    }
+    if (query.level) {
+      values.push(query.level);
+      conditions.push(`level = $${values.length}`);
+    }
+    if (query.from) {
+      values.push(query.from);
+      conditions.push(`created_at >= $${values.length}`);
+    }
+    if (query.to) {
+      values.push(query.to);
+      conditions.push(`created_at <= $${values.length}`);
     }
     if (query.read !== undefined) {
       conditions.push(`is_read = ${query.read ? "TRUE" : "FALSE"}`);
@@ -208,9 +225,12 @@ export class InMemoryMessageRepository implements MessageRepository {
     const filtered = this.rows
       .filter((row) => (query.tenantId ? row.tenantId === query.tenantId : true))
       .filter((row) => (query.type ? row.type === query.type : true))
+      .filter((row) => (query.level ? row.level === query.level : true))
       .filter((row) => (query.read === undefined ? true : row.read === query.read))
       .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
-      .filter((row) => (query.keyword ? `${row.title}${row.content}`.includes(query.keyword) : true));
+      .filter((row) => (query.keyword ? `${row.title}${row.content}`.includes(query.keyword) : true))
+      .filter((row) => (query.from ? row.createdAt >= query.from : true))
+      .filter((row) => (query.to ? row.createdAt <= query.to : true));
     const start = (query.page - 1) * query.size;
     return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
   }

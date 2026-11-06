@@ -10,6 +10,21 @@
             <el-option label="作业完成" value="OPERATION_COMPLETED" />
           </el-select>
         </el-form-item>
+        <el-form-item label="关键词">
+          <el-input v-model="form.keyword" placeholder="编号/详情/操作人" clearable style="width: 170px" />
+        </el-form-item>
+        <el-form-item label="记录时间">
+          <el-date-picker
+            v-model="form.range"
+            type="daterange"
+            value-format="YYYY-MM-DD"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            clearable
+            style="width: 240px"
+          />
+        </el-form-item>
         <el-form-item><el-button type="primary" @click="search">查询</el-button><el-button @click="reset">重置</el-button></el-form-item>
       </el-form>
       <el-table v-loading="loading" :data="records" border stripe>
@@ -47,7 +62,7 @@ import { formatDateTime, getTraceEventText, getTraceEventType } from '@/utils'
 const loading = ref(false)
 const records = ref<any[]>([])
 const total = ref(0)
-const form = reactive<{ plotCode: string; event: string }>({ plotCode: '', event: '' })
+const form = reactive<{ plotCode: string; event: string; keyword: string; range: [string, string] | null }>({ plotCode: '', event: '', keyword: '', range: null })
 const page = reactive({ page: 1, size: 20 })
 async function load() {
   loading.value = true
@@ -55,6 +70,9 @@ async function load() {
     const result = await traceApi.getRecords({
       ...(form.plotCode ? { plotCode: form.plotCode } : {}),
       ...(form.event ? { event: form.event } : {}),
+      ...(form.keyword ? { keyword: form.keyword } : {}),
+      ...(form.range?.[0] ? { from: form.range[0] } : {}),
+      ...(form.range?.[1] ? { to: form.range[1] } : {}),
       page: page.page,
       size: page.size
     })
@@ -63,6 +81,6 @@ async function load() {
   } finally { loading.value = false }
 }
 function search() { page.page = 1; void load() }
-function reset() { form.plotCode = ''; form.event = ''; search() }
+function reset() { form.plotCode = ''; form.event = ''; form.keyword = ''; form.range = null; search() }
 onMounted(() => void load())
 </script>

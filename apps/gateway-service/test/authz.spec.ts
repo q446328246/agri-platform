@@ -6,6 +6,12 @@ describe("网关路由鉴权策略", () => {
     expect(resolveRouteRule("GET", "/health")).toEqual({ kind: "public" });
     expect(resolveRouteRule("POST", "/api/v1/auth/login")).toEqual({ kind: "public" });
     expect(resolveRouteRule("POST", "/api/v1/telemetry/report")).toEqual({ kind: "public" });
+    // 虫情与视频 AI 识别由算法侧回调，不带用户身份
+    expect(resolveRouteRule("POST", "/api/v1/telemetry/pest-events")).toEqual({ kind: "public" });
+    expect(resolveRouteRule("POST", "/api/v1/video/ai-events")).toEqual({ kind: "public" });
+    // 查询侧仍需权限，不能因上报公开而放开
+    expect(resolveRouteRule("GET", "/api/v1/telemetry/pests")).toEqual({ kind: "permission", code: "telemetry:read" });
+    expect(resolveRouteRule("GET", "/api/v1/video/ai-events")).toEqual({ kind: "permission", code: "device:read" });
   });
 
   it("个人信息、租户与权限目录只要求登录", () => {
@@ -20,6 +26,9 @@ describe("网关路由鉴权策略", () => {
     expect(resolveRouteRule("GET", "/api/v1/plots/")).toEqual({ kind: "permission", code: "plot:read" });
     expect(resolveRouteRule("POST", "/api/v1/plots")).toEqual({ kind: "permission", code: "plot:write" });
     expect(resolveRouteRule("DELETE", "/api/v1/farm-tasks/1")).toEqual({ kind: "permission", code: "operation:write" });
+    // 片区随地块：列表需 plot:read，建档/划入地块需 plot:write
+    expect(resolveRouteRule("GET", "/api/v1/zones/map")).toEqual({ kind: "permission", code: "plot:read" });
+    expect(resolveRouteRule("POST", "/api/v1/zones/ZONE-01/plots")).toEqual({ kind: "permission", code: "plot:write" });
     expect(resolveRouteRule("POST", "/api/v1/control/commands")).toEqual({ kind: "permission", code: "device:control" });
     // 文件随地块、视频随设备
     expect(resolveRouteRule("GET", "/api/v1/files/1/content")).toEqual({ kind: "permission", code: "plot:read" });

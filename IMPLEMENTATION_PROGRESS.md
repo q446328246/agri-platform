@@ -7,7 +7,7 @@
 - 更新时间：2026-11-05
 - 当前阶段：全量验证与交付
 - 总体状态：首版交付完成（待验收）
-- 当前主线：事件日志总线打通跨进程链路，处方效果回流调优规则，系统管理用户/角色已落库，越限/处方事件已驱动控制指令与生产档案，消息中心按订阅偏好过滤并按来源主题去重，网关与服务侧已按角色权限拦截接口，控制指令来源与生产档案事件类型已在前端展示并可筛选；登录会话已落 `auth_sessions`、口令改为 scrypt 并支持滑动续期；已完成本机容器化部署（`app` + `edge`，HTTPS 443）并逐接口复验
+- 当前主线：事件日志总线打通跨进程链路，处方效果回流调优规则，系统管理用户/角色已落库，越限/处方事件已驱动控制指令与生产档案，消息中心按订阅偏好过滤并按来源主题去重，网关与服务侧已按角色权限拦截接口，控制指令来源与生产档案事件类型已在前端展示并可筛选；登录会话已落 `auth_sessions`、口令改为 scrypt 并支持滑动续期；已完成本机容器化部署（`app` + `edge`，HTTPS 443）并逐接口复验；四情监控（苗情/虫情/灾情/阈值规则）、视频 AI 识别联动、水肥配比与变量灌溉曲线、一张图管网图层已补齐并通过冒烟；片区台账（`plot_zones`）、田间导航（机耕道沿路里程）与一张图片区图层已补齐，需求矩阵无「部分完成」项；全页面演示数据已就位（`010_demo_data.sql` 落库 + iot/video/operation/finance 服务种子）；地块档案字段（类型/状态/当前作物/负责人，`011_plot_profile.sql`）已落库，地块/设备/任务/指令/核算/溯源/视频/四情/消息等页面统一「关键词+枚举+时间区间+重置+分页」查询条并全部下沉服务端，`pnpm smoke:filters` 38 项条件查询冒烟通过
 
 ## 规格来源
 
@@ -24,8 +24,8 @@
 | 3. 公共契约与基础能力 | 已完成 | contracts/config/shared/db/mq/observability/testing 均有实现与单测 |
 | 4. 地块与平台基础服务 | 已完成 | 地块、平台、认证接口均为仓储化实现，可切 SQL |
 | 5. 感知与告警服务 | 已完成 | IoT、telemetry、weather、message |
-| 6. 作业、装备、水肥与决策 | 已完成（水肥配比除外） | operation/control/decision/finance |
-| 7. 视频、文件、溯源与网关 | 已完成（AI 联动除外） | video/file/trace/gateway |
+| 6. 作业、装备、水肥与决策 | 已完成 | operation/control/decision/finance（含水肥配比与变量灌溉） |
+| 7. 视频、文件、溯源与网关 | 已完成 | video/file/trace/gateway（含 AI 识别联动） |
 | 8. 前端功能接入 | 已完成 | 菜单、接口、页面和权限 |
 | 9. 全量验证与交付 | 已完成 | build/test/运行说明 |
 
@@ -33,14 +33,14 @@
 
 | 需求域 | 文档要求 | 目标实现 | 当前判断 |
 | --- | --- | --- | --- |
-| 地块主数据 | 地块档案、六段式编码、CGCS2000、片区归属 | `plot-service` + `@agri/plot-core` | 已完成：CRUD/软删/边界统计/GeoJSON 边界与地图绘制，SQL 仓储可切 |
-| 一张图 | 地块、线路、设备、天气、快捷入口 | web dashboard + plot/iot/weather API | 部分完成：地块边界、设备点位、图层切换、天气与趋势已接口化；线路/管线图层未做 |
-| 基础信息 | 片区、导航、线路、水电网管线 | `platform-service` / `plot-service` | 部分完成：租户、角色权限、审计已落库；片区/线路/管线无独立模块 |
-| 四情监控 | 墒情、苗情、虫情、灾情、气象、阈值告警 | `telemetry-service` / `weather-service` / `message-service` | 部分完成：墒情读数/历史曲线/阈值告警/事件消息、达州气象已落地；苗情/虫情/灾情无采集与页面 |
-| 视频监控 | 实时、云台、回放、AI 联动 | `video-service` / `file-service` | 部分完成：摄像机、HLS 播放、云台、录像查询已实现；AI 识别联动未做 |
+| 地块主数据 | 地块档案、六段式编码、CGCS2000、片区归属 | `plot-service` + `@agri/plot-core` | 已完成：CRUD/软删/边界统计/GeoJSON 边界与地图绘制，SQL 仓储可切；片区归属落地为 `plot_records.zone_code`，地块编码的 area 段与片区台账对应 |
+| 一张图 | 地块、线路、设备、天气、快捷入口 | web dashboard + plot/iot/weather API | 已完成：地块边界、设备点位、管网线路（灌水/施肥/电力/道路）图层、图层切换、天气与趋势均已接入一张图 |
+| 基础信息 | 片区、导航、线路、水电网管线 | `platform-service` / `plot-service` / `operation-service` | 已完成：租户、角色权限、审计已落库；水电网管线以 `infra_lines` 落地并在地图渲染；片区台账（`plot_zones` + `/api/v1/zones`）与田间导航（`/api/v1/operations/path-plan`）已补齐 |
+| 四情监控 | 墒情、苗情、虫情、灾情、气象、阈值告警 | `telemetry-service` / `weather-service` / `message-service` | 已完成：墒情读数/历史曲线、苗情指标（冠层覆盖度等）、虫情识别与分级告警、灾情告警处置、达州气象；阈值规则可增删改并即时生效，事件驱动消息中心 |
+| 视频监控 | 实时、云台、回放、AI 联动 | `video-service` / `file-service` | 已完成：摄像机、HLS 播放、云台、录像查询，AI 识别事件上报与查询，识别结果自动转发遥测生成虫情告警与消息 |
 | 设备与作业 | 设备控制、播种、灌溉、除草、植保、路径调度 | `iot-service` / `control-service` / `operation-service` | 已完成（不含真实农机调度）：指令队列、任务 CRUD 与流转、路径规划、二次确认与权限校验 |
-| 水肥一体化 | 配比、搅拌、变量灌溉、联动策略 | `control-service` / `decision-service` | 部分完成：水肥指令与墒情/降雨处方已联动；配比计算、搅拌策略、变量灌溉曲线未做 |
-| 智能决策 | 规则、处方、识别、问答 | `decision-service` | 部分完成：规则 CRUD 与热更新、处方留痕、效果回流调优、规则式问答；图像识别未做 |
+| 水肥一体化 | 配比、搅拌、变量灌溉、联动策略 | `control-service` / `decision-service` | 已完成：水肥指令与墒情/降雨处方联动，配比与搅拌参数校验、用水量按亩·毫米换算、分区排程输出变量灌溉曲线并可下发 |
+| 智能决策 | 规则、处方、识别、问答 | `decision-service` | 部分完成：规则 CRUD 与热更新、处方留痕、效果回流调优、规则式问答；图像识别由 `video-service` 的 AI 事件上报承接，决策侧未内置模型 |
 | 核算与溯源 | 投入产出、农事记录、追溯 | `finance-service` / `trace-service` | 已完成：投入产出与利润汇总、生产档案（含事件自动建档）、追溯码查询 |
 | 系统支撑 | 认证、角色、区域权限、审计、文件 | `auth-service` / `gateway-service` / `file-service` | 已完成：认证/会话/角色/权限/审计/对象存储；会话持久化与强口令散列本轮补强 |
 
@@ -256,17 +256,55 @@
 - 实测结果：`app`（15 服务，网关 `0.0.0.0:8080`）与 `edge`（80→443）均 healthy；登录、`userinfo`、`refresh`、地块列表/边界/统计、设备、农事任务、角色/权限、遥测、天气、控制指令、财务、溯源、视频、消息共 22 个接口全部 200；新建地块返回 201 并在 `plot_records` 落库（含中文名称与多边形边界）；`docker compose restart app` 后旧 token 与地块数据均仍可用。
 - 沿用约定：`app` 与 `edge` 挂在 `profiles: ["app"]`，不写 profile 时 compose 仍只起 PostGIS/MinIO；`apps/web` 的 `dashboardApi` 为无引用的死代码，`/api/v1/dashboard/*` 404 不影响页面。
 
+### 2026-11-05（续）：四情监控、视频 AI 联动、水肥配比与管线图层
+
+- 数据层：新增迁移 `infra/postgres/migrations/008_agro_monitoring.sql`，建三张表：`telemetry_rules`（按租户/指标配阈值与方向，内置 7 条覆盖含水率、冠层覆盖度、温湿度）、`telemetry_pest_events`（虫情识别记录与处置状态）、`infra_lines`（田间管线，`geom` 存 GeoJSON LineString）。
+- 公共契约：`packages/contracts` 新增 `GeoLineString`（线几何，用于灌水/施肥管路、电力线与道路）；消息模板新增虫情主题，`MESSAGE_TEMPLATES` 由 2 个增至 3 个，`TelemetryPestDetected` 按 `level` 映射 ALERT（严重）/WARNING（中等）/NOTICE（轻微）。
+- `telemetry-service`：新增规则仓储与虫情仓储（SQL/内存两套）；接口 `GET/POST/DELETE /api/v1/telemetry/rules`、`GET /api/v1/telemetry/overview`（四情汇总）、`POST/GET /api/v1/telemetry/pest-events`、`POST /api/v1/telemetry/pest-events/:id/handle`；读数上报改为按规则库判定，命中即产出告警并 `emit` 越限事件；虫情上报按 `level` 判级后 `emit` `telemetry.pest.detected`。
+- `video-service`：新增 `src/ai-event.ts` 统一解析算法回调并向 `POST /api/v1/telemetry/pest-events` 转发（超时 3s、失败不抛错），对外 `POST /api/v1/video/ai-events`（转发成功 201 / 失败 202）与 `GET /api/v1/video/ai-events` 查询；识别结果只在 telemetry 一处落库，避免两条虫情链路。
+- `control-service`：新增 `src/command-spec.ts`——水肥指令参数校验（分区面积/目标毫米/流量/肥液配比/搅拌时长）与 `buildIrrigationPlan`：用水量 m³ = 亩 × 666.67 × mm / 1000（保留 2 位），默认流量 20 m³/h，按分区顺序排程，5 分钟采样输出累计供水量与瞬时流量双曲线，总时长超 240 min 给出警告；`POST /commands` 下发前拦截非法参数（400），新增 `POST /api/v1/control/irrigation-plans` 方案预演（需操作人头与 `X-Confirm-Action: CONFIRM`，否则 409）。
+- `plot-service`：新增 `infra-line.repository.ts`（`IRRIGATION_PIPE` / `FERTILIZATION_PIPE` / `ELECTRIC_LINE` / `ROAD`，线长按等距圆柱近似估算）与 `/api/v1/plots/infra-lines` 增删查；路由必须排在 `/plots/:code` 之前，否则 `infra-lines` 会被当作地块编码。
+- `gateway-service`：`resolveRouteRule` 把 `POST /api/v1/telemetry/pest-events`、`POST /api/v1/video/ai-events` 列为匿名（算法侧回调不带用户令牌），同名 GET 仍分别要求 `telemetry:read` / `device:read`；服务侧用条件式 `publicPaths` 保证只放开 POST。
+- `message-service`：补 `@registerHandler(EventTopic.TelemetryPestDetected)`——此前虫情事件无消费者，`EventLogConsumer` 不会拉取该主题，消息中心因此收不到虫情消息；补后虫情事件按模板生成告警/提醒。
+- 前端：新增「农情四情」页（`views/agro/Index.vue`：苗情/虫情/灾情/阈值规则四个 Tab，含虫情登记与处置、规则启停）；新增「设备管理 → 水肥灌溉」页（`views/irrigation/Index.vue`：分区增删、配比与搅拌参数、方案预演双轴曲线、一键下发）；一张图新增「管网线路」图层（按类型着色，道路为虚线），坐标由 `[lng,lat]` 反转为 Leaflet 的 `[lat,lng]`。
+- 测试：新增 `telemetry-service/test/agro-monitoring.spec.ts`、`control-service/test/command-spec.spec.ts`、`plot-service/test/infra-line.spec.ts`、`message-service/test/pest-closure.spec.ts`（虫情 → 事件日志 → 消息中心闭环），并补 `gateway-service/test/authz.spec.ts` 白名单与 `contracts` 虫情模板用例。
+
+### 2026-11-05（续）：片区台账与田间导航
+
+- 数据层：新增迁移 `infra/postgres/migrations/009_plot_zones.sql`——`plot_zones`（片区台账，`zone_code` 唯一、颜色、说明、可选 `geom`）、`plot_records.zone_code`（地块归属列，不另建关联表，避免多一层 join）、两个部分索引，以及 3 个示例片区（`ZONE-01/02/03`）和 1 条示例机耕道（`LINE-ROAD-001`，`ROAD` 类型）。
+- 命名取舍：前端 `PlotForm.regionCode` 已是 6 位行政区划码，片区一律用 `zoneCode` / `plot_zones` / `/api/v1/zones`，避免把 `511723` 误存成片区。
+- `plot-service`：新增 `zone.repository.ts`（SQL/内存双实现）与 `zone.geometry.ts`（单调链凸包 `convexHull`、闭合 `hullPolygon`、`centroidOf`、`ringPoints`）；HTTP 新增 `GET /zones`、`GET /zones/map`（带成员地块凸包与中心点）、`POST /zones`（缺省自动生成 `ZONE-XXXXXX`、重码 409）、`GET/PUT/DELETE /zones/:zoneCode`（有成员地块时删除返回 409）、`GET/POST /zones/:zoneCode/plots`、`DELETE /zones/:zoneCode/plots/:parcelCode`；`GET /plots` 支持 `?zoneCode=` 过滤，`PUT /plots/:code` 支持写入/清空归属。
+- `operation-service`：新增 `src/navigation.ts`（直线里程按等距圆柱近似；`buildRoadGraph` 把机耕道折线建图，站点**投影到最近线段**并按段内 `t` 串链插入虚拟节点，Dijkstra 求沿路里程；最近邻排站 + 2-opt 反向优化；吸附上限 300 米，超限退回直线并给出告警）；`POST /api/v1/operations/path-plan` 由占位改为真实规划，新增 `GET /api/v1/operations/path-plans` 返回进程内最近 20 条方案。
+- 网关：`defaultRoutes` 增加 `/api/v1/zones → plot-service`（否则 404 GATEWAY-404），`ROUTE_PERMISSIONS` 增加 `/api/v1/zones`（`plot:read` / `plot:write`），导航沿用 `operation:*`。
+- 前端：新增「地块管理 → 片区管理」（`views/zone/Index.vue`：片区卡片、成员地块表、凸包地图、划入/移出与编辑删除）；新增「农事管理 → 田间导航」（`views/farm/Navigation.vue`：地图拾取起点、勾选地块为站点、自动带入 `ROAD` 管线为路网、路线与分段里程表、口径标签）；一张图新增「片区范围」图层（凸包虚线，缺成员时退回片区自身边界）；`request.ts` 补 409 服务端原因直出。
+- 测试：新增 `plot-service/test/zone.spec.ts`（凸包/建档/重码/划入/过滤/凸包与中心点/删除保护）、`operation-service/test/navigation.spec.ts`（直线与沿路两种口径、远点退回直线、闭环、入参校验、HTTP 留痕），并补 `gateway-service/test/authz.spec.ts` 的 zones 断言。
+
+### 2026-11-05（续）：全页面演示数据
+
+- 迁移 `infra/postgres/migrations/010_demo_data.sql`：一次灌入 12 块地块（东区 4 / 西区 3 / 联片 3 / 暂未划入 2，编码由 `@agri/plot-core` 的 `buildPlotCode` 生成并通过 `checkPlotCode` 校验）、`ZONE-03` 实测边界、6 条田间线路（机耕道/灌溉/施肥/电力）、3024 条遥测读数（6 台设备 27 条指标序列，最近 14 天每 3 小时一点，取值刻意越过 `telemetry_rules` 阈值）、7 条告警、6 条虫情、4 张处方、6 条控制指令、10 条消息、92 条投入产出（2026 主季 + 2025 上季）、22 条溯源记录（处方→农事作业→作业完成闭环）、4 个演示账号与 1 个自定义角色「财务核算员」。
+- 幂等与兼容：主键统一带 `demo` 前缀、全部 `ON CONFLICT DO NOTHING`、时间用 `now() - interval` 相对锚定；开头先清理历史冒烟遗留（`ZONE-SMOKE-%`、名称含「冒烟/部署验证」的地块与线路），不动用户手工录入的数据。
+- 内存服务种子（不落库的进程内台账）：`iot-service` 设备由 2 台扩到 12 台（气象站、墒情站、综合监测站、遥感节点、测报灯、水肥泵阀、灌溉阀门、泵站、无人机、无人拖拉机，含 2 台 OFFLINE）；`video-service` 摄像头由 1 路扩到 4 路并补 3 条录像索引；`operation-service` 补 8 条农事任务（覆盖六种类型与四种状态）。
+- `finance-service`：按 `trace-service` 样板接入 SQL——`FINANCE_REPOSITORY_MODE` / `DB_URL` 判定模式，容器内固定 `sql` 读 `finance_entries` 表；内存模式装载同一批演示明细（`InMemoryFinanceRepository` 默认仍为空，不影响 `test/repository.spec.ts`）。compose 新增 `FINANCE_REPOSITORY_MODE: sql`。
+- 任务类型口径统一：`operation-service` 的 `Task.type` 增加 `FERTILIZATION` 并对 `POST /farm-tasks` 做类型白名单校验（非法返回 400）；前端 `farm/Task.vue` 与 `plot/Detail.vue` 的 `getTaskTypeText` 原本映射的是另一套码（`SOWING`/`FERTILIZING`/`PEST_CONTROL`/`HARVEST`），改为与后端一致的六码，新建对话框补「施肥」选项。
+- 地块详情页去假数据：`plot/Detail.vue` 的「近期农事活动」原为硬编码的模拟记录，改为按 `parcelCode` 调 `GET /farm-tasks?keyword=` 取真实任务，并把「负责人/开始时间」两列换成「地块编码/计划时间」（后端无负责人字段），空结果给 `el-empty` 提示。
+
 ## 下一步（中断后从这里继续）
 
 首版业务链路已闭环，剩余工作是业务子项补齐：
 
 1. **已完成**：会话持久化与口令强散列（`007` 迁移 + `SessionRepository` + scrypt + `POST /auth/refresh`），旧 token 重启后仍有效，改密/删号即时回收会话。
 2. **已完成**：部署编排（`Dockerfile` 双目标、compose `app`/`edge`、HTTPS 终止、`AUTH_GUARD_MODE=enforce`、连接池与内部凭证配置）；已在本机完成镜像构建与容器实跑复验（详见「本机容器化部署实录」）。环境侧约束：`docker.io` 直连不可用，需先把基础镜像经镜像源拉取并重打 tag。
-3. **待办**：业务增强（补齐需求矩阵中部分完成项）
-   - 苗情/虫情/灾情：采集指标、阈值规则与页面；
-   - 视频 AI 联动：识别事件 → 告警/消息；
-   - 水肥配比与搅拌策略、变量灌溉曲线；
-   - 一张图的线路/管线图层。
+3. **已完成**：业务增强（需求矩阵中 4 个部分完成项已补齐）
+   - 苗情/虫情/灾情：`telemetry_rules` 阈值规则 + 四情汇总与「农情四情」页；
+   - 视频 AI 联动：识别回调 → 虫情告警 → 消息中心（含免令牌回调白名单）；
+   - 水肥配比与搅拌策略、变量灌溉曲线（`buildIrrigationPlan` + 预演页）；
+   - 一张图的线路/管线图层（`infra_lines` + Leaflet 线图层）。
+4. **已完成**：片区与导航独立模块（需求矩阵最后一项「部分完成」）
+   - 片区台账：`plot_zones` + `/api/v1/zones`（建档/改名/删除、地块划入移出、按片区过滤、成员地块凸包现算）；
+   - 田间导航：`POST /api/v1/operations/path-plan`（最近邻排站 + 2-opt、机耕道 Dijkstra 沿路里程、闭环返程、历史方案）；
+   - 前端：地块管理 → 片区管理、农事管理 → 田间导航、一张图新增「片区范围」图层。
+5. **已完成**：全页面演示数据（`010_demo_data.sql` + 内存服务种子 + `finance-service` SQL 接线），登录即可看到成体系的达川丘区数据。
+6. **可选后续（未排期）**：决策侧内置图像识别模型、真实农机调度对接。
 
 ## 验证记录
 
@@ -471,3 +509,36 @@
 | 2026-11-05 | 经 edge 登录 + 22 个业务接口 | 通过：登录/userinfo/refresh/plots(stats,bounds,list)/devices/farm-tasks/platform/telemetry/weather/control/finance/trace/video/messages 全部 200 |
 | 2026-11-05 | `POST /api/v1/plots` 经 edge | 通过：201，`plot_records` 落库 1 行（中文名称、多边形 geom） |
 | 2026-11-05 | `docker compose ... restart app` | 通过：重启后旧 token 仍可 `userinfo`、地块数据仍在 |
+| 2026-11-05 | `npx tsc -b` | 通过（四情/水肥/管线/视频 AI 接入后；修 `GeoLineString` 索引越界与 `EventTopicValue` 类型） |
+| 2026-11-05 | `npx vitest run apps/telemetry-service apps/control-service apps/plot-service apps/message-service packages/contracts` | 通过：新增 agro-monitoring/command-spec/infra-line/pest-closure 与虫情模板用例 |
+| 2026-11-05 | `$env:DB_URL=...; node scripts/migrate-postgres.mjs` | 通过：`008_agro_monitoring.sql` 已应用（45 ms），新增 `telemetry_rules`/`telemetry_pest_events`/`infra_lines` |
+| 2026-11-05 | `$env:DB_URL=...; npx vitest run` | 通过：43 个测试文件、175 个用例（基线 39/162） |
+| 2026-11-05 | `pnpm --filter @agri/web exec vue-tsc -b` | 通过（四情页、水肥灌溉页与管线图层后） |
+| 2026-11-05 | `$env:VITE_TIANDITU_KEY=...; docker compose ... --profile app build app` | 通过：`agri-platform:local` 重建完成（退出码 1 为 npm 警告，镜像已产出） |
+| 2026-11-05 | `docker compose ... up -d` | 通过：`infra-app-1` healthy |
+| 2026-11-05 | `node .runtime/verify-agro.mjs`（经 `https://localhost`） | 通过：15 项全 PASS——规则 7 条、虫情上报(免令牌 201)/待处置/处置、视频 AI 回调 201、灌溉预演 133.34 m³ / 400 min、非法水肥参数 400、合规指令 202、管线新增(length 205.98)/列表/删除/非法类型 400 |
+| 2026-11-05 | 事件与消息复核（`event_log` + 消息中心） | 通过：`telemetry.pest.detected` 2 条；消息中心新增 2 条虫情消息（CRITICAL 严重 / WARNING 中等） |
+| 2026-11-05 | `npx tsc -b` | 通过（片区仓储/几何/路由与导航算法接入后） |
+| 2026-11-05 | `$env:DB_URL=...; npx vitest run apps/plot-service/test/zone.spec.ts apps/operation-service/test/navigation.spec.ts` | 通过：8 个用例（凸包/建档/划入/过滤/删除保护/直线与沿路两种口径/闭环/入参校验/HTTP） |
+| 2026-11-05 | `$env:DB_URL=...; npx vitest run` | 通过：45 个测试文件、183 个用例（基线 43/175） |
+| 2026-11-05 | `pnpm --filter @agri/web exec vue-tsc -b` | 通过（片区管理页、田间导航页与一张图片区图层后） |
+| 2026-11-05 | `$env:TEMP=...\.tmp; pnpm --filter @agri/web exec vite build` | 通过：built in 22.22s（含新增页面分包） |
+| 2026-11-05 | `$env:DB_URL=...; node scripts/migrate-postgres.mjs` | 通过：`009_plot_zones.sql` 已应用（48 ms）；`plot_zones` 3 行、`plot_records.zone_code` 已加列、`LINE-ROAD-001` 就绪 |
+| 2026-11-05 | `docker compose ... --profile app build app edge` | 通过：两镜像重建完成（`agri-platform:local` 21s 前产出） |
+| 2026-11-05 | `docker compose ... --profile app up -d` | 通过：`infra-app-1` healthy、`infra-edge-1` 已启动 |
+| 2026-11-05 | `node scripts/smoke-zones-navigation.mjs`（经 `https://localhost`） | 通过：示例片区就绪、建档/重码 409、划入与凸包、按片区过滤、有地块时删片区 409、机耕道沿路导航（2345 米 / 18 分钟）与历史留痕、清理 |
+| 2026-11-05 | `$env:DB_URL=...; node scripts/migrate-postgres.mjs` | 首次失败：`syntax error at or near "WITH"`（VALUES 不接受 `WITH ORDINALITY`）；改为显式序号列后通过：`010_demo_data.sql` 已应用（46 ms） |
+| 2026-11-05 | `docker exec infra-postgres-1 psql -U agri -d agri` 行数核对 | 通过：`plot_records` 13、`plot_zones` 3、`infra_lines` 10、`telemetry_readings` 3024、`telemetry_alerts` 11、`telemetry_pest_events` 10、`decision_prescriptions` 4、`control_commands` 13、`ops_messages` 15、`finance_entries` 92、`trace_records` 22、`auth_users` 5、`platform_roles` 4 |
+| 2026-11-05 | `docker cp .runtime/tmp/delta-010-rules.sql … && psql -f /tmp/delta.sql` | 通过：向已应用过的本地库补 010 后加的 4 条决策规则（`INSERT 0 4`），并把 `presc-demo-001` 的 `matched_rules_json.ruleId` 对齐到真实存在的 `rule-soil-dry`（`UPDATE 1`） |
+| 2026-11-05 | `npx tsc -b` / `npx vitest run` | 通过：编译无错；43 个测试文件通过、2 个跳过，180 用例通过、3 跳过（与基线持平，无回归；已验证任务类型白名单与演示种子不冲既有断言） |
+| 2026-11-05 | `pnpm --filter @agri/web exec vue-tsc -b --force` | 通过（任务类型码与下拉统一、地块详情改取真实农事任务后） |
+| 2026-11-05 | `$env:VITE_TIANDITU_KEY=...; docker compose --profile app build app edge` + `up -d` | 通过：两镜像重建、`infra-app-1` healthy、`infra-edge-1` 启动（compose 新增 `FINANCE_REPOSITORY_MODE: sql`） |
+| 2026-11-05 | `node scripts/smoke-demo-data.mjs`（经 `https://localhost`） | 通过：37 项逐页校验全 PASS——地块 13/片区 3/线路 10、设备 12、四情（27 最新读数、8 待处置告警、10 虫情、7 阈值规则）、墒情与风速曲线各 112 点、农事任务 8、指令 13、决策规则 5/处方 4、摄像头 4/录像 3、消息 13、核算 92 条（投入 107104.80 / 产出 283134.00 / 利润 176029.20）、溯源 22、用户 5/角色 4/权限分组 8；演示账号 agronomist·operator01·viewer01 登录成功，停用账号 temp01 被 403 拦截 |
+| 2026-11-05 | `node scripts/smoke-zones-navigation.mjs` / `node scripts/smoke-gateway.mjs` | 通过：演示数据注入后无回归（沿路导航 1821 米 / 14 分钟；登录→401/403 拦截→地块→控制二次确认→角色/用户管理） |
+| 2026-11-05 | 浏览器逐页目视核验 | 未执行：`edge` 为自签证书，浏览器停在 `ERR_CERT_AUTHORITY_INVALID` 且原生视图不可用；数据可用性已由 `pnpm smoke:demo` 逐接口覆盖，如需目视验收可临时启 `pnpm --filter @agri/web dev` |
+| 2026-11-05 | `node scripts/migrate-postgres.mjs` | 通过：`011_plot_profile.sql` 已应用（13 ms）；`plot_records` 新增六列，12 块示范地块回填类型（FIELD×9含新建/GREENHOUSE/ORCHARD/AQUACULTURE）与状态（ACTIVE×9/DRAFT/FALLOW/ARCHIVED）、作物与负责人 |
+| 2026-11-05 | 后端八服务查询参数改造（iot/operation/control/finance/trace/video/telemetry/message + plot 档案字段） | 完成：网关原样透传查询串无需改动；finance/trace 不改仓储签名在 http 层后置过滤保住既有断言；`npx vitest run` 43 文件/180 用例全绿（与基线持平）；10 包 `tsc --noEmit` 全过 |
+| 2026-11-05 | 前端十页统一查询条（plot/List、plot/Edit、device/List、device/Commands、farm/Task、farm/Record、finance/Index、trace/Index、video/Index、agro/Index、message/Index） | 完成：筛选全部下沉服务端；投入产出页拆分查询区/登记区且汇总卡片与列表同条件联动；`pnpm --filter @agri/web exec vue-tsc --noEmit` 通过（含 `exactOptionalPropertyTypes` 修正） |
+| 2026-11-05 | `docker compose ... --profile app build app edge` + `up -d` | 通过：两镜像重建（含地块非法枚举查询参数 400 拦截补丁）、`infra-app-1` healthy、`infra-edge-1` 启动 |
+| 2026-11-05 | `node scripts/smoke-filters.mjs`（新《pnpm smoke:filters》，经 `https://localhost`） | 通过：38 项条件查询全 PASS——地块六类筛选+非法枚举 400、设备四条件+分页 5/12、任务/指令枚举+时间区间、核算筛选+`summary?kind=OUTPUT` 联动（产出 283134.00）、溯源、视频、四情（含 overview 联动）、消息级别与时间区间 |
+| 2026-11-05 | `node scripts/smoke-demo-data.mjs` / `smoke-zones-navigation.mjs` / `smoke-gateway.mjs` | 通过：37 项演示数据、片区导航、网关链路均无回归 |

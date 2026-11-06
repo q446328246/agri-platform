@@ -41,6 +41,8 @@ type RouteRule = { kind: "public" } | { kind: "session" } | { kind: "permission"
 /** 路径前缀到读写权限的映射，未列出的前缀至少要求登录 */
 const ROUTE_PERMISSIONS: Array<{ prefix: string; read: string; write: string }> = [
   { prefix: "/api/v1/plots", read: "plot:read", write: "plot:write" },
+  // 片区是地块主数据的一部分，读写权限跟随地块
+  { prefix: "/api/v1/zones", read: "plot:read", write: "plot:write" },
   { prefix: "/api/v1/devices", read: "device:read", write: "device:control" },
   { prefix: "/api/v1/telemetry", read: "telemetry:read", write: "telemetry:write" },
   { prefix: "/api/v1/weather", read: "weather:read", write: "weather:read" },
@@ -78,6 +80,9 @@ export function resolveRouteRule(method: string, pathname: string): RouteRule {
   if (method === "POST" && path === "/api/v1/auth/login") return { kind: "public" };
   // 设备直连上报不走用户身份，由设备侧接入方案单独鉴权
   if (method === "POST" && path === "/api/v1/telemetry/report") return { kind: "public" };
+  // 虫情识别与视频 AI 识别由算法侧回调，同样不带用户身份
+  if (method === "POST" && path === "/api/v1/telemetry/pest-events") return { kind: "public" };
+  if (method === "POST" && path === "/api/v1/video/ai-events") return { kind: "public" };
   if (matchesPrefix(path, "/api/v1/auth/userinfo") || matchesPrefix(path, "/api/v1/auth/logout")) return { kind: "session" };
   if (matchesPrefix(path, "/api/v1/auth/users") || matchesPrefix(path, "/api/v1/auth/internal")) return { kind: "permission", code: "system:user" };
   if (matchesPrefix(path, "/api/v1/platform/roles")) return { kind: "permission", code: "system:role" };

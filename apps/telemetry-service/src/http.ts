@@ -6,27 +6,32 @@ import type { EventPublisher } from "@agri/mq";
 import { InMemoryEventPublisher, InMemoryOutboxStore, OutboxService } from "@agri/mq";
 import type { OutboxStore } from "@agri/mq";
 import { EventTopic } from "@agri/contracts";
-import type { ThresholdBreachedPayload } from "@agri/contracts";
+import type { PestDetectedPayload, ThresholdBreachedPayload } from "@agri/contracts";
+import type { EventTopicValue } from "@agri/contracts";
 import { authorizeRequest } from "@agri/shared";
 
 import { newReadingId } from "./reading.repository.js";
 import { InMemoryAlertRepository, InMemoryReadingRepository } from "./reading.repository.js";
 import type { AlertRepository, CreateReadingInput, HistoryQuery, Reading, ReadingPoint, ReadingRepository, TelemetryAlert } from "./reading.repository.js";
+import { InMemoryPestEventRepository } from "./pest.repository.js";
+import type { CreatePestEventInput, PestEventRepository, PestLevel } from "./pest.repository.js";
+import { breaches, DEFAULT_TELEMETRY_RULES, InMemoryRuleRepository } from "./rule.repository.js";
+import type { RuleLevel, RuleRepository, TelemetryRule } from "./rule.repository.js";
 
-/** 遥测指标与阈值：越过阈值时生成告警并发布越限事件 */
-const ALERT_RULES: Array<{ metric: string; level: string; message: string; test: (value: number) => boolean }> = [
-  { metric: "soilMoisture", level: "WARNING", message: "土壤含水率低于灌溉阈值", test: (value) => value < 30 },
-  { metric: "airTemperature", level: "WARNING", message: "空气温度超出适宜区间", test: (value) => value > 40 },
-  { metric: "windSpeed", level: "WARNING", message: "风速超过作业安全阈值", test: (value) => value > 10 },
-];
+/** 阈值规则由 telemetry_rules 表维护，缺省回落到默认规则集 */
+function defaultRules(): RuleRepository {
+  return new InMemoryRuleRepository(DEFAULT_TELEMETRY_RULES.map((rule) => ({ ...rule, updatedAt: new Date().toISOString() })));
+}
 
 export interface TelemetryDependencies {
   readings?: ReadingRepository;
   alerts?: AlertRepository;
+  rules?: RuleRepository;
+  pests?: PestEventRepository;
   outbox?: OutboxStore;
   publisher?: EventPublisher;
   tenantId?: string;
-  /** 遥测越限事件可选发布；缺省不发布，保持仅落库 */
+  /** 遥测越限/虫情事件可选发布；缺省不发布，保持仅落库 */
   publishEvents?: boolean;
 }
 
@@ -39,6 +44,11 @@ function send<T>(res: ServerResponse, status: number, data: T | null, traceId: s
 function trace(req: IncomingMessage): string {
   const value = req.headers["x-request-id"];
   return typeof value === "string" && value.length > 0 ? value : crypto.randomUUID();
+}
+
+/** 取去空白后的查询参数，缺省与空串统一视为「不参与筛选」 */
+function trimmed(query: URLSearchParams, name: string): string {
+  return (query.get(name) ?? "").trim();
 }
 
 async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -63,29 +73,89 @@ function historyQuery(params: URLSearchParams): HistoryQuery {
   };
 }
 
+/** 解析并校验阈值规则入参 */
+function parseRule(body: Record<string, unknown>): { rule?: TelemetryRule; error?: string } {
+  const metric = String(body.metric ?? "").trim();
+  if (!metric) return { error: "metric 不能为空" };
+  const direction = body.direction === "below" ? "below" : body.direction === "above" ? "above" : null;
+  if (!direction) return { error: "direction 只能是 above 或 below" };
+  const threshold = Number(body.threshold);
+  if (!Number.isFinite(threshold)) return { error: "threshold 必须是数字" };
+  const level: RuleLevel = body.level === "CRITICAL" ? "CRITICAL" : body.level === "INFO" ? "INFO" : "WARNING";
+  const message = String(body.message ?? "").trim() || `${metric} 越限告警`;
+  return {
+    rule: {
+      id: String(body.id ?? `rule-${metric}`),
+      metric,
+      direction,
+      threshold,
+      level,
+      message,
+      enabled: body.enabled === undefined ? true : Boolean(body.enabled),
+      updatedAt: new Date().toISOString(),
+    },
+  };
+}
+
+/** 解析并校验虫情识别事件入参；置信度缺省按 0.9 处理，超出 0-1 拒绝 */
+function parsePestEvent(body: Record<string, unknown>): { input?: CreatePestEventInput; error?: string } {
+  const pestType = String(body.pestType ?? "").trim();
+  if (!pestType) return { error: "pestType 不能为空" };
+  const level = Number(body.level);
+  if (level !== 1 && level !== 2 && level !== 3) return { error: "level 只能是 1、2、3" };
+  const confidence = body.confidence === undefined ? 0.9 : Number(body.confidence);
+  if (!(confidence >= 0 && confidence <= 1)) return { error: "confidence 必须落在 0 到 1" };
+  const input: CreatePestEventInput = {
+    plotCode: String(body.plotCode ?? ""),
+    deviceId: String(body.deviceId ?? ""),
+    pestType,
+    level: level as PestLevel,
+    confidence,
+    detectedAt: String(body.detectedAt ?? new Date().toISOString()),
+  };
+  if (body.imageFileId !== undefined && body.imageFileId !== null && String(body.imageFileId) !== "") {
+    input.imageFileId = String(body.imageFileId);
+  }
+  return { input };
+}
+
 export function createTelemetryHttpServer(dependencies?: TelemetryDependencies): Server {
   const readings = dependencies?.readings ?? new InMemoryReadingRepository();
   const alerts = dependencies?.alerts ?? new InMemoryAlertRepository();
+  const rules = dependencies?.rules ?? defaultRules();
+  const pests = dependencies?.pests ?? new InMemoryPestEventRepository();
   const tenantId = dependencies?.tenantId ?? "tenant-demo";
   const publisher = dependencies?.publisher ?? new InMemoryEventPublisher();
   setDefaultPublisher(publisher);
   const relay = new OutboxService(dependencies?.outbox ?? new InMemoryOutboxStore(), publisher, { tenantId, traceId: "telemetry-relay", producer: "telemetry" });
   relay.start();
 
+  /** 统一事件出口：有本地消息表时先落表再中继，保证服务重启不丢事件 */
+  const emit = async (topic: EventTopicValue, payload: unknown, key?: string): Promise<void> => {
+    if (!dependencies?.publishEvents) return;
+    if (dependencies.outbox) {
+      await relay.enqueue(undefined, topic, payload, { tenantId, traceId: "telemetry-emit", producer: "telemetry" });
+      return;
+    }
+    await publishEvent({ topic, payload, tenantId, traceId: "telemetry-emit", producer: "telemetry", ...(key ? { key } : {}) }, publisher);
+  };
+
   return createServer(async (req, res) => {
     const traceId = trace(req);
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
       if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "telemetry" }, traceId); return; }
-      // 设备直连上报不走用户身份，其余接口需要遥测读写权限
-      const denied = authorizeRequest(req, { read: "telemetry:read", write: "telemetry:write", publicPaths: ["/api/v1/telemetry/report"] });
+      // 设备直连上报与 AI 识别回调不走用户身份，其余接口需要遥测读写权限
+      const denied = authorizeRequest(req, { read: "telemetry:read", write: "telemetry:write", publicPaths: ["/api/v1/telemetry/report", "/api/v1/telemetry/pest-events"] });
       if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
 
-      // 最新读数：按设备过滤，每个设备每个指标只取最近一次
+      // 最新读数：按设备过滤，每个设备每个指标只取最近一次；地块/指标为可选后置筛选
       if (req.method === "GET" && url.pathname === "/api/v1/telemetry/latest") {
         const deviceId = url.searchParams.get("deviceId") ?? undefined;
         const rows = await readings.latest(deviceId);
-        send(res, 200, rows, traceId);
+        const plotCode = trimmed(url.searchParams, "plotCode");
+        const metric = trimmed(url.searchParams, "metric");
+        send(res, 200, rows.filter((row) => (!plotCode || row.plotCode === plotCode) && (!metric || row.metric === metric)), traceId);
         return;
       }
 
@@ -103,9 +173,13 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
         return;
       }
 
-      // 待处理告警
+      // 待处理告警：级别/指标/地块可选筛选，缺省返回全部待处置
       if (req.method === "GET" && url.pathname === "/api/v1/telemetry/alerts") {
-        send(res, 200, await alerts.pending(), traceId);
+        const level = trimmed(url.searchParams, "level");
+        const metric = trimmed(url.searchParams, "metric");
+        const plotCode = trimmed(url.searchParams, "plotCode");
+        const rows = await alerts.pending();
+        send(res, 200, rows.filter((row) => (!level || row.level === level) && (!metric || row.metric === metric) && (!plotCode || row.plotCode === plotCode)), traceId);
         return;
       }
 
@@ -130,9 +204,9 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
         };
         if (!input.deviceId || !input.metric) { send(res, 400, null, traceId, "deviceId 与 metric 不能为空"); return; }
         const reading = await readings.create(undefined, input);
-        const rule = ALERT_RULES.find((item) => item.metric === reading.metric && item.test(reading.value));
+        const rule = await rules.findEnabled(reading.metric);
         let alert: TelemetryAlert | null = null;
-        if (rule) {
+        if (rule && breaches(rule, reading.value)) {
           alert = {
             id: newReadingId(),
             deviceId: reading.deviceId,
@@ -148,17 +222,102 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
             parcelId: reading.plotCode,
             metric: reading.metric,
             value: reading.value,
-            threshold: reading.metric === "soilMoisture" ? 30 : reading.metric === "windSpeed" ? 10 : 40,
-            direction: "below",
+            threshold: rule.threshold,
+            direction: rule.direction,
             occurredAt: reading.recordedAt,
           };
-          if (dependencies?.publishEvents && dependencies?.outbox) {
-            await relay.enqueue(undefined, EventTopic.TelemetryThresholdBreached, payload, { tenantId, traceId, producer: "telemetry" });
-          } else if (dependencies?.publishEvents) {
-            await publishEvent({ topic: EventTopic.TelemetryThresholdBreached, payload, tenantId, traceId, producer: "telemetry", key: reading.plotCode }, publisher);
-          }
+          await emit(EventTopic.TelemetryThresholdBreached, payload, reading.plotCode);
         }
         send(res, 201, { reading, alert }, traceId);
+        return;
+      }
+
+      // 阈值规则：苗情/虫情/灾情共用一套判定口径，改阈值不需要发版
+      if (req.method === "GET" && url.pathname === "/api/v1/telemetry/rules") {
+        send(res, 200, await rules.list(), traceId);
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/v1/telemetry/rules") {
+        const parsed = parseRule(await json(req));
+        if (!parsed.rule) { send(res, 400, null, traceId, parsed.error ?? "规则参数非法"); return; }
+        send(res, 200, await rules.save(parsed.rule), traceId);
+        return;
+      }
+
+      const ruleMatch = url.pathname.match(/^\/api\/v1\/telemetry\/rules\/([^/]+)$/);
+      if (ruleMatch && req.method === "DELETE") {
+        const metric = decodeURIComponent(ruleMatch[1] ?? "");
+        if (!(await rules.remove(metric))) { send(res, 404, null, traceId, "规则不存在"); return; }
+        send(res, 200, null, traceId);
+        return;
+      }
+
+      // 虫情识别结果：AI 回调、摄像头上报、人工核查统一入口，落库后发布虫情事件
+      if (req.method === "POST" && url.pathname === "/api/v1/telemetry/pest-events") {
+        const parsed = parsePestEvent(await json(req));
+        if (!parsed.input) { send(res, 400, null, traceId, parsed.error ?? "虫情事件参数非法"); return; }
+        const event = await pests.create(undefined, parsed.input);
+        const levelLabel = event.level === 3 ? "严重" : event.level === 2 ? "中等" : "轻微";
+        const alert = await alerts.create(undefined, {
+          id: newReadingId(),
+          deviceId: event.deviceId,
+          plotCode: event.plotCode,
+          level: event.level === 3 ? "CRITICAL" : event.level === 2 ? "WARNING" : "INFO",
+          metric: "pestCount",
+          message: `识别到 ${event.pestType}（${levelLabel}）`,
+          createdAt: event.detectedAt,
+          handled: false,
+        });
+        const payload: PestDetectedPayload = {
+          parcelId: event.plotCode,
+          pestType: event.pestType,
+          level: event.level,
+          confidence: event.confidence,
+          detectedAt: event.detectedAt,
+        };
+        if (event.imageFileId) payload.imageFileId = event.imageFileId;
+        await emit(EventTopic.TelemetryPestDetected, payload, event.plotCode);
+        send(res, 201, { event, alert }, traceId);
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/v1/telemetry/pests") {
+        const plotCode = url.searchParams.get("plotCode") ?? undefined;
+        const pendingOnly = url.searchParams.get("pendingOnly") === "true";
+        const pestType = trimmed(url.searchParams, "pestType");
+        const level = trimmed(url.searchParams, "level");
+        const rows = await pests.list({ ...(plotCode ? { plotCode } : {}), pendingOnly, limit: Number(url.searchParams.get("size") ?? 100) });
+        send(res, 200, rows.filter((row) => (!pestType || row.pestType === pestType) && (!level || String(row.level) === level)), traceId);
+        return;
+      }
+
+      const pestMatch = url.pathname.match(/^\/api\/v1\/telemetry\/pests\/([^/]+)\/handle$/);
+      if (pestMatch && req.method === "POST") {
+        const id = decodeURIComponent(pestMatch[1] ?? "");
+        if (!(await pests.markHandled(id))) { send(res, 404, null, traceId, "虫情记录不存在或已处理"); return; }
+        send(res, 200, null, traceId);
+        return;
+      }
+
+      // 四情总览：一次拉齐最新读数、待处置告警、虫情记录与规则，减少看板请求数；筛选参数缺省时与历史行为完全一致
+      if (req.method === "GET" && url.pathname === "/api/v1/telemetry/overview") {
+        const plotCode = trimmed(url.searchParams, "plotCode");
+        const metric = trimmed(url.searchParams, "metric");
+        const level = trimmed(url.searchParams, "level");
+        const pestType = trimmed(url.searchParams, "pestType");
+        const [latestAll, pendingAlerts, pestEvents, ruleList] = await Promise.all([
+          readings.latest(),
+          alerts.pending(),
+          pests.list({ limit: 20 }),
+          rules.list(),
+        ]);
+        send(res, 200, {
+          latest: latestAll.filter((row) => (!plotCode || row.plotCode === plotCode) && (!metric || row.metric === metric)),
+          alerts: pendingAlerts.filter((row) => (!plotCode || row.plotCode === plotCode) && (!level || row.level === level) && (!metric || row.metric === metric)),
+          pests: pestEvents.filter((row) => (!plotCode || row.plotCode === plotCode) && (!pestType || row.pestType === pestType)),
+          rules: ruleList,
+        }, traceId);
         return;
       }
 
@@ -170,3 +329,6 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
 }
 
 export type { Reading, TelemetryAlert, ReadingPoint };
+export type { PestEvent } from "./pest.repository.js";
+export type { TelemetryRule } from "./rule.repository.js";
+export { breaches, DEFAULT_TELEMETRY_RULES } from "./rule.repository.js";

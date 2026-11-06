@@ -43,14 +43,15 @@
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { iotApi, plotApi, telemetryApi, weatherApi } from '@/api'
+import { iotApi, plotApi, telemetryApi, weatherApi, zoneApi } from '@/api'
+import type { InfraLine, ZoneSummary } from '@/api'
 import { parsePlotBoundaries, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 
-type LayerKey = 'base' | 'devices' | 'fields'
+type LayerKey = 'base' | 'devices' | 'fields' | 'zones' | 'lines'
 const tiandituKey = import.meta.env.VITE_TIANDITU_KEY
-const visibleLayers = reactive<Record<LayerKey, boolean>>({ base: true, devices: true, fields: true })
+const visibleLayers = reactive<Record<LayerKey, boolean>>({ base: true, devices: true, fields: true, zones: true, lines: true })
 const toolbarItems: Array<{ key: LayerKey; label: string; icon: string }> = [
-  { key: 'base', label: '影像底图', icon: '▧' }, { key: 'devices', label: '设备点位', icon: '◎' }, { key: 'fields', label: '地块边界', icon: '▦' },
+  { key: 'base', label: '影像底图', icon: '▧' }, { key: 'devices', label: '设备点位', icon: '◎' }, { key: 'fields', label: '地块边界', icon: '▦' }, { key: 'zones', label: '片区范围', icon: '◇' }, { key: 'lines', label: '管网线路', icon: '⇉' },
 ]
 const metrics = reactive({
   plotCount: '—',
@@ -76,6 +77,8 @@ let map: any = null
 let baseLayers: { vector: any; imagery: any } | null = null
 let deviceLayer: any = null
 let fieldLayer: any = null
+let zoneLayer: any = null
+let lineLayer: any = null
 let baseKey: 'imagery' | 'vector' = 'imagery'
 const tileOptions = { subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'], maxZoom: 18 }
 
@@ -100,6 +103,66 @@ function toggleLayer(key: LayerKey) {
   }
   if (key === 'devices' && deviceLayer) visibleLayers.devices ? deviceLayer.addTo(map) : map.removeLayer(deviceLayer)
   if (key === 'fields' && fieldLayer) visibleLayers.fields ? fieldLayer.addTo(map) : map.removeLayer(fieldLayer)
+  if (key === 'zones' && zoneLayer) visibleLayers.zones ? zoneLayer.addTo(map) : map.removeLayer(zoneLayer)
+  if (key === 'lines' && lineLayer) visibleLayers.lines ? lineLayer.addTo(map) : map.removeLayer(lineLayer)
+}
+
+/** 管线配色：灌水管青色、施肥管黄色、电力线橙色、机耕道灰白 */
+const lineColors: Record<string, string> = { IRRIGATION_PIPE: '#00d4ff', FERTILIZATION_PIPE: '#f3c969', ELECTRIC_LINE: '#ff8a65', ROAD: '#b0bec5' }
+const lineLabels: Record<string, string> = { IRRIGATION_PIPE: '灌水管', FERTILIZATION_PIPE: '施肥管', ELECTRIC_LINE: '电力线', ROAD: '机耕道' }
+
+/** 把田间管线画成折线图层；服务端坐标是 [经度, 纬度]，Leaflet 需要 [纬度, 经度]。 */
+function renderLines(list: InfraLine[]) {
+  if (!map) return
+  if (lineLayer) map.removeLayer(lineLayer)
+  const shapes = list
+    .filter((line) => Array.isArray(line.geom?.coordinates) && line.geom.coordinates.length >= 2)
+    .map((line) => {
+      const points = line.geom.coordinates.map((point) => [Number(point[1]), Number(point[0])] as [number, number])
+      const color = lineColors[line.lineType] ?? '#00d4ff'
+      return L.polyline(points, { color, weight: 3, opacity: 0.9, dashArray: line.lineType === 'ROAD' ? '6 6' : undefined }).bindTooltip(
+        `<strong>${line.lineName}</strong><br>${lineLabels[line.lineType] ?? line.lineType} · ${line.lengthM.toFixed(0)} 米`,
+      )
+    })
+  lineLayer = L.layerGroup(shapes)
+  if (visibleLayers.lines) lineLayer.addTo(map)
+}
+
+async function loadLines() {
+  try {
+    renderLines(await plotApi.getInfraLines())
+  } catch {
+    // 管线缺失不影响一张图主体，保持空图层
+    renderLines([])
+  }
+}
+
+/** 片区范围：优先画成员地块凸包，没有成员地块时退回片区自身边界。 */
+function renderZones(list: ZoneSummary[]) {
+  if (!map) return
+  if (zoneLayer) map.removeLayer(zoneLayer)
+  const shapes = list
+    .map((zone) => {
+      const ring = zone.hull?.coordinates?.[0] ?? zone.geom?.coordinates?.[0]
+      if (!ring || ring.length < 4) return null
+      const points = ring.map((point) => [Number(point[1]), Number(point[0])] as [number, number])
+      return L.polygon(points, { color: zone.color || '#00d4ff', weight: 2, dashArray: '8 6', fill: false }).bindTooltip(
+        `<strong>${zone.zoneName}</strong><br>${zone.zoneCode} · ${zone.plotCount} 块 · ${zone.areaMu.toFixed(2)} 亩`,
+      )
+    })
+    .filter((shape): shape is any => !!shape)
+  zoneLayer = L.layerGroup(shapes)
+  if (visibleLayers.zones) zoneLayer.addTo(map)
+}
+
+async function loadZones() {
+  try {
+    const list = await zoneApi.getMap()
+    renderZones(list)
+    if (list.length) mapMessage.value = `${mapMessage.value} · ${list.length} 个片区`
+  } catch {
+    renderZones([])
+  }
 }
 
 /** 把服务端地块边界画到地图上；没有边界时保留可切换的空图层与提示。 */
@@ -147,6 +210,8 @@ function initMap() {
   baseLayers = { vector, imagery }
   baseLayers[baseKey].addTo(map)
   fieldLayer = L.layerGroup().addTo(map)
+  zoneLayer = L.layerGroup().addTo(map)
+  lineLayer = L.layerGroup().addTo(map)
 }
 
 /** 用地块面积与作物汇总看板指标；作物缺失时按名称聚合为“未标注”。 */
@@ -246,6 +311,8 @@ onMounted(initMap)
 onMounted(() => void loadPlots())
 onMounted(() => void loadPlotStats())
 onMounted(() => void loadSensing())
+onMounted(() => void loadLines())
+onMounted(() => void loadZones())
 onUnmounted(() => { map?.remove(); map = null })
 </script>
 

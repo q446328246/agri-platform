@@ -6,7 +6,7 @@
 docker compose -f infra/docker-compose.yml up -d
 ```
 
-PostgreSQL 使用 `agri/agri` 账号创建 `agri` 数据库，并自动执行 `infra/postgres/001_initial_schema.sql`。后续变更在 `infra/postgres/migrations` 下按编号递增追加（当前已到 007，包含决策/遥测、事件总线、账号角色、控制指令、消息偏好与登录会话）。MinIO 控制台地址为 `http://127.0.0.1:9001`，默认账号为 `minioadmin/minioadmin`。
+PostgreSQL 使用 `agri/agri` 账号创建 `agri` 数据库，并自动执行 `infra/postgres/001_initial_schema.sql`。后续变更在 `infra/postgres/migrations` 下按编号递增追加（当前已到 011，包含决策/遥测、事件总线、账号角色、控制指令、消息偏好、登录会话、四情监控、片区台账、演示数据与地块档案字段）；`008_agro_monitoring.sql` 新增 `telemetry_rules`（阈值规则）、`telemetry_pest_events`（虫情识别记录）与 `infra_lines`（田间管线）；`009_plot_zones.sql` 新增 `plot_zones`（片区台账）、`plot_records.zone_code`（地块归属列），并预置 `ZONE-01/02/03` 三个示例片区与 `LINE-ROAD-001` 示例机耕道；`010_demo_data.sql` 为每个业务页面灌入成套演示数据（12 块地块、3 个片区、6 条田间线路、3024 条遥测读数、告警/虫情/决策规则/处方/指令/消息/投入产出/溯源记录，以及 4 个演示账号与 1 个自定义角色），主键统一带 `demo` 前缀、全部 `ON CONFLICT DO NOTHING`，可安全重复执行；`011_plot_profile.sql` 为 `plot_records` 补充 `plot_type`/`plot_status`/`current_crop`/`owner_name`/`owner_phone`/`remark` 六个档案字段（含 CHECK 约束与筛选索引），并按 `parcel_id` 幂等回填 12 块示范地块的类型/状态/作物/负责人。MinIO 控制台地址为 `http://127.0.0.1:9001`，默认账号为 `minioadmin/minioadmin`。
 
 数据库已运行时，也可以使用标准迁移命令：
 
@@ -70,5 +70,6 @@ docker compose -f infra/docker-compose.yml logs -f app
 - 前端地图 Key 通过构建参数传入：`$env:VITE_TIANDITU_KEY="..."; docker compose ... build`；未传时回落到 `apps/web/.env`（Dockerfile 会在参数为空时 `unset`，避免空值覆盖）。
 - 生产证书：把 `fullchain.pem` / `privkey.pem` 放到 `infra/certs`，取消 `edge` 服务里 `./certs:/etc/nginx/tls:ro` 的注释。
 - 迁移在应用容器启动阶段执行，因此 `app` 按单副本设计；需要多副本时应把迁移拆成独立的 `job` 再扩副本。
+- 每个迁移文件按编号**只执行一次**（`schema_migrations` 记账）。如果事后往一个已应用过的迁移文件里追加段落，已存在的库不会自动补跑，需要手工执行同段 SQL；或删掉 `schema_migrations` 里对应行、清理该文件的 `demo` 前缀数据后重跑。全新数据库则会直接拿到完整文件。
 - 构建依赖 Docker Hub 与 npm 源：若 `docker pull` 报 `registry-1.docker.io ... EOF`（表现为域名解析到 `198.18.x` 后 TLS 失败），按上面第 0 步用镜像源拉取并重打 tag，无需修改 Dockerfile。
-- 本机已实测通过（2026-11-05）：两镜像构建成功、`app`/`edge` healthy、登录与 22 个业务接口 200、`POST /api/v1/plots` 201 并落库、`docker compose restart app` 后旧 token 与数据仍有效。
+- 本机已实测通过（2026-11-05）：两镜像构建成功、`app`/`edge` healthy、登录与 22 个业务接口 200、`POST /api/v1/plots` 201 并落库、`docker compose restart app` 后旧 token 与数据仍有效；同日条件查询改造后再次重建镜像，`pnpm smoke:demo`（37 项）与 `pnpm smoke:filters`（38 项）全部通过。

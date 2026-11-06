@@ -65,11 +65,37 @@ describe("消息模板与去重键", () => {
     expect(first?.dedupeKey).not.toBe(second?.dedupeKey);
   });
 
+  it("虫情识别按等级生成告警与消息", () => {
+    const severe = buildMessageDraft(
+      EventTopic.TelemetryPestDetected,
+      { parcelId: "P-4", pestType: "稻飞虱", level: 3, confidence: 0.92, imageFileId: "file-1", detectedAt: "2026-11-05T01:10:00.000Z" },
+      context,
+    );
+    expect(severe).toMatchObject({ type: "ALERT", level: "CRITICAL", plotCode: "P-4" });
+    expect(severe?.title).toBe("虫情识别：P-4 严重");
+    expect(severe?.content).toContain("稻飞虱");
+    expect(severe?.content).toContain("92.0%");
+    expect(severe?.content).toContain("file-1");
+
+    const slight = buildMessageDraft(
+      EventTopic.TelemetryPestDetected,
+      { parcelId: "P-4", pestType: "稻飞虱", level: 1, confidence: 0.6, detectedAt: "2026-11-05T01:20:00.000Z" },
+      context,
+    );
+    expect(slight).toMatchObject({ type: "NOTICE", level: "INFO" });
+    // 同一小时、同一类型、同一等级的识别结果只保留一条通知
+    expect(slight?.dedupeKey).not.toBe(severe?.dedupeKey);
+  });
+
   it("未登记模板的主题不生成消息，级别权重可比较", () => {
     expect(buildMessageDraft(EventTopic.OperationTaskCompleted, {}, context)).toBeNull();
     expect(isMessageTemplateTopic(EventTopic.TelemetryThresholdBreached)).toBe(true);
     expect(isMessageTemplateTopic("unknown.topic.value")).toBe(false);
-    expect(MESSAGE_TEMPLATE_TOPICS).toEqual([EventTopic.TelemetryThresholdBreached, EventTopic.DecisionPrescriptionIssued]);
+    expect(MESSAGE_TEMPLATE_TOPICS).toEqual([
+      EventTopic.TelemetryThresholdBreached,
+      EventTopic.TelemetryPestDetected,
+      EventTopic.DecisionPrescriptionIssued,
+    ]);
     expect(MESSAGE_LEVEL_RANK.CRITICAL).toBeGreaterThan(MESSAGE_LEVEL_RANK.WARNING);
   });
 });

@@ -4,7 +4,7 @@
       <div class="search-bar">
         <el-form :inline="true" :model="queryForm" @submit.prevent="handleSearch">
           <el-form-item label="关键词">
-            <el-input v-model="queryForm.keyword" placeholder="地块名称/编码/负责人" clearable style="width: 200px" />
+            <el-input v-model="queryForm.keyword" placeholder="编码/名称/作物/负责人" clearable style="width: 200px" />
           </el-form-item>
           <el-form-item label="地块类型">
             <el-select v-model="queryForm.type" placeholder="请选择" clearable style="width: 150px">
@@ -25,6 +25,19 @@
                 :value="item.value"
               />
             </el-select>
+          </el-form-item>
+          <el-form-item label="土壤类型">
+            <el-select v-model="queryForm.soilType" placeholder="请选择" clearable style="width: 130px">
+              <el-option
+                v-for="item in soilTypeOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="当前作物">
+            <el-input v-model="queryForm.currentCrop" placeholder="如：水稻" clearable style="width: 120px" />
           </el-form-item>
           <el-form-item>
             <el-button type="primary" @click="handleSearch">
@@ -69,7 +82,11 @@
         <el-table-column type="selection" width="50" align="center" />
         <el-table-column prop="parcelCode" label="地块编码" width="220" />
         <el-table-column prop="name" label="地块名称" min-width="150" />
-        <el-table-column prop="regionName" label="所属区域" width="120" />
+        <el-table-column prop="zoneCode" label="所属片区" width="110" align="center">
+          <template #default="{ row }">
+            {{ row.zoneCode || '未划入' }}
+          </template>
+        </el-table-column>
         <el-table-column prop="type" label="地块类型" width="100" align="center">
           <template #default="{ row }">
             <el-tag size="small">{{ getPlotTypeText(row.type) }}</el-tag>
@@ -136,7 +153,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { plotApi } from '@/api'
 import type { PlotQuery, PlotStatus, PlotType } from '@/types'
-import { PlotStatus as PS, PlotType as PT } from '@/types'
+import { PlotStatus as PS, PlotType as PT, SoilType as ST } from '@/types'
 import { formatDateTime } from '@/utils'
 
 // 简单的工具函数
@@ -181,8 +198,18 @@ const queryForm = reactive<PlotQuery>({
   pageSize: 20,
   keyword: '',
   type: undefined,
-  status: undefined
+  status: undefined,
+  soilType: undefined,
+  currentCrop: ''
 })
+
+const soilTypeOptions = [
+  { label: '壤土', value: ST.LOAM },
+  { label: '黏土', value: ST.CLAY },
+  { label: '沙土', value: ST.SAND },
+  { label: '淤土', value: ST.SILT },
+  { label: '泥炭土', value: ST.PEAT }
+]
 
 const plotTypeOptions = [
   { label: '大田', value: PT.FIELD },
@@ -220,6 +247,8 @@ function handleReset() {
   queryForm.keyword = ''
   queryForm.type = undefined
   queryForm.status = undefined
+  queryForm.soilType = undefined
+  queryForm.currentCrop = ''
   queryForm.page = 1
   fetchList()
 }

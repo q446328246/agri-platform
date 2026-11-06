@@ -36,6 +36,12 @@ const routes: RouteRecordRaw[] = [
             meta: { title: '地块列表', permission: 'plot:read' }
           },
           {
+            path: 'zone',
+            name: 'PlotZone',
+            component: () => import('@/views/zone/Index.vue'),
+            meta: { title: '片区管理', permission: 'plot:read' }
+          },
+          {
             path: 'create',
             name: 'PlotCreate',
             component: () => import('@/views/plot/Edit.vue'),
@@ -72,6 +78,12 @@ const routes: RouteRecordRaw[] = [
             name: 'FarmRecord',
             component: () => import('@/views/farm/Record.vue'),
             meta: { title: '农事记录', permission: 'operation:read' }
+          },
+          {
+            path: 'navigation',
+            name: 'FarmNavigation',
+            component: () => import('@/views/farm/Navigation.vue'),
+            meta: { title: '田间导航', permission: 'operation:read' }
           }
         ]
       },
@@ -98,8 +110,20 @@ const routes: RouteRecordRaw[] = [
             name: 'DeviceCommands',
             component: () => import('@/views/device/Commands.vue'),
             meta: { title: '控制指令', permission: 'device:read' }
+          },
+          {
+            path: 'irrigation',
+            name: 'DeviceIrrigation',
+            component: () => import('@/views/irrigation/Index.vue'),
+            meta: { title: '水肥灌溉', permission: 'device:control' }
           }
         ]
+      },
+      {
+        path: 'agro',
+        name: 'Agro',
+        component: () => import('@/views/agro/Index.vue'),
+        meta: { title: '四情监控', icon: 'Sunny', permission: 'telemetry:read' }
       },
       {
         path: 'finance',

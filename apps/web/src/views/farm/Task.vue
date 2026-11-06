@@ -14,6 +14,31 @@
               <el-option label="已取消" value="CANCELLED" />
             </el-select>
           </el-form-item>
+          <el-form-item label="任务类型">
+            <el-select v-model="queryForm.taskType" placeholder="请选择" clearable style="width: 130px">
+              <el-option
+                v-for="item in taskTypeOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="地块编码">
+            <el-input v-model="queryForm.parcelCode" placeholder="地块编码" clearable style="width: 160px" />
+          </el-form-item>
+          <el-form-item label="计划时间">
+            <el-date-picker
+              v-model="planRange"
+              type="daterange"
+              value-format="YYYY-MM-DD"
+              range-separator="至"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              clearable
+              style="width: 240px"
+            />
+          </el-form-item>
           <el-form-item>
             <el-button type="primary" @click="handleSearch">查询</el-button>
             <el-button @click="handleReset">重置</el-button>
@@ -62,8 +87,9 @@
         <el-pagination
           v-model:current-page="queryForm.page"
           v-model:page-size="queryForm.pageSize"
+          :page-sizes="[10, 20, 50, 100]"
           :total="total"
-          layout="total, prev, pager, next"
+          layout="total, sizes, prev, pager, next"
           @current-change="fetchList"
           @size-change="fetchList"
         />
@@ -74,7 +100,7 @@
       <el-form :model="createForm" label-width="90px">
         <el-form-item label="任务名称" required><el-input v-model="createForm.name" /></el-form-item>
         <el-form-item label="地块编码" required><el-input v-model="createForm.plotCode" /></el-form-item>
-        <el-form-item label="任务类型"><el-select v-model="createForm.type" style="width: 100%"><el-option label="翻耕" value="TILLAGE" /><el-option label="播种" value="SEEDING" /><el-option label="灌溉" value="IRRIGATION" /><el-option label="除草" value="WEEDING" /><el-option label="植保" value="SPRAYING" /></el-select></el-form-item>
+        <el-form-item label="任务类型"><el-select v-model="createForm.type" style="width: 100%"><el-option label="翻耕" value="TILLAGE" /><el-option label="播种" value="SEEDING" /><el-option label="灌溉" value="IRRIGATION" /><el-option label="除草" value="WEEDING" /><el-option label="植保" value="SPRAYING" /><el-option label="施肥" value="FERTILIZATION" /></el-select></el-form-item>
         <el-form-item label="计划时间"><el-date-picker v-model="createForm.scheduledAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" style="width: 100%" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="createVisible = false">取消</el-button><el-button type="primary" :loading="creating" @click="submitCreate">创建</el-button></template>
@@ -91,12 +117,12 @@ import { operationApi } from '@/api'
 
 const getTaskTypeText = (type: string) => {
   const map: Record<string, string> = {
-    'SOWING': '播种',
-    'FERTILIZING': '施肥',
+    'TILLAGE': '翻耕',
+    'SEEDING': '播种',
     'IRRIGATION': '灌溉',
-    'PEST_CONTROL': '病虫害防治',
-    'HARVEST': '收获',
-    'OTHER': '其他'
+    'WEEDING': '除草',
+    'SPRAYING': '植保',
+    'FERTILIZATION': '施肥'
   }
   return map[type] || type
 }
@@ -112,13 +138,36 @@ const queryForm = reactive<FarmTaskQuery>({
   page: 1,
   pageSize: 20,
   keyword: '',
-  status: undefined
+  status: undefined,
+  taskType: undefined,
+  parcelCode: ''
 })
+
+// 计划时间区间（operation-service 按 scheduledAt/createdAt 命中）
+const planRange = ref<[string, string] | null>(null)
+
+const taskTypeOptions = [
+  { label: '翻耕', value: 'TILLAGE' },
+  { label: '播种', value: 'SEEDING' },
+  { label: '灌溉', value: 'IRRIGATION' },
+  { label: '除草', value: 'WEEDING' },
+  { label: '植保', value: 'SPRAYING' },
+  { label: '施肥', value: 'FERTILIZATION' }
+]
 
 async function fetchList() {
   loading.value = true
   try {
-    const result = await operationApi.getTasks({ page: queryForm.page ?? 1, size: queryForm.pageSize ?? 20, keyword: queryForm.keyword, status: queryForm.status })
+    const result = await operationApi.getTasks({
+      page: queryForm.page ?? 1,
+      size: queryForm.pageSize ?? 20,
+      keyword: queryForm.keyword,
+      status: queryForm.status,
+      type: queryForm.taskType,
+      plotCode: queryForm.parcelCode,
+      from: planRange.value?.[0],
+      to: planRange.value?.[1]
+    })
     tableData.value = result.items.map((task) => ({
       ...task,
       taskName: task.name,
@@ -144,6 +193,10 @@ function handleSearch() {
 function handleReset() {
   queryForm.keyword = ''
   queryForm.status = undefined
+  queryForm.taskType = undefined
+  queryForm.parcelCode = ''
+  planRange.value = null
+  queryForm.page = 1
   fetchList()
 }
 

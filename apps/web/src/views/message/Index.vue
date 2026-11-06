@@ -20,6 +20,25 @@
         <el-form-item label="关键词">
           <el-input v-model="query.keyword" placeholder="标题或内容" clearable style="width: 180px" />
         </el-form-item>
+        <el-form-item label="级别">
+          <el-select v-model="query.level" placeholder="全部" clearable style="width: 110px">
+            <el-option label="提示" value="INFO" />
+            <el-option label="警告" value="WARNING" />
+            <el-option label="严重" value="CRITICAL" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="消息时间">
+          <el-date-picker
+            v-model="query.range"
+            type="daterange"
+            value-format="YYYY-MM-DD"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            clearable
+            style="width: 240px"
+          />
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="reload">查询</el-button>
           <el-button @click="reset">重置</el-button>
@@ -201,6 +220,8 @@ const query = reactive({
   read: '' as '' | 'true' | 'false',
   plotCode: '',
   keyword: '',
+  level: '' as '' | 'INFO' | 'WARNING' | 'CRITICAL',
+  range: null as [string, string] | null,
 })
 
 const form = reactive({
@@ -267,6 +288,9 @@ function buildParams(): MessageQuery {
   if (plotCode) params.plotCode = plotCode
   const keyword = query.keyword.trim()
   if (keyword) params.keyword = keyword
+  if (query.level) params.level = query.level
+  if (query.range?.[0]) params.from = query.range[0]
+  if (query.range?.[1]) params.to = query.range[1]
   return params
 }
 
@@ -302,6 +326,8 @@ function reset(): void {
   query.read = ''
   query.plotCode = ''
   query.keyword = ''
+  query.level = ''
+  query.range = null
   reload()
 }
 

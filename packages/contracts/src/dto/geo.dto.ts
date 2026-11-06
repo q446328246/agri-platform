@@ -15,3 +15,13 @@ export interface GeoPolygon {
   /** 坐标参考系统标识，平台统一使用 4490 */
   srid: number;
 }
+
+/** 线状几何，用于灌水管线、施肥管路、电力线与道路 */
+export interface GeoLineString {
+  /** 几何类型固定为 LineString */
+  type: "LineString";
+  /** 折点坐标，按走向排列，每个点为 [经度, 纬度] */
+  coordinates: number[][];
+  /** 坐标参考系统标识，平台统一使用 4490 */
+  srid: number;
+}
