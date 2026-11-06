@@ -420,8 +420,34 @@ export interface TelemetryOverview {
 }
 
 export const weatherApi = {
-  getForecast(): Promise<{ location: string; forecast: any[] }> {
-    return get<{ location: string; forecast: any[] }>('/weather/forecast')
+  getForecast(params?: { days?: number | undefined; hours?: number | undefined }): Promise<any> {
+    return get('/weather/forecast', cleanParams(params))
+  },
+  getRealtime(params?: { plotCode?: string | undefined; deviceId?: string | undefined }): Promise<any> {
+    return get('/weather/realtime', cleanParams(params))
+  },
+  getHourly(params?: { hours?: number | undefined }): Promise<any> {
+    return get('/weather/forecast/hourly', cleanParams(params))
+  },
+  getAlerts(params?: { level?: string | undefined; alertType?: string | undefined; plotCode?: string | undefined; active?: string | undefined; page?: number | undefined; size?: number | undefined }): Promise<any> {
+    return get('/weather/alerts', cleanParams(params))
+  },
+  getHistory(params?: { metric?: string | undefined; plotCode?: string | undefined; from?: string | undefined; to?: string | undefined; size?: number | undefined }): Promise<any> {
+    return get('/weather/history', cleanParams(params))
+  },
+  getAdvice(): Promise<any> {
+    return get('/weather/advice')
+  },
+  getMetrics(): Promise<any[]> {
+    return get('/weather/metrics')
+  },
+  /** 同步器状态：管理员观测 todayCalls / dailyCallLimit / forceSyncCount */
+  getSyncStatus(): Promise<any> {
+    return get('/weather/sync-status')
+  },
+  /** 管理员强制同步：bypass dailyCallLimit，需 weather:sync 权限 */
+  syncNow(): Promise<any> {
+    return post('/weather/sync-now', {})
   }
 }
 

@@ -89,6 +89,9 @@ export function resolveRouteRule(method: string, pathname: string): RouteRule {
   if (matchesPrefix(path, "/api/v1/platform/audit-logs")) return { kind: "permission", code: "system:audit" };
   if (matchesPrefix(path, "/api/v1/platform/tenant") || matchesPrefix(path, "/api/v1/platform/permissions")) return { kind: "session" };
 
+  // 管理员强制同步和风天气：同属于 weather 前缀但需更高权限，优先于 ROUTE_PERMISSIONS 判定
+  if (method === "POST" && path === "/api/v1/weather/sync-now") return { kind: "permission", code: "weather:sync" };
+
   const rule = ROUTE_PERMISSIONS.find((item) => matchesPrefix(path, item.prefix));
   if (rule) return { kind: "permission", code: isReadMethod(method) ? rule.read : rule.write };
   return { kind: "session" };

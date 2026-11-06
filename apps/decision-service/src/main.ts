@@ -35,12 +35,22 @@ async function bootstrap(): Promise<void> {
     const outcomes = new SqlOutcomeRepository(client);
     const outbox = new SqlOutboxStore(client);
     const tenantId = process.env.TENANT_ID ?? "tenant-demo";
+    const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
+    // 从天气预报服务取未来 24h 降雨概率，用于规则求值（无降雨时不会误推迟）
+    const fetchRainProbability = async (): Promise<number | undefined> => {
+      try {
+        const res = await fetch(`${weatherUrl}/api/v1/weather/forecast?days=1`, { signal: AbortSignal.timeout(2000) });
+        if (!res.ok) return undefined;
+        const json = (await res.json()) as { data?: { forecast?: Array<{ rainProbability: number }> } };
+        return json.data?.forecast?.[0]?.rainProbability;
+      } catch { return undefined; }
+    };
     // 中继把本地消息表投递到共享事件日志，其他服务据此消费处方事件
     const publisher = new EventLogPublisher(new PgEventLogStore(client), { tenantId, traceId: "decision-relay", producer: "decision" });
     const relay = new OutboxService(outbox, publisher, { tenantId, traceId: "decision-relay", producer: "decision" });
     relay.start();
     setDefaultPublisher(publisher);
-    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, outbox, publisher, tenantId } satisfies Partial<DecisionDependencies>);
+    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, outbox, publisher, tenantId, fetchRainProbability } satisfies Partial<DecisionDependencies>);
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
     const shutdown = async (): Promise<void> => {
       server.close();
@@ -53,7 +63,16 @@ async function bootstrap(): Promise<void> {
   }
 
   if (process.env.SERVICE_MODE === "http") {
-    const server = createDecisionHttpServer();
+    const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
+    const fetchRainProbability = async (): Promise<number | undefined> => {
+      try {
+        const res = await fetch(`${weatherUrl}/api/v1/weather/forecast?days=1`, { signal: AbortSignal.timeout(2000) });
+        if (!res.ok) return undefined;
+        const json = (await res.json()) as { data?: { forecast?: Array<{ rainProbability: number }> } };
+        return json.data?.forecast?.[0]?.rainProbability;
+      } catch { return undefined; }
+    };
+    const server = createDecisionHttpServer({ fetchRainProbability });
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（内存实现）", { port }));
     return;
   }

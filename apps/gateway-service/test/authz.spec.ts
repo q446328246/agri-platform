@@ -33,6 +33,9 @@ describe("网关路由鉴权策略", () => {
     // 文件随地块、视频随设备
     expect(resolveRouteRule("GET", "/api/v1/files/1/content")).toEqual({ kind: "permission", code: "plot:read" });
     expect(resolveRouteRule("POST", "/api/v1/video/cameras/camera-001/ptz")).toEqual({ kind: "permission", code: "device:control" });
+    // 气象接口预设为只读；POST /sync-now 管理员强制同步需 weather:sync
+    expect(resolveRouteRule("GET", "/api/v1/weather/forecast")).toEqual({ kind: "permission", code: "weather:read" });
+    expect(resolveRouteRule("POST", "/api/v1/weather/sync-now")).toEqual({ kind: "permission", code: "weather:sync" });
   });
 
   it("账号、角色与审计使用各自独立权限", () => {

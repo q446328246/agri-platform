@@ -623,6 +623,12 @@ importers:
       '@agri/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@agri/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@agri/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@agri/shared':
         specifier: workspace:*
         version: link:../../packages/shared

@@ -30,6 +30,8 @@ export interface DecisionDependencies {
   publisher?: EventPublisher;
   /** 处方生成时向遥测服务补齐最新墒情，缺省直接使用请求体中的数值 */
   fetchSoilMoisture?: (plotCode: string) => Promise<number | undefined>;
+  /** 处方生成时从天气预报取未来降雨概率，缺省使用请求体或 0 */
+  fetchRainProbability?: (plotCode?: string) => Promise<number | undefined>;
   tenantId?: string;
 }
 
@@ -102,6 +104,7 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
   const tenantId = dependencies?.tenantId ?? "tenant-demo";
   const engine = new RuleEngine(rules);
   const fetchSoilMoisture = dependencies?.fetchSoilMoisture;
+  const fetchRainProbability = dependencies?.fetchRainProbability;
   const publisher = dependencies?.publisher ?? new InMemoryEventPublisher();
   const outbox = dependencies?.outbox;
   // 有本地消息表时先落表再由中继投递；无表时直接进程内发布，便于本地联调
@@ -187,8 +190,9 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
         const reportedSoil = Number(body.soilMoisture);
         const reportedRain = Number(body.rainProbability);
         const liveSoil = plotCode ? await fetchSoilMoisture?.(plotCode) : undefined;
+        const liveRain = !Number.isFinite(reportedRain) && fetchRainProbability ? await fetchRainProbability(plotCode || undefined) : undefined;
         const soilMoisture = Number.isFinite(reportedSoil) ? reportedSoil : liveSoil ?? 100;
-        const rainProbability = Number.isFinite(reportedRain) ? reportedRain : 0;
+        const rainProbability = Number.isFinite(reportedRain) ? reportedRain : liveRain ?? 0;
         const growthStage = String(body.growthStage ?? "").trim();
         const evaluationInput: RuleEvaluationInput = { plotCode, plotName, growthStage, soilMoisture, rainProbability };
         const { matchedRules, items } = await engine.evaluate(evaluationInput, now);
@@ -200,7 +204,7 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
           soilMoisture,
           rainProbability,
           growthStage,
-          inputs: { plotCode, plotName, growthStage, soilMoisture, rainProbability, soilMoistureSource: Number.isFinite(reportedSoil) ? "request" : liveSoil !== undefined ? "telemetry" : "default", requestedAt: now },
+          inputs: { plotCode, plotName, growthStage, soilMoisture, rainProbability, soilMoistureSource: Number.isFinite(reportedSoil) ? "request" : liveSoil !== undefined ? "telemetry" : "default", rainProbabilitySource: Number.isFinite(reportedRain) ? "request" : liveRain !== undefined ? "weather" : "default", requestedAt: now },
           matchedRules,
           actions: items,
           generatedAt: now,

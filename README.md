@@ -56,6 +56,7 @@ pnpm --filter @agri/web dev
 | `pnpm smoke:zones` | 片区建档/划入/凸包与机耕道导航（默认经 `https://localhost`，可用 `BASE_URL` 覆盖） |
 | `pnpm smoke:demo` | 逐页校验演示数据（地块/四情/设备/任务/指令/处方/视频/消息/核算/溯源/系统管理），同样默认 `https://localhost` |
 | `pnpm smoke:filters` | 逐服务校验各页面查询条的筛选参数真实生效（枚举/关键词/时间区间/分页/汇总联动），默认 `https://localhost` |
+| `pnpm smoke:weather` | 气象服务冒烟：五日预报、预警、逐小时、实时气象站、农事建议、历史曲线、决策联动降雨概率来源校验，默认 `https://localhost` |
 | `pnpm init:minio` | 创建 S3/MinIO bucket |
 | `pnpm health:infra` | 检查 PostgreSQL 和 MinIO |
 | `pnpm db:migrate` | 使用 `DB_URL` 执行 PostgreSQL 初始化迁移 |
@@ -107,7 +108,7 @@ agri-platform-nodejs-scaffold/
     ├── gateway-service/      # 网关：最长前缀反向代理
     ├── plot-service/         # 地块建档、事件消费、装配示范
     ├── auth/platform/        # 认证与平台基础服务（角色、租户、审计）
-    ├── iot/telemetry/weather # 感知：设备、遥测读数与告警、天气预报
+    ├── iot/telemetry/weather # 感知：设备、遥测读数与告警、气象预报/预警/实时/农事建议
     ├── message-service/      # 消息中心：事件消费 + 消息落库
     ├── decision-service/     # 规则、处方、效果回流与问答
     ├── operation/control/    # 农事作业与水肥控制指令
@@ -181,6 +182,7 @@ agri-platform-nodejs-scaffold/
   统一提供「关键词 + 枚举下拉 + 时间区间 + 重置 + 分页」查询条，筛选全部下沉服务端；
   地块台账补充类型/状态/当前作物/负责人字段（迁移 011），投入产出页汇总卡片与列表同一套条件联动。
 - **错误码分段**：域缩写-分类码-序号（如 `PLOT-409-001`），含义一经发布不得修改。
+- **气象数据可插拔（默认仅读本地 DB）**：`weather-service` 前端接口（`/forecast` `/forecast/hourly` `/advice` `/alerts` `/history` `/realtime`）**只读本地 `weather_forecasts` / `weather_forecast_hours` / `weather_alerts` 三张表**（无 DB 时回退 `demo.ts` 内存种子），页面刷新不会触发任何外部请求。配置 `QWEATHER_KEY` 后 `sync.ts` 定时同步器默认 **每日一次**（`forecastRefreshMinutes=1440` / `alertRefreshMinutes=1440`）拉取和风 v7 API 落库；启动时会先判断 `lastRefreshedAt`，若仍在周期内则跳过初次同步；内置 **每日调用硬上限 `dailyCallLimit=20`**（跨自然日自动清零）防止异常场景频繁重启浪费免费额度。个人开发者免费 Key 每日≈1000 次，本项目默认一天 2 次远低于额度。失败降级不抛异常，接口仍返回旧数据。`/forecast` 等端点返回 `dataSource: "demo"|"sql"|"qweather"|"local"`；运维可通过 `GET /api/v1/weather/sync-status` 查看 `todayCalls` / `dailyCallLimit` / `lastForecastSyncAt`。**管理员强制同步**：`POST /api/v1/weather/sync-now`，需 `weather:sync` 权限（admin 默认通配覆盖），**bypass `dailyCallLimit`** 不走上限判定，适合现场临时拉取最新预报；网关与服务双侧均拦截非管理员，前端 `views/weather/Index.vue` 仅对具备 `weather:sync` 的用户展示“强制同步和风天气”按钮与额度面板。实时气象站读数不取和风 `/now`，仍从 telemetry-service 取田间气象站上报。
 - **时序数据不在 `@agri/db` 范围内**：由物联感知服务直连时序库；缓存由各服务自行使用缓存中间件。
 
 ## 五、已验证结果
@@ -191,7 +193,7 @@ agri-platform-nodejs-scaffold/
 | 验证项 | 命令 | 结果 |
 | --- | --- | --- |
 | 全量编译 | `pnpm run build` | 通过 |
-| 测试 | `pnpm test` | 45 个测试文件、183 个用例全部通过（带 `DB_URL` 时 SQL 用例不再跳过） |
+| 测试 | `pnpm test` | 44 个测试文件、190 个用例全部通过（带 `DB_URL` 时 SQL 用例不再跳过） |
 | 前端类型检查 | `pnpm --filter @agri/web exec vue-tsc -b` | 通过 |
 | 事件闭环联调 | `pnpm exec vitest run apps/message-service/test/event-closure.spec.ts` | 通过：越限/处方事件 → 消息 → 已读 → 效果回流 → 规则阈值写回 |
 | 全量服务冒烟 | `pnpm smoke:services` | 15 个 HTTP 服务启动并健康检查通过 |
@@ -205,6 +207,7 @@ agri-platform-nodejs-scaffold/
 | 片区与导航 | `pnpm smoke:zones` | 通过：示例片区就绪、建档/重码 409、划入与凸包、按片区过滤、机耕道沿路导航与历史方案、有地块时删片区 409、清理 |
 | 演示数据逐页校验 | `pnpm smoke:demo` | 通过：37 项全 PASS（迁移 011 与条件查询改造后无回归） |
 | 条件查询冒烟 | `pnpm smoke:filters` | 通过：38 项全 PASS——地块类型/状态/土壤/作物/面积/非法枚举 400、设备类型/状态/地块/分页、任务与指令枚举+时间区间、核算筛选+汇总联动、溯源、视频、四情（指标/级别/虫情/总览联动）、消息级别与时间区间 |
+| 气象服务冒烟 | `pnpm smoke:weather` | 通过：13 项全 PASS——五日预报、作业提示+适宜性、逐小时 24 时次、days=2、预警、非法 level 400、实时气象站、农事建议、要素目录、历史曲线、非法 metric 400、决策处方 rainProbabilitySource=weather |
 | 示例服务 | `pnpm run start:plot` | 建档、中继、消费、幂等链路跑通，输出如下 |
 
 ```json

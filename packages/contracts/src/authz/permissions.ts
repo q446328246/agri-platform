@@ -27,6 +27,7 @@ export const PERMISSION_CATALOG: PermissionGroup[] = [
       { code: "telemetry:read", name: "查询遥测与告警" },
       { code: "telemetry:write", name: "上报遥测与处理告警" },
       { code: "weather:read", name: "查询气象预报" },
+      { code: "weather:sync", name: "强制同步和风天气（管理员）" },
     ],
   },
   {
@@ -60,6 +61,7 @@ export type PermissionCode =
   | "telemetry:read"
   | "telemetry:write"
   | "weather:read"
+  | "weather:sync"
   | "device:read"
   | "device:control"
   | "operation:read"

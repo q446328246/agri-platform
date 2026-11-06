@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: shared_packages
-title: '@agri/* 共享 TypeScript 包集合'
+title: '@agri-platform 共享依赖层（monorepo packages）'
 scope:
     - packages/
 source_files: []

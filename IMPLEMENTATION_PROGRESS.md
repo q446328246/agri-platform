@@ -4,10 +4,10 @@
 
 ## 当前状态
 
-- 更新时间：2026-11-05
+- 更新时间：2026-11-06
 - 当前阶段：全量验证与交付
 - 总体状态：首版交付完成（待验收）
-- 当前主线：事件日志总线打通跨进程链路，处方效果回流调优规则，系统管理用户/角色已落库，越限/处方事件已驱动控制指令与生产档案，消息中心按订阅偏好过滤并按来源主题去重，网关与服务侧已按角色权限拦截接口，控制指令来源与生产档案事件类型已在前端展示并可筛选；登录会话已落 `auth_sessions`、口令改为 scrypt 并支持滑动续期；已完成本机容器化部署（`app` + `edge`，HTTPS 443）并逐接口复验；四情监控（苗情/虫情/灾情/阈值规则）、视频 AI 识别联动、水肥配比与变量灌溉曲线、一张图管网图层已补齐并通过冒烟；片区台账（`plot_zones`）、田间导航（机耕道沿路里程）与一张图片区图层已补齐，需求矩阵无「部分完成」项；全页面演示数据已就位（`010_demo_data.sql` 落库 + iot/video/operation/finance 服务种子）；地块档案字段（类型/状态/当前作物/负责人，`011_plot_profile.sql`）已落库，地块/设备/任务/指令/核算/溯源/视频/四情/消息等页面统一「关键词+枚举+时间区间+重置+分页」查询条并全部下沉服务端，`pnpm smoke:filters` 38 项条件查询冒烟通过
+- 当前主线：事件日志总线打通跨进程链路，处方效果回流调优规则，系统管理用户/角色已落库，越限/处方事件已驱动控制指令与生产档案，消息中心按订阅偏好过滤并按来源主题去重，网关与服务侧已按角色权限拦截接口，控制指令来源与生产档案事件类型已在前端展示并可筛选；登录会话已落 `auth_sessions`、口令改为 scrypt 并支持滑动续期；已完成本机容器化部署（`app` + `edge`，HTTPS 443）并逐接口复验；四情监控（苗情/虫情/灾情/阈值规则）、视频 AI 识别联动、水肥配比与变量灌溉曲线、一张图管网图层已补齐并通过冒烟；片区台账（`plot_zones`）、田间导航（机耕道沿路里程）与一张图片区图层已补齐，需求矩阵无「部分完成」项；全页面演示数据已就位（`010_demo_data.sql` 落库 + iot/video/operation/finance 服务种子）；地块档案字段（类型/状态/当前作物/负责人，`011_plot_profile.sql`）已落库，地块/设备/任务/指令/核算/溯源/视频/四情/消息等页面统一「关键词+枚举+时间区间+重置+分页」查询条并全部下沉服务端，`pnpm smoke:filters` 38 项条件查询冒烟通过；气象服务升级为完整微服务（`weather-service` 7 个 REST 端点、SQL/内存双模式、`012_weather_forecast.sql` 三张表），决策服务处方生成自动从 weather 取降雨概率参与规则求值，前端新增「气象服务」独立页面，`pnpm smoke:weather` 13 项天气冒烟通过
 
 ## 规格来源
 
@@ -34,12 +34,12 @@
 | 需求域 | 文档要求 | 目标实现 | 当前判断 |
 | --- | --- | --- | --- |
 | 地块主数据 | 地块档案、六段式编码、CGCS2000、片区归属 | `plot-service` + `@agri/plot-core` | 已完成：CRUD/软删/边界统计/GeoJSON 边界与地图绘制，SQL 仓储可切；片区归属落地为 `plot_records.zone_code`，地块编码的 area 段与片区台账对应 |
-| 一张图 | 地块、线路、设备、天气、快捷入口 | web dashboard + plot/iot/weather API | 已完成：地块边界、设备点位、管网线路（灌水/施肥/电力/道路）图层、图层切换、天气与趋势均已接入一张图 |
+| 一张图 | 地块、线路、设备、天气、快捷入口 | web dashboard + plot/iot/weather API | 已完成：地块边界、设备点位、管网线路（灌水/施肥/电力/道路）图层、图层切换；首页天气面板改为实时 API（五日预报+适宜性标签），另有独立「气象服务」页 |
 | 基础信息 | 片区、导航、线路、水电网管线 | `platform-service` / `plot-service` / `operation-service` | 已完成：租户、角色权限、审计已落库；水电网管线以 `infra_lines` 落地并在地图渲染；片区台账（`plot_zones` + `/api/v1/zones`）与田间导航（`/api/v1/operations/path-plan`）已补齐 |
-| 四情监控 | 墒情、苗情、虫情、灾情、气象、阈值告警 | `telemetry-service` / `weather-service` / `message-service` | 已完成：墒情读数/历史曲线、苗情指标（冠层覆盖度等）、虫情识别与分级告警、灾情告警处置、达州气象；阈值规则可增删改并即时生效，事件驱动消息中心 |
+| 四情监控 | 墒情、苗情、虫情、灾情、气象、阈值告警 | `telemetry-service` / `weather-service` / `message-service` | 已完成：墒情读数/历史曲线、苗情指标（冠层覆盖度等）、虫情识别与分级告警、灾情告警处置；weather-service 完整实现五日预报/逐小时/预警/实时气象站/农事建议/历史曲线（7 端点 SQL/内存双模式）；阈值规则可增删改并即时生效，事件驱动消息中心 |
 | 视频监控 | 实时、云台、回放、AI 联动 | `video-service` / `file-service` | 已完成：摄像机、HLS 播放、云台、录像查询，AI 识别事件上报与查询，识别结果自动转发遥测生成虫情告警与消息 |
 | 设备与作业 | 设备控制、播种、灌溉、除草、植保、路径调度 | `iot-service` / `control-service` / `operation-service` | 已完成（不含真实农机调度）：指令队列、任务 CRUD 与流转、路径规划、二次确认与权限校验 |
-| 水肥一体化 | 配比、搅拌、变量灌溉、联动策略 | `control-service` / `decision-service` | 已完成：水肥指令与墒情/降雨处方联动，配比与搅拌参数校验、用水量按亩·毫米换算、分区排程输出变量灌溉曲线并可下发 |
+| 水肥一体化 | 配比、搅拌、变量灌溉、联动策略 | `control-service` / `decision-service` | 已完成：水肥指令与墒情/降雨处方联动（降雨概率从 weather-service 动态获取），配比与搅拌参数校验、用水量按亩·毫米换算、分区排程输出变量灌溉曲线并可下发 |
 | 智能决策 | 规则、处方、识别、问答 | `decision-service` | 部分完成：规则 CRUD 与热更新、处方留痕、效果回流调优、规则式问答；图像识别由 `video-service` 的 AI 事件上报承接，决策侧未内置模型 |
 | 核算与溯源 | 投入产出、农事记录、追溯 | `finance-service` / `trace-service` | 已完成：投入产出与利润汇总、生产档案（含事件自动建档）、追溯码查询 |
 | 系统支撑 | 认证、角色、区域权限、审计、文件 | `auth-service` / `gateway-service` / `file-service` | 已完成：认证/会话/角色/权限/审计/对象存储；会话持久化与强口令散列本轮补强 |
@@ -288,6 +288,68 @@
 - 任务类型口径统一：`operation-service` 的 `Task.type` 增加 `FERTILIZATION` 并对 `POST /farm-tasks` 做类型白名单校验（非法返回 400）；前端 `farm/Task.vue` 与 `plot/Detail.vue` 的 `getTaskTypeText` 原本映射的是另一套码（`SOWING`/`FERTILIZING`/`PEST_CONTROL`/`HARVEST`），改为与后端一致的六码，新建对话框补「施肥」选项。
 - 地块详情页去假数据：`plot/Detail.vue` 的「近期农事活动」原为硬编码的模拟记录，改为按 `parcelCode` 调 `GET /farm-tasks?keyword=` 取真实任务，并把「负责人/开始时间」两列换成「地块编码/计划时间」（后端无负责人字段），空结果给 `el-empty` 提示。
 
+### 2026-11-06：气象服务完整实现与决策联动
+
+- 数据层：新增迁移 `infra/postgres/migrations/012_weather_forecast.sql`，建三张表：`weather_forecasts`（按预报日期+城市唯一，存五日预报含温度/湿度/风向/降雨概率/天气状况）、`weather_forecast_hours`（按小时唯一，存 48 小时逐时预报）、`weather_alerts`（预警编码唯一，存气象预警类型/级别/标题/内容/生效与结束时间）；演示数据 5 条预报 + 48 条逐时 + 4 条预警，全部 `ON CONFLICT DO NOTHING` 幂等。
+- `weather-service` 重写：从原来 9 行硬编码静态数组升级为 260 行完整 HTTP 服务，提供 7 个 REST 端点（`/metrics`、`/realtime`、`/forecast/hourly`、`/forecast`、`/advice`、`/alerts`、`/history`）；新增 `forecast.repository.ts`（SqlForecastRepository + InMemoryForecastRepository）、`alert.repository.ts`（SqlAlertRepository + InMemoryAlertRepository）、`weather.ts`（WEATHER_METRICS 8 项要素目录 + `buildAdvice` 业务规则引擎 ADVISE_THRESHOLDS）、`demo.ts`（内存模式演示种子）；`main.ts` 按 `DB_URL` + `WEATHER_REPOSITORY_MODE` 切换 SQL/内存双模式。
+- 决策服务天气联动：`decision-service` 的 `DecisionDependencies` 新增 `fetchRainProbability` 可选函数；`http.ts` 处方生成时若未传 `rainProbability`，自动调用 `fetchRainProbability` 从 weather-service 取未来 24h 最大降雨概率参与规则求值，并在 `inputs.rainProbabilitySource` 留痕为 `"weather"`；`main.ts` 两种模式均注入 fetcher（调 `GET /api/v1/weather/forecast?days=1`）。
+- 前端气象页：新建 `views/weather/Index.vue`（183 行），包含五日预报卡片组、适宜性标签、预警表格、三 Tab（实时气象站 / 未来 24h 逐时预报 / 历史曲线带指标筛选）；`api/index.ts` 的 `weatherApi` 从单方法扩展为 7 个 API；路由新增 `weather/Index`（`permission: 'weather:read'`），侧边菜单可见。
+- 网关与权限：weather-service 全部端点只读，网关路由已存在于 `/api/v1/weather → weather-service`，权限码 `weather:read` 已在 `PERMISSION_CATALOG` 中；服务侧守卫 `AUTH_GUARD_MODE=enforce` 下校验 `weather:read`。
+- 冒烟与测试：新增 `scripts/smoke-weather.mjs`（`pnpm smoke:weather`，13 项断言覆盖预报/预警/逐时/实时/建议/历史/决策联动）；新增 `apps/weather-service/test/weather.spec.ts`（10 个单测覆盖全部端点）；全量回归 `pnpm smoke:demo` 37 项 / `smoke:filters` 38 项 / `smoke:gateway` 均无回归。
+
+### 2026-11-06：和风天气 API 可插拔接入
+
+- 新增 `apps/weather-service/src/qweather.ts`：和风 v7 API 客户端 + 字段映射，接口支持注入 `fetchImpl` 以便单测；封装三个端点（`/v7/weather/3d`、`/v7/weather/24h`、`/v7/warning/now`），默认 host 为 devapi（免费），LocationID 默认 101270600（达州市）。映射实现含 `parseWindScale`（"≤3"/"3-4" → 整数）、`kmhToMs`（km/h → m/s）、`estimateRainProbability`（daily 无 pop 时按 precip + 天气现象文本估算）、`mapAlertLevel`（颜色红/橙/黄/蓝 → CRITICAL/WARNING/INFO）、`mapDaily/mapHourly/mapWarning` 三个仓储写入映射器。type 编码遵循官方预警类型表，无匹配时默认归为 `RAINSTORM`。
+- 新增 `apps/weather-service/src/sync.ts`：`createWeatherSyncer` 启动时先判断上次刷新时间，仍在周期内则跳过初次同步（保护免费额度，避免服务频繁重启反复拉取）；周期刷新默认 **1440 分钟（每日一次）**，可环境变量覆盖；内置 **每日调用硬上限 `dailyCallLimit`（默认 20，跨自然日自动清零）**，达到上限后直接 warn 跳过、不发起外部请求；失败只记 `warn` 不抛异常，保留旧数据；自动清理过期时次（默认保留 72 小时）；预警同步时会对本地仍 active 但 `QW-*` 前缀而本次未返回的预警自动 deactivate。环境变量入口 `buildQWeatherFromEnv`：缺 `QWEATHER_KEY` 时返回 `undefined`，服务保持既有行为；`buildSyncerOptionsFromEnv` 集中解析 `QWEATHER_FORECAST_REFRESH_MINUTES / ALERT_REFRESH_MINUTES / HOURLY_RETAIN_HOURS / DAILY_CALL_LIMIT`。
+- 仓储接口升级：`ForecastRepository` 新增 `upsertDay`（同日覆盖幂等）、`upsertHour`（同时次覆盖）、`deleteHoursBefore?`（可选，过期清理）；`SqlForecastRepository.upsertDay` 先 SELECT 同日同城、命中则 UPDATE，未命中回退 INSERT；内存实现同样。`AlertRepositoryLike` 仅作为同步器内部契约，不影响已有 `SqlAlertRepository` / `InMemoryAlertRepository` 使用方。
+- `http.ts` 返回体新增 `dataSource: "demo" | "sql" | "qweather" | "local"`（forecast / forecast/hourly / advice 三个端点），由 `dependencies.syncStats()` 实时反映同步状态；无同步器时回退 `dependencies.source` 声明值。接口契约向后兼容，前端无感。**前端接口仍只读本地仓储，未引入任何直连和风的端点**。新增 `GET /api/v1/weather/sync-status` 供运维查看 `enabled / todayCalls / dailyCallLimit / callCountDate / lastForecastSyncAt / lastAlertSyncAt / lastForecastError / lastAlertError`。
+- `main.ts` 集成：SQL 与内存两种模式均在 `QWEATHER_KEY` 存在时启动同步器，并挂 SIGINT/SIGTERM 优雅关闭；日志输出包含 host/locationId/city，便于运维排查。
+- 环境变量：`.env.example` 新增 `WEATHER_REPOSITORY_MODE` 与 `QWEATHER_KEY/HOST/LOCATION_ID/CITY/TIMEOUT_MS/FORECAST_REFRESH_MINUTES/ALERT_REFRESH_MINUTES/HOURLY_RETAIN_HOURS/DAILY_CALL_LIMIT`，默认全部注释；刷新间隔默认改为 **1440 分钟（每日一次）**，与和风个人免费 Key 额度对齐（免费 Key 每日约 1000 次，本项目 2 次/日远低于上限）；`QWEATHER_KEY` 示例值留空，用户请将真实 Key 填入本地 `.env`（非 example，避免提交到仓库）。
+- 单测：新增 `apps/weather-service/test/qweather.spec.ts` 21 用例（字段映射、客户端错路、同步器 upsert/deactivate、失败降级、`buildQWeatherFromEnv` 缺 Key、**冷启动周期内跳过初次同步、达到 `dailyCallLimit` 后不再请求、跨自然日自动清零、`buildSyncerOptionsFromEnv` 值解析与非法回落**）；全量 vitest 211 用例通过（基线 190，+21）。
+
+### 2026-11-06：管理员强制同步与本地 .env
+
+- 契约新增权限码 `weather:sync`（packages/contracts/src/authz/permissions.ts）；admin 默认 `["*"]` 通配自动持有；其他用户需在角色页手动勾选。契约单测验证目录与 `PERMISSION_CODES` 一致。
+- 同步器新增 `forceSync()` 方法（apps/weather-service/src/sync.ts）：**bypass `dailyCallLimit`**，不走上限判定，并行拉预报 + 预警；仍刷新 `callCountDate` 与 `todayCalls` 方便观测；`SyncerStats` 新增 `forceSyncCount / lastForceSyncAt` 两项。`dailyLimit` 下限从 2 降为 1，便于单测精确验证 bypass。
+- `http.ts` 新增 `POST /api/v1/weather/sync-now`：无 Key 时返回 501；有 Key 时返回 `{ forecast, alerts, error?, dataSource, at }`。`WeatherDependencies` 新增 `syncNow?: () => Promise<...>` 注入点，`main.ts` SQL 与内存两模式均传入 `syncer.forceSync`；`source` 不再预置为 `qweather`，避免未拉成功时误报。
+- 网关侧双保险（apps/gateway-service/src/authz.ts）：`resolveRouteRule` 优先判定 `POST /api/v1/weather/sync-now` 需 `weather:sync`，其余 `/api/v1/weather/*` 仍走 `weather:read`。服务侧 `authorizeRequest` 同样声明 `pathPermissions` Override，`AUTH_GUARD_MODE=enforce` 下二次拦截。网关 authz 单测新增两个断言。
+- 前端（apps/web/src/views/weather/Index.vue）：顶部新增同步条，展示 `dataSource` 标签与 `今日调用 x/y、手动强制 n 次、上次同步时间`；仅当 `useUserStore().hasPermission('weather:sync')` 时展示“强制同步和风天气”按钮；点击先 `ElMessageBox.confirm` 确认（提示“bypass 每日硬上限”），完成后并行 `loadAll + refreshSyncStatus`。`weatherApi` 新增 `getSyncStatus() / syncNow()` 两个方法。
+- 环境变量与部署：新增本地 `.env`（从 example 复制，`.gitignore` 已包含 `.env`），真实 `QWEATHER_KEY` 仅写入 `.env`；infra/docker-compose.yml `app` 服务新增 `env_file: [ { path: ../.env, required: false } ]` 自动从仓库根加载本地 `.env`，`environment:` 仅保留 `WEATHER_REPOSITORY_MODE`，其余 `QWEATHER_*` 默认值交给 `sync.ts` 内置解析（避免 compose 插值时因 shell 变量为空而覆盖 env_file 中的真实 Key）。无 `.env` 时 `required: false` 不阻断 CI 启动。
+- 单测：weather-service `test/weather.spec.ts` 新增 4 个端点用例（`sync-status` enabled 两分支 + `sync-now` 501/200）；`test/qweather.spec.ts` 新增 forceSync bypass 用例；全量 vitest **216 用例通过**（基线 211）。Docker 实跑验证：`admin` 调用 200、`viewer01` 403（网关）、无 token 401。冒烟回归：`smoke-weather` 13 + `smoke-demo-data` 37 + `smoke-filters` 38 全 PASS。
+
+### 2026-11-06：修复 403 Invalid Host与完善接入可观测
+
+- 现象：容器实跑 `POST /api/v1/weather/sync-now` 返 `forecast:false, alerts:false`，日志只给 `QWeather /v7/weather/24h HTTP 403`，无法定位。直接在容器内 fetch 确认和风返回 `application/problem+json`，error 体为 `{ title: "Invalid Host", detail: "An invalid or unauthorized API Host." }`。
+- 根因（[和风官方说明](https://dev.qweather.com/docs/configuration/api-host/)）：和风从 2026 年起逐步停用 `devapi/api/geoapi.qweather.com` 公共域名，新 Key 必须使用控制台“设置”页展示的专属 API Host（形如 `h2a9cf3mhs.xy.qweatherapi.com`）。旧 Key 仍可用时公共域名过渡中，新 Key 已直接拒绝。
+- 修复一（apps/weather-service/src/qweather.ts）：`call()` 非 2xx 分支不再只抛 `HTTP ${status}`，而是尝试 `await response.json()` 拼上 `error.title` 与 `error.detail`，兼容旧 `code/reason` 降级体，抛 `QWeather /v7/weather/3d HTTP 403 (Invalid Host): An invalid or unauthorized API Host.` 形式信息；body 非 JSON 时降级为仅状态。前端与日志一眼定位，无需手进容器 curl。
+- 修复二（apps/weather-service/src/main.ts）：新增 `checkQWeatherHost(logger, host)`，启动时命中 `devapi/api/geoapi.qweather.com` 旧域名则 `logger.warn`，hint 直接指向 `https://console.qweather.com/setting`；未显式配置 Host 时也视为旧域名（sync.ts 默认就是 devapi）。SQL 与内存两模式均接入。
+- 修复三（infra/docker-compose.yml）：`app` 服务 `env_file: [ { path: ../.env, required: false } ]` 自动加载仓库根 `.env`；`environment:` 不再展开 `${QWEATHER_KEY:-}` 等 8 行（compose 插值会把 shell 未设置的变量展开为空，覆盖 env_file 中真 Key），默认值交给 sync.ts。
+- 文档：`.env` 与 `.env.example` 中 `QWEATHER_HOST` 上方新增 3 行“⚠ 旧域名 2026 停用 / 登录控制台拿专属 Host / 当前 Key 实测 403”提醒。
+- 验证：容器重建后实跑 admin `POST /sync-now`，返回 `data.error: "QWeather /v7/weather/24h HTTP 403 (Invalid Host): An invalid or unauthorized API Host."`，启动日志 `warn` 同步输出 hint。单测 216 用例全 PASS（基线 216，本次无新增）。
+- 待用户侧操作：登录 https://console.qweather.com/setting 拿到专属 API Host，写入本地 `.env` 的 `QWEATHER_HOST=https://xxx.yz.qweatherapi.com`，重启 `docker compose -f infra/docker-compose.yml up -d --force-recreate app` 即可拉通。
+
+### 2026-11-06：和风 WebAPI v7 → v1 接口迁移
+
+- 背景：官方确认城市实时天气 `v7/weather/now`、城市每日预报 `v7/weather/3d`、城市小时预报 `v7/weather/24h` 均标记为 webapi-v7（Deprecated），将从 2026 年起逐步停用；推荐接口为基于经纬度的 `v1/weather/{current|daily|hourly}` 与 `v1/weatheralert/current`，认证方式从 `key=` 查询参数变为 `X-QW-Api-Key` 头或 `Authorization: Bearer {JWT}`，且必须使用专属 API Host。
+- 重构 `apps/weather-service/src/qweather.ts`（+425 行）：
+  - 新增 `QWeatherApiVersion`、`QWeatherConfig.apiVersion/jwt/latitude/longitude`；`resolveQWeatherConfig` 默认 `v1`，命中旧域名时直接抛错（避免无意义 403）。
+  - 拆分为 `createQWeatherClientV7` 与 `createQWeatherClientV1`，`createQWeatherClient(config)` 按 `apiVersion` 分发。v1 URL 为 `/weather/v1/daily/{lat}/{lon}?days=3`、`/weather/v1/hourly/{lat}/{lon}?hours=24`、`/weatheralert/v1/current/{lat}/{lon}`；头优先级：`jwt` → `Authorization: Bearer`，否则 `X-QW-Api-Key: {key}`。
+  - 新增 v1 响应类型 `QWeatherV1DailyItem / QWeatherV1HourlyItem / QWeatherV1AlertItem`（嵌套对象结构，temperature:{value,unit}、wind:{speed:{value(m/s)},scale,direction:{compass}}、precipitation:{amount,probability:[0,1]}、severity/color/messageType/eventType 等）。
+  - 引入 `QWeatherMapper` 抽象与 `getQWeatherMapper(version)`；v7 保留旧 `mapDaily/mapHourly/mapWarning`，v1 新增 `v1DailyToInput / v1HourlyToPoint / v1AlertToAlert`，包含 16 方位罗盘→中文（`compassToZh`）、severity→三级、color.code→中文、eventType.code→业务 alertType 等映射。v1 单位天然与本地一致（m/s、mm），不再走 `kmhToMs`；湿度 [0,1] → [0,100]，probability [0,1] → [0,100]。
+  - `QWeatherClient` 接口返回 `Record<string, unknown>[]`（不再预先 cast）；具体结构由 mapper 处理，sync 层不感知 API 版本。
+- 适配 `apps/weather-service/src/sync.ts`：
+  - `WeatherSyncerConfig` 新增 `mapper?: QWeatherMapper`，缺省为 `getQWeatherMapper("v1")`；`performForecastSync/performAlertsSync` 改用 `mapper.mapDaily/mapHourly/mapWarning`。
+  - `buildQWeatherFromEnv` 默认 `QWEATHER_API_VERSION=v1`，读 `QWEATHER_JWT/LATITUDE/LONGITUDE`；v1 未提供 Host 或 Host 命中 `*.qweather.com` 旧域名时直接返回 undefined 不启动同步器，**适配本地无专属域名的开发场景**；v7 保留过渡支持（仅需 Key）。返回值拓展为 `{ client, mapper, config }`。
+- `apps/weather-service/src/main.ts`：两处 `createWeatherSyncer({...})` 传 `mapper: qw.mapper`；`checkQWeatherHost` 仅对 v7 生效（v1 已在 buildQWeatherFromEnv 阶段直接不启用），提示语改为“v7 公共域名 2026 起停用，建议切换到 v1”；启动 info 日志输出 `apiVersion / host / latitude / longitude`。
+- 环境变量：`.env.example` 重写和风段（+15 -8）：默认 `QWEATHER_API_VERSION=v1`，新增 `QWEATHER_JWT / QWEATHER_LATITUDE / QWEATHER_LONGITUDE` 注释行；明确说明本地无专属 Host 时保持 Key/Host 注释 → 服务行为与接入前完全一致（无同步器、无外部请求）。`.env` 同步重写，注释掉旧 Key，避免启动时无意义 403。
+- 单测：`qweather.spec.ts` 重构与新增 +11 用例（基线 216 → 227）：
+  - 现有 v7 客户端/同步器用例显式标 `apiVersion: "v7"` 与 `mapper: getQWeatherMapper("v7")`，避免默认 v1 引发断言失败
+  - 新增 `createQWeatherClient (v1)` 5 用例：默认 apiVersion、jwt 优先、预警 URL、旧域名抛错、error.title/detail 透传
+  - 新增 `v1 mapper` 4 用例：daily 取 daytime、hourly humidity 百化、warning 三向映射、compassToZh 兼容
+  - 新增 `buildQWeatherFromEnv` 3 用例：v7 过渡、v1 默认启用与无 Host/旧 Host 回落、jwt 启动
+- 验证：`pnpm run build` 全量 tsc -b 通过；`npx vitest run` 全量 **227 用例通过**（基线 216）；Docker 重建 healthy，容器实跑 `sync-status` 返 `{enabled:false, dataSource:"sql"}`（本地零配置行为与接入前一致）；`node -e` 直接 import 验证传 v1 Host + Key 时 config.apiVersion=v1、lat/lng 正确。冒烟回归：weather 13 + demo 37 + filters 38 全 PASS。
+- 用户侧启用步骤（拿到专属 Host 后）：将 `.env` 里 `QWEATHER_KEY / QWEATHER_HOST / QWEATHER_LATITUDE / QWEATHER_LONGITUDE` 四行取消注释并填入真实值（或填 `QWEATHER_JWT`），`docker compose -f infra/docker-compose.yml up -d --force-recreate app`；日志会输出 `apiVersion:"v1", host:"https://xxx.yz.qweatherapi.com"` 确认启用。旧 Key 过渡可临时改 `QWEATHER_API_VERSION=v7` 走 v7 接口。
+
 ## 下一步（中断后从这里继续）
 
 首版业务链路已闭环，剩余工作是业务子项补齐：
@@ -304,7 +366,11 @@
    - 田间导航：`POST /api/v1/operations/path-plan`（最近邻排站 + 2-opt、机耕道 Dijkstra 沿路里程、闭环返程、历史方案）；
    - 前端：地块管理 → 片区管理、农事管理 → 田间导航、一张图新增「片区范围」图层。
 5. **已完成**：全页面演示数据（`010_demo_data.sql` + 内存服务种子 + `finance-service` SQL 接线），登录即可看到成体系的达川丘区数据。
-6. **可选后续（未排期）**：决策侧内置图像识别模型、真实农机调度对接。
+6. **已完成**：气象服务完整实现与决策联动（`weather-service` 7 端点 + `012_weather_forecast.sql` + 前端气象页 + decision fetchRainProbability）。`pnpm smoke:weather` 13 项全 PASS。
+7. **已完成**：和风天气（QWeather）可插拔接入与免费额度保护（`qweather.ts` v7 客户端 + `sync.ts` 定时同步器默认 **每日一次** + 启动周期内跳过 + 每日硬上限 + `/sync-status` 观测端点 + `dataSource` 字段），**前端接口全程只读本地数据库，页面刷新不消耗外部额度**；不配 Key 时保持本地仓储行为，配 Key 后外部预报与预警每日一次落库。单测 21 用例全 PASS。
+8. **已完成**：管理员强制同步接口 `POST /api/v1/weather/sync-now`，需 `weather:sync` 权限（网关与服务双侧拦截）；bypass `dailyCallLimit`不走上限判定；前端 `views/weather/Index.vue` 顶部同步条仅管理员可见。单测新增 4 个端点用例 + 1 个 force bypass 用例 + 1 个网关路由用例（共 +6）。
+9. **已完成**：和风 WebAPI v7→v1 接口迁移（`QWeatherMapper` 抽象、`createQWeatherClientV1`、经纬度参数、`X-QW-Api-Key`/JWT 认证、16 方位中文映射、severity/color 三向映射）；v1 无专属 Host 时自动不启动同步器，适配本地开发；旧接口可通过 `QWEATHER_API_VERSION=v7` 过渡。单测 +11（基线 216 → 227），冒烟 88 项全 PASS。
+10. **可选后续（未排期）**：决策侧内置图像识别模型、真实农机调度对接。
 
 ## 验证记录
 
@@ -542,3 +608,55 @@
 | 2026-11-05 | `docker compose ... --profile app build app edge` + `up -d` | 通过：两镜像重建（含地块非法枚举查询参数 400 拦截补丁）、`infra-app-1` healthy、`infra-edge-1` 启动 |
 | 2026-11-05 | `node scripts/smoke-filters.mjs`（新《pnpm smoke:filters》，经 `https://localhost`） | 通过：38 项条件查询全 PASS——地块六类筛选+非法枚举 400、设备四条件+分页 5/12、任务/指令枚举+时间区间、核算筛选+`summary?kind=OUTPUT` 联动（产出 283134.00）、溯源、视频、四情（含 overview 联动）、消息级别与时间区间 |
 | 2026-11-05 | `node scripts/smoke-demo-data.mjs` / `smoke-zones-navigation.mjs` / `smoke-gateway.mjs` | 通过：37 项演示数据、片区导航、网关链路均无回归 |
+| 2026-11-06 | `npx tsc -b` | 通过（weather-service 重写 + decision-service fetchRainProbability 注入后） |
+| 2026-11-06 | `npx vitest run` | 通过：44 个测试文件、190 个用例（基线 43/180，新增 weather.spec.ts 10 用例） |
+| 2026-11-06 | `pnpm --filter @agri/web exec vue-tsc -b` | 通过（气象页面 + weatherApi 7 方法 + weather 路由后） |
+| 2026-11-06 | `$env:TEMP=.tmp; pnpm run build` | 通过：全量 tsc -b + vue-tsc + vite build |
+| 2026-11-06 | `$env:DB_URL=...; node scripts/migrate-postgres.mjs` | 通过：`012_weather_forecast.sql` 已应用；weather_forecasts 5 行、weather_forecast_hours 48 行、weather_alerts 4 行 |
+| 2026-11-06 | `docker compose ... --profile app build app edge` + `up -d` | 通过：两镜像重建、`infra-app-1` healthy、`infra-edge-1` 启动 |
+| 2026-11-06 | `node scripts/smoke-weather.mjs`（经 `https://localhost`） | 通过：13 项全 PASS——五日预报 5 天、作业提示+适宜性 3 项、逐小时 24 时次、days=2 预报、预警 ≥1 条、非法 level 400、实时气象站 ≥5 要素、农事建议、要素目录 8 项、历史曲线、非法 metric 400、决策处方 rainProbabilitySource=weather |
+| 2026-11-06 | `node scripts/smoke-demo-data.mjs` / `smoke-filters.mjs` / `smoke-gateway.mjs` | 通过：37 + 38 项演示数据与条件查询、网关链路均无回归 |
+| 2026-11-06 | `npx tsc -b apps/weather-service` | 通过（qweather.ts + sync.ts + 仓储 upsertDay/upsertHour/deleteHoursBefore 接入后） |
+| 2026-11-06 | `npx vitest run apps/weather-service` | 通过：weather-service 26 用例（10 原有 + 16 和风接入新增） |
+| 2026-11-06 | `npx vitest run` | 通过：45 个测试文件、206 个用例（基线 44/190） |
+| 2026-11-06 | `$env:TEMP=.tmp; pnpm run build` | 通过：全量 tsc -b + vue-tsc + vite build（未配 QWEATHER_KEY 时行为与之前一致） |
+| 2026-11-06 | `npx tsc -b apps/weather-service` | 通过（sync.ts 默认 1440 + 冷启动跳过 + 每日硬上限 + buildSyncerOptionsFromEnv + http.ts `/sync-status` 接入后） |
+| 2026-11-06 | `npx vitest run apps/weather-service` | 通过：weather-service 31 用例（10 原有 + 21 和风，含 4 个额度保护新用例） |
+| 2026-11-06 | `npx vitest run` | 通过：45 个测试文件、211 个用例（基线 44/190；+1 smoke 新增 5 个用例） |
+| 2026-11-06 | `pnpm run build` | 通过：全量 tsc -b（新默认每日一次 + 硬上限 20 + `/sync-status` 无编译错） |
+| 2026-11-06 | `Copy-Item .env.example .env` | 已创建本地 `.env`（.gitignore 已忽略），真实 Key 仅写入本文件 |
+| 2026-11-06 | `npx tsc -b apps/weather-service; pnpm --filter web exec vue-tsc -b` | 通过（weather:sync + forceSync + sync-now + 前端同步条接入后） |
+| 2026-11-06 | `npx vitest run` | 通过：45 文件、216 用例（基线 211；+1 weather http 4 端点 +1 sync forceSync +1 gateway authz） |
+| 2026-11-06 | `docker compose --profile app build app edge` + `up -d --force-recreate` | 两镜像重建 healthy；环境变量透传 `QWEATHER_KEY=…` 到 `infra-app-1`
+| 2026-11-06 | 容器实跑：admin `POST /api/v1/weather/sync-now` | HTTP 200，返回 `force` 结果；sync-status 可见 `forceSyncCount: 1`、`lastForceSyncAt` 刷新
+| 2026-11-06 | 容器实跑：viewer01 `POST /api/v1/weather/sync-now` | HTTP 403，“无权限执行该操作（需要 weather:sync）”（网关拦截） |
+| 2026-11-06 | 容器实跑：无 token `POST /api/v1/weather/sync-now` | HTTP 401（网关拦截） |
+| 2026-11-06 | `node scripts/smoke-weather.mjs` / `smoke-demo-data.mjs` / `smoke-filters.mjs` | 13 + 37 + 38 全 PASS（无回归） |
+| 2026-11-06 | `npx tsc -b` + `npx vitest run` | 通过：45 文件 216 用例（基线 216，本次无新增） |
+| 2026-11-06 | `docker compose -f infra/docker-compose.yml build app` + `up -d --force-recreate app` | env_file `../.env` 自动加载，`docker exec infra-app-1 env \| grep QWEATHER_KEY` 可见真 Key，无需 `--env-file` |
+| 2026-11-06 | 容器实跑：admin `POST /api/v1/weather/sync-now` | HTTP 200，`data.error` 完整透回 `QWeather /v7/weather/24h HTTP 403 (Invalid Host): An invalid or unauthorized API Host.` |
+| 2026-11-06 | 容器启动日志 | `warn` 输出 `和风天气 Host 已旧，建议改为控制台专属 API Host`，hint 指向 `console.qweather.com/setting` |
+| 2026-11-06 | `node scripts/smoke-weather.mjs` / `smoke-demo-data.mjs` / `smoke-filters.mjs` | 13 + 37 + 38 全 PASS（修复后无回归） |
+| 2026-11-06 | `npx tsc -b apps/weather-service` | 通过（v1 拆分为 createQWeatherClientV1/V7 + QWeatherMapper 抽象 + v1 mapper 实现） |
+| 2026-11-06 | `npx vitest run` | 通过：45 文件、**227 用例**（基线 216；v1 客户端 5 + v1 mapper 4 + buildQWeatherFromEnv v1/v7 3 + compassToZh 1） |
+| 2026-11-06 | `pnpm run build` | 通过：全量 tsc -b（sync.ts + main.ts + qweather.ts 重写后） |
+| 2026-11-06 | `docker compose -f infra/docker-compose.yml build app` + `up -d --force-recreate app` | 重建 healthy，日志仅输出 `weather-service HTTP 已启动（SQL 持久化）`，**本地无专属 Host 时不启动同步器** |
+| 2026-11-06 | 容器实跑：admin `GET /api/v1/weather/sync-status` | `{enabled:false, dataSource:"sql"}`，零配置行为与接入前一致 |
+| 2026-11-06 | 容器内直接 import `sync.js` 验证 v1 启用 | 传 `QWEATHER_HOST=https://ab12cd34.nx.qweatherapi.com` + `QWEATHER_KEY` 时 `apiVersion=v1 / lat / lng / mapper` 正确注入 |
+| 2026-11-06 | `node scripts/smoke-weather.mjs` / `smoke-demo-data.mjs` / `smoke-filters.mjs` | 13 + 37 + 38 全 PASS（v1 迁移后无回归） |
+| 2026-11-06 | 和风 v1 认证切换为 JWT（Ed25519 私钥签发） | `qweather.ts` 新增 `createEd25519JwtSigner`（Node 内置 `node:crypto`，零新依赖）；v1 客户端每次请求实时签发 `Authorization: Bearer`，优先级 jwtSigner > jwt > key |
+| 2026-11-06 | JWT 环境变量与私钥挂载 | `sync.ts` `buildQWeatherFromEnv` 解析 `QWEATHER_KEY_ID/DEVELOPER_ID/PROJECT_ID/PRIVATE_KEY(_PATH)/JWT_TTL_SECONDS`；docker-compose 只读挂载 `ed25519-private.pem`→`/run/secrets/qweather-private.pem`；`.gitignore` 忽略 `*.pem` |
+| 2026-11-06 | `npx tsc -b apps/weather-service` | 通过（createEd25519JwtSigner + jwtSigner 贯通 config/resolved/v1 client） |
+| 2026-11-06 | `npx vitest run` | 通过：45 文件、**234 用例**（基线 227；新增 createEd25519JwtSigner 3 + v1 signer client 1 + buildQWeatherFromEnv JWT 3，weather.spec 40 passed） |
+| 2026-11-06 | `pnpm run build` | 通过：全量 tsc -b exit 0 |
+| 2026-11-06 | 真实 `ed25519-private.pem` 端到端签发 | header `{alg:EdDSA,kid}`、payload `{iss,sub,iat,exp}`、`exp-iat=900`、签名 86 字符（64B Ed25519） |
+| 2026-11-06 | `docker compose --profile app up -d --build app` | 重建启动；容器内 `/run/secrets/qweather-private.pem` 可读；`buildQWeatherFromEnv` 传完整 JWT+Host → `enabled / auth=jwt-ed25519 / Bearer 三段`，无 Host → `undefined` |
+| 2026-11-06 | 容器启动日志 | 仅 `weather-service HTTP 已启动（SQL 持久化）`，**本地零配置不启动同步器，行为与接入前一致** |
+| 2026-11-06 | 用户提供真实凭据后端到端联调 | 首次 `QWEATHER_HOST` 缺 `https://` 前缀 → `resolveQWeatherConfig` 内 `new URL()` 抛 `TypeError: Invalid URL` → **weather 服务启动即崩溃 exited 1** |
+| 2026-11-06 | 修复① Host 归一化 + 安全解析 | `qweather.ts` `resolveQWeatherConfig`：无协议前缀自动补 `https://`；新增 `safeHostname` 替代裸 `new URL().hostname`（非法返回空串不抛） |
+| 2026-11-06 | 修复② 启动不因配置异常崩溃 | `sync.ts` `buildQWeatherFromEnv`：`createQWeatherClient` 包 try/catch，异常降级为 `undefined`（不启用同步器），绝不打挂服务启动 |
+| 2026-11-06 | 修复③ 私钥支持“文件路径” | `buildJwtSignerFromEnv`：`QWEATHER_PRIVATE_KEY`/`_PATH` 均智能识别——值含 `-----BEGIN` 当 PEM 文本，否则按文件路径读取（本地 `./ed25519-private.pem` 直可用） |
+| 2026-11-06 | 修复④ 真实拉数 HTTP 400 | v1 客户端 `call()` 对已含 `?days=3` 的 path 又拼 `?lang=zh` → **双问号**致参数非法；改为按 `path.includes("?")` 选 `&`/`?` |
+| 2026-11-06 | 配置纠错 kid/sub | 实测对调返回 200：控制台 `CGPNHGDK3Q` 为凭据ID(Header.kid)、`28TNW6CCEQ` 为项目ID(Payload.sub)，`.env` 已更正 |
+| 2026-11-06 | `npx vitest run apps/weather-service` + `pnpm run build` | 54 用例通过 / build exit 0 |
+| 2026-11-06 | 容器实跑（真实凭据 + 真实 Host）| `和风天气同步已启用 auth=jwt-ed25519`；预警同步完成（total 0 无生效预警，**无 401/403**）；服务实际客户端 `fetchDaily3=3 / fetchHourly24=24 / fetchWarning=0` 全 **HTTP 200 真实取数**；读取接口返回 401 WEATHER-401（路由存在受平台鉴权守卫，符合设计）|

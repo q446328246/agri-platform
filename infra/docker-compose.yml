@@ -43,6 +43,11 @@ services:
         VITE_TIANDITU_KEY: ${VITE_TIANDITU_KEY:-}
     image: agri-platform:local
     profiles: ["app"]
+    # 自动加载仓库根的本地 .env（真 Key 只存本地，.gitignore 已忽略）；
+    # 不存在时不阻断启动，便于 CI/仅基础设施场景。
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       SERVICE_HOST: "0.0.0.0"
       NODE_ENV: production
@@ -67,6 +72,14 @@ services:
       FILE_S3_REGION: us-east-1
       FILE_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
       FILE_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # 和风天气可插拔接入：上面 `env_file: ../.env` 会自动将本地 QWEATHER_KEY / QWEATHER_KEY_ID / QWEATHER_DEVELOPER_ID / QWEATHER_PROJECT_ID 等写入容器。
+      # 不在 `environment:` 里重新展开 ${QWEATHER_KEY:-}，否则 compose 插值会用 shell 变量（通常为空）覆盖 env_file。
+      # 留空时 sync.ts 中 buildQWeatherFromEnv 返回 undefined，服务行为与接入前完全一致。
+      # JWT 场景：下方 volumes 只读挂载仓库根 ed25519-private.pem 到容器内，供 QWEATHER_PRIVATE_KEY_PATH 读取；私钥缺失时签发器自动降级为不启用。
+      QWEATHER_PRIVATE_KEY_PATH: ${QWEATHER_PRIVATE_KEY_PATH:-/run/secrets/qweather-private.pem}
+      WEATHER_REPOSITORY_MODE: ${WEATHER_REPOSITORY_MODE:-sql}
+    volumes:
+      - ../ed25519-private.pem:/run/secrets/qweather-private.pem:ro
     depends_on:
       postgres:
         condition: service_healthy

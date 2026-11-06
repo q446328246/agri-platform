@@ -126,6 +126,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '四情监控', icon: 'Sunny', permission: 'telemetry:read' }
       },
       {
+        path: 'weather',
+        name: 'Weather',
+        component: () => import('@/views/weather/Index.vue'),
+        meta: { title: '气象服务', icon: 'PartlyCloudy', permission: 'weather:read' }
+      },
+      {
         path: 'finance',
         name: 'Finance',
         component: () => import('@/views/finance/Index.vue'),
