@@ -5,7 +5,7 @@ import type { ApiResponse, GeoLineString, GeoPolygon, PageResult } from "@agri/c
 import { authorizeRequest, ulid } from "@agri/shared";
 
 import { INFRA_LINE_TYPES, InMemoryInfraLineRepository, estimateLengthM } from "./infra-line.repository.js";
-import type { InfraLine, InfraLineRepository, InfraLineType } from "./infra-line.repository.js";
+import type { InfraLine, InfraLinePatch, InfraLineRepository, InfraLineType } from "./infra-line.repository.js";
 import type { PlotPatch, PlotRecord } from "./plot.repository.js";
 import { PLOT_STATUSES, PLOT_TYPES } from "./plot.service.js";
 import type { PlotService, RegisterPlotInput } from "./plot.service.js";
@@ -194,6 +194,57 @@ export function createPlotHttpServer(
         return;
       }
       const lineMatch = url.pathname.match(new RegExp(`^${API_PREFIX}/plots/infra-lines/([^/]+)$`));
+      if (lineMatch?.[1] && request.method === "PUT") {
+        const lineCode = decodeURIComponent(lineMatch[1]);
+        if (!(await infraLines.findByCode(lineCode))) {
+          send(response, 404, null, requestTraceId, "管线不存在");
+          return;
+        }
+        const input = await readJson(request);
+        const patch: InfraLinePatch = {};
+        if (input.lineName !== undefined) {
+          const lineName = String(input.lineName).trim();
+          if (lineName === "") {
+            send(response, 400, null, requestTraceId, "管线名称不能为空");
+            return;
+          }
+          patch.lineName = lineName;
+        }
+        if (input.lineType !== undefined) {
+          const lineType = String(input.lineType) as InfraLineType;
+          if (!INFRA_LINE_TYPES.includes(lineType)) {
+            send(response, 400, null, requestTraceId, `管线类型需为 ${INFRA_LINE_TYPES.join("/")}`);
+            return;
+          }
+          patch.lineType = lineType;
+        }
+        if (input.geom !== undefined) {
+          const geom = input.geom as GeoLineString | undefined;
+          if (!geom || geom.type !== "LineString" || !Array.isArray(geom.coordinates) || geom.coordinates.length < 2) {
+            send(response, 400, null, requestTraceId, "管线几何需为至少两个点的 LineString");
+            return;
+          }
+          patch.geom = { type: "LineString", coordinates: geom.coordinates, srid: Number(geom.srid ?? 4490) };
+        }
+        if (input.lengthM !== undefined) {
+          const lengthM = Number(input.lengthM);
+          if (!Number.isFinite(lengthM) || lengthM < 0) {
+            send(response, 400, null, requestTraceId, "管线长度需为非负数");
+            return;
+          }
+          patch.lengthM = lengthM;
+        } else if (patch.geom) {
+          // 改了形状就按新折点重算里程，避免列表与地图上显示的长度和实际走向脱节
+          patch.lengthM = estimateLengthM(patch.geom);
+        }
+        const updated = await infraLines.update(undefined, lineCode, patch);
+        if (!updated) {
+          send(response, 404, null, requestTraceId, "管线不存在");
+          return;
+        }
+        send(response, 200, updated, requestTraceId);
+        return;
+      }
       if (lineMatch?.[1] && request.method === "DELETE") {
         const removed = await infraLines.remove(undefined, decodeURIComponent(lineMatch[1]), new Date().toISOString());
         if (!removed) {

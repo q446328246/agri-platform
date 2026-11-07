@@ -86,6 +86,65 @@ describe("田间管线", () => {
     expect(again.status).toBe(404);
   });
 
+  it("局部更新名称、类型与几何，改形状时重算里程", async () => {
+    const base = await startServer();
+    const created = await fetch(`${base}/api/v1/plots/infra-lines`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        lineName: "东区灌水主管",
+        lineType: "IRRIGATION_PIPE",
+        geom: { type: "LineString", coordinates: [[107.4213, 30.9824], [107.4223, 30.9824]], srid: 4490 },
+      }),
+    });
+    const line = (await created.json() as { data: { lineCode: string; lengthM: number } }).data;
+    const patchUrl = `${base}/api/v1/plots/infra-lines/${line.lineCode}`;
+
+    // 只改名字：类型与几何保持原样
+    const renamed = await fetch(patchUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lineName: "  东区灌水支管  " }),
+    });
+    expect(renamed.status).toBe(200);
+    const afterRename = (await renamed.json() as { data: { lineName: string; lineType: string; lengthM: number } }).data;
+    expect(afterRename.lineName).toBe("东区灌水支管");
+    expect(afterRename.lineType).toBe("IRRIGATION_PIPE");
+    expect(afterRename.lengthM).toBeCloseTo(line.lengthM, 2);
+
+    // 改几何：里程按新折点重算
+    const reshaped = await fetch(patchUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ geom: { type: "LineString", coordinates: [[107.4213, 30.9824], [107.4213, 30.9834]], srid: 4490 } }),
+    });
+    expect(reshaped.status).toBe(200);
+    const afterShape = (await reshaped.json() as { data: { lineName: string; lengthM: number } }).data;
+    expect(afterShape.lineName).toBe("东区灌水支管");
+    expect(afterShape.lengthM).toBeGreaterThan(109);
+    expect(afterShape.lengthM).toBeLessThan(112);
+
+    // 显式传长度时不再重算
+    const retyped = await fetch(patchUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lineType: "TELECOM", lengthM: 12.5 }),
+    });
+    expect(retyped.status).toBe(200);
+    const afterRetype = (await retyped.json() as { data: { lineType: string; lengthM: number } }).data;
+    expect(afterRetype.lineType).toBe("TELECOM");
+    expect(afterRetype.lengthM).toBe(12.5);
+
+    const badName = await fetch(patchUrl, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ lineName: "  " }) });
+    expect(badName.status).toBe(400);
+    const badType = await fetch(patchUrl, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ lineType: "PIPE" }) });
+    expect(badType.status).toBe(400);
+    const badGeom = await fetch(patchUrl, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ geom: { type: "LineString", coordinates: [[107.4213, 30.9824]], srid: 4490 } }) });
+    expect(badGeom.status).toBe(400);
+    const missing = await fetch(`${base}/api/v1/plots/infra-lines/LINE-NOT-EXIST`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ lineName: "x" }) });
+    expect(missing.status).toBe(404);
+  });
+
   it("拒绝非法类型与不足两个点的几何", async () => {
     const base = await startServer();
     const badType = await fetch(`${base}/api/v1/plots/infra-lines`, {

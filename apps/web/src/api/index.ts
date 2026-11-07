@@ -1,6 +1,6 @@
 import { get, post, put, del } from '@/utils/request'
 import type {
-  Plot, PlotQuery, PlotForm,
+  Plot, PlotQuery, PlotForm, PlotType, InfraLineType,
   Device, DeviceRealtimeData,
   FarmTask, FarmTaskQuery,
   DashboardStats,
@@ -78,6 +78,18 @@ export const plotApi = {
   update(id: string, data: PlotForm): Promise<Plot> {
     return put<Plot>(`/plots/${encodeURIComponent(id)}`, toPlotServicePatch(data)).then(normalizePlot)
   },
+  /**
+   * 一张图建档：只给名称/类型/面积/边界，编码分段走默认行政区，状态由后端置为种植中。
+   * 与表单建档分开，避免地图入口被迫编造行政区划与编码。
+   */
+  createFromMap(data: { name: string; type: PlotType; areaMu: number; coordinates: [number, number][]; zoneCode?: string }): Promise<Plot> {
+    const form: PlotForm = { name: data.name, regionCode: '', villageCode: '', type: data.type, areaMu: data.areaMu, coordinates: data.coordinates }
+    return post<Plot>('/plots', { ...toPlotServiceInput(form), ...(data.zoneCode ? { zoneCode: data.zoneCode } : {}) }).then(normalizePlot)
+  },
+  /** 局部更新：只发传入的字段。update() 会把未填的档案字段发成空串从而清空，地图改边界不能用它。 */
+  patch(id: string, fields: { parcelName?: string; areaMu?: number; plotType?: PlotType; zoneCode?: string | null; geom?: GeoPolygon }): Promise<Plot> {
+    return put<Plot>(`/plots/${encodeURIComponent(id)}`, fields).then(normalizePlot)
+  },
   delete(id: string): Promise<void> {
     return del<void>(`/plots/${encodeURIComponent(id)}`)
   },
@@ -99,13 +111,17 @@ export const plotApi = {
   createInfraLine(data: { lineName: string; lineType: InfraLineType; geom: { type: 'LineString'; coordinates: number[][]; srid: number }; lineCode?: string }): Promise<InfraLine> {
     return post<InfraLine>('/plots/infra-lines', data)
   },
+  /** 局部更新：只发传入字段；改了 geom 时服务端按新折点重算 lengthM */
+  updateInfraLine(lineCode: string, data: { lineName?: string; lineType?: InfraLineType; geom?: { type: 'LineString'; coordinates: number[][]; srid: number } }): Promise<InfraLine> {
+    return put<InfraLine>(`/plots/infra-lines/${encodeURIComponent(lineCode)}`, data)
+  },
   deleteInfraLine(lineCode: string): Promise<void> {
     return del<void>(`/plots/infra-lines/${encodeURIComponent(lineCode)}`)
   }
 }
 
-/** 管线类型：灌水管、施肥管、电力线、机耕道、通信网线 */
-export type InfraLineType = 'IRRIGATION_PIPE' | 'FERTILIZATION_PIPE' | 'ELECTRIC_LINE' | 'ROAD' | 'TELECOM'
+/** 管线类型定义在 @/types，这里转出保持既有引用路径 */
+export type { InfraLineType }
 
 export interface InfraLine {
   id: string
@@ -233,10 +249,17 @@ function toPlotServicePatch(data: PlotForm): Record<string, unknown> {
   return patch
 }
 
+/** [经度, 纬度] 顶点 → 闭合 Polygon；库内统一 CGCS2000（EPSG:4490） */
+export function toPolygonGeom(points: Array<[number, number]>): GeoPolygon {
+  const first = points[0]!
+  const last = points[points.length - 1]!
+  const ring = first[0] === last[0] && first[1] === last[1] ? points : [...points, first]
+  return { type: 'Polygon', coordinates: [ring.map(([lng, lat]) => [lng, lat])], srid: 4490 }
+}
+
 function coordinatesToGeom(coordinates?: [number, number][]): Record<string, unknown> {
-  const points = coordinates && coordinates.length >= 3 ? coordinates : [[107.8421, 30.9942], [107.8433, 30.9942], [107.8433, 30.9951], [107.8421, 30.9951], [107.8421, 30.9942]]
-  const closed = points[0] === points[points.length - 1] ? points : [...points, points[0]!]
-  return { type: 'Polygon', coordinates: [closed], srid: 4490 }
+  const points = coordinates && coordinates.length >= 3 ? coordinates : [[107.8421, 30.9942], [107.8433, 30.9942], [107.8433, 30.9951], [107.8421, 30.9951], [107.8421, 30.9942]] as [number, number][]
+  return toPolygonGeom(points)
 }
 
 // 设备相关API

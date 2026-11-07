@@ -130,6 +130,37 @@ export interface PlotForm {
   remark?: string;
 }
 
+// 一张图形状编辑：管线、地块与片区都支持新建和改边界
+export type MapShapeKind = 'line' | 'plot' | 'zone';
+export type MapShapeMode = 'create' | 'edit';
+
+/** 管线类型：灌水管、施肥管、电力线、机耕道、通信网线 */
+export type InfraLineType = 'IRRIGATION_PIPE' | 'FERTILIZATION_PIPE' | 'ELECTRIC_LINE' | 'ROAD' | 'TELECOM';
+
+export interface MapShapeActive {
+  kind: MapShapeKind;
+  mode: MapShapeMode;
+  /** 管线所属图层分类，用于高亮对应菜单项 */
+  cat?: 'WATER' | 'ELECTRIC' | 'NET';
+}
+
+/** 进入编辑态的既有图形，points 为 [经度, 纬度] 开环 */
+export interface MapShapeTarget {
+  code: string;
+  name: string;
+  points: [number, number][];
+  plotType?: PlotType | undefined;
+  zoneCode?: string | null | undefined;
+  color?: string | undefined;
+  lineType?: InfraLineType | undefined;
+}
+
+export interface MapShapeSaved {
+  kind: MapShapeKind;
+  mode: MapShapeMode;
+  code: string;
+}
+
 // 设备信息
 export interface Device {
   id: string;

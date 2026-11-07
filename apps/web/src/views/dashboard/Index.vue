@@ -1,5 +1,5 @@
 <template>
-  <div class="cockpit">
+  <div class="cockpit" :class="{ drawing: !!activeShape }">
     <!-- 全屏卫星底图 -->
     <div id="tianditu-map"></div>
 
@@ -21,18 +21,26 @@
             <span class="group-caret" :class="{ open: openGroups[group.title] }">⌄</span>
           </button>
           <div v-show="openGroups[group.title]" class="group-items">
-            <button
-              v-for="item in group.items.filter((i) => allowed(i.perm))"
-              :key="item.label"
-              class="menu-item"
-              :class="{ 'menu-item--layer': item.layer, active: (item.layer && lineState[item.layer]) || (item.panel && activePanel === item.panel) }"
-              type="button"
-              @click="handleMenu(item)"
-            >
-              <span v-if="item.layer" class="swatch" :style="{ background: lineColor(item.layer) }"></span>
-              <span v-else class="item-dot"></span>
-              <span class="item-label">{{ item.label }}</span>
-            </button>
+            <div v-for="item in group.items.filter((i) => allowed(i.perm))" :key="item.label" class="menu-row">
+              <button
+                class="menu-item"
+                :class="{ 'menu-item--layer': item.layer, active: (item.layer && lineState[item.layer]) || (item.panel && activePanel === item.panel) }"
+                type="button"
+                @click="handleMenu(item)"
+              >
+                <span v-if="item.layer" class="swatch" :style="{ background: catColor(item.layer) }"></span>
+                <span v-else class="item-dot"></span>
+                <span class="item-label">{{ item.label }}</span>
+              </button>
+              <button
+                v-if="item.draw && allowed('plot:write')"
+                class="menu-add"
+                :class="{ active: isDrawing(item) }"
+                type="button"
+                :title="`在地图上绘制${item.label}`"
+                @click="startDraw(item)"
+              >＋</button>
+            </div>
           </div>
         </section>
       </div>
@@ -75,10 +83,19 @@
           type="button"
           @click="toggleLine(cat.key)"
         >
-          <i :style="{ background: lineColor(cat.key) }"></i>{{ cat.label }}
+          <i :style="{ background: catColor(cat.key) }"></i>{{ cat.label }}
         </button>
       </div>
     </div>
+
+    <!-- 地图绘制/改边界卡片：管线、地块、片区共用，单击地图落点，拖动顶点微调 -->
+    <MapShapeEditor
+      ref="shapeEditor"
+      :zones="zoneOptions"
+      :suggest-name="suggestName"
+      @active-change="activeShape = $event"
+      @saved="handleShapeSaved"
+    />
 
     <!-- 右下：天气卡片（面板打开时隐藏） -->
     <div v-if="!panelOpen" class="weather-card">
@@ -120,7 +137,7 @@
           <span class="tab-x" title="关闭" @click.stop="closePanel(p.key)">×</span>
         </button>
         <div class="panel-actions">
-          <button class="panel-act" type="button" title="在新页展开" @click="router.push(activePanel)">↗ 展开</button>
+          <button v-if="isRoutePanel" class="panel-act" type="button" title="在新页展开" @click="router.push(activePanel)">↗ 展开</button>
           <button class="panel-act" type="button" @click="panelMax = !panelMax">{{ panelMax ? '还原' : '最大化' }}</button>
           <button class="panel-act close" type="button" title="关闭当前" @click="closePanel(activePanel)">✕</button>
         </div>
@@ -138,14 +155,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, markRaw, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, markRaw, onMounted, onUnmounted, provide, reactive, ref } from 'vue'
 import type { Component } from 'vue'
 import { useRouter } from 'vue-router'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { iotApi, messageApi, plotApi, weatherApi, zoneApi } from '@/api'
 import type { InfraLine, InfraLineType, ZoneSummary } from '@/api'
+import type { MapShapeActive, MapShapeKind, MapShapeSaved, Plot } from '@/types'
+import { getPlotTypeText } from '@/utils'
 import { parsePlotBoundaries, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
+import { LINE_PANEL_BRIDGE, catColor, categorize, lineCategories, lineColorOf, lineTypeLabel } from '@/utils/infraLine'
+import type { LineCat, LinePanelBridge } from '@/utils/infraLine'
+import MapShapeEditor from '@/components/MapShapeEditor.vue'
 import { useUserStore } from '@/stores'
 import { checkPermission } from '@/utils/permission'
 
@@ -155,7 +178,6 @@ const tiandituKey = import.meta.env.VITE_TIANDITU_KEY
 
 // ---------- 图层与底图状态 ----------
 type LayerKey = 'imagery' | 'devices' | 'fields' | 'zones'
-type LineCat = 'WATER' | 'ELECTRIC' | 'NET'
 const visibleLayers = reactive<Record<LayerKey, boolean>>({ imagery: true, devices: true, fields: true, zones: true })
 const lineState = reactive<Record<LineCat, boolean>>({ WATER: true, ELECTRIC: true, NET: true })
 const layerOpen = ref(false)
@@ -169,7 +191,7 @@ const baseLayerOptions: Array<{ key: LayerKey; label: string }> = [
 ]
 
 // ---------- 左侧功能菜单（地图内浮层面板） ----------
-interface MenuItem { label: string; panel?: string; layer?: LineCat; perm?: string }
+interface MenuItem { label: string; panel?: string; layer?: LineCat; draw?: MapShapeKind; perm?: string }
 interface MenuGroup { title: string; icon: string; items: MenuItem[] }
 const icon = (path: string): string => `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="${path}"/></svg>`
 
@@ -192,6 +214,8 @@ const panelComps: Record<string, Component> = {
   '/message': markRaw(defineAsyncComponent(() => import('@/views/message/Index.vue'))),
   '/system/user': markRaw(defineAsyncComponent(() => import('@/views/system/User.vue'))),
   '/system/role': markRaw(defineAsyncComponent(() => import('@/views/system/Role.vue'))),
+  // 无路由前缀 = 只活在这张图里的面板，查询管线并回到地图操作
+  'infra-lines': markRaw(defineAsyncComponent(() => import('@/components/InfraLinePanel.vue'))),
 }
 
 const menuGroups: MenuGroup[] = [
@@ -199,12 +223,13 @@ const menuGroups: MenuGroup[] = [
     title: '基本信息',
     icon: icon('M12 2 3 6v6c0 5 4 8 9 10 5-2 9-5 9-10V6l-9-4Z'),
     items: [
-      { label: '地块台账', panel: '/plot/list', perm: 'plot:read' },
-      { label: '片区信息', panel: '/plot/zone', perm: 'plot:read' },
+      { label: '地块台账', panel: '/plot/list', draw: 'plot', perm: 'plot:read' },
+      { label: '片区信息', panel: '/plot/zone', draw: 'zone', perm: 'plot:read' },
+      { label: '管线列表', panel: 'infra-lines', perm: 'plot:read' },
       { label: '导航路线', panel: '/farm/navigation', perm: 'operation:read' },
-      { label: '水线', layer: 'WATER' },
-      { label: '电线', layer: 'ELECTRIC' },
-      { label: '网线', layer: 'NET' },
+      { label: '水线', layer: 'WATER', draw: 'line' },
+      { label: '电线', layer: 'ELECTRIC', draw: 'line' },
+      { label: '网线', layer: 'NET', draw: 'line' },
     ],
   },
   {
@@ -279,6 +304,8 @@ const openPanels = ref<OpenPanel[]>([])
 const activePanel = ref('')
 const panelMax = ref(false)
 const panelOpen = computed(() => openPanels.value.length > 0)
+/** 管线列表这类就地面板没有对应路由，展开按钮只能给真实页面 */
+const isRoutePanel = computed(() => activePanel.value.startsWith('/'))
 function openPanel(key: string, title: string) {
   if (!panelComps[key]) return
   if (!openPanels.value.some((p) => p.key === key)) openPanels.value.push({ key, title })
@@ -294,25 +321,6 @@ function closePanel(key: string) {
 function handleMenu(item: MenuItem) {
   if (item.layer) toggleLine(item.layer)
   else if (item.panel) openPanel(item.panel, item.label)
-}
-
-// ---------- 管线配色与分类 ----------
-const lineCategories: Array<{ key: LineCat; label: string }> = [
-  { key: 'WATER', label: '水线' },
-  { key: 'ELECTRIC', label: '电线' },
-  { key: 'NET', label: '网线' },
-]
-const lineCatColors: Record<LineCat, string> = { WATER: '#00d4ff', ELECTRIC: '#f3c969', NET: '#7fe7ff' }
-const roadColor = '#b0bec5'
-function lineColor(cat: LineCat): string {
-  return lineCatColors[cat]
-}
-/** 后端 lineType 归入参考图三类：灌溉/施肥管→水线，电力线→电线，通信线→网线，机耕道单独常显 */
-function categorize(type: InfraLineType): LineCat | 'ROAD' {
-  if (type === 'IRRIGATION_PIPE' || type === 'FERTILIZATION_PIPE') return 'WATER'
-  if (type === 'ELECTRIC_LINE') return 'ELECTRIC'
-  if (type === 'ROAD') return 'ROAD'
-  return 'NET'
 }
 
 // ---------- 天气卡片 ----------
@@ -400,10 +408,14 @@ function initMap() {
   baseKey = visibleLayers.imagery ? 'imagery' : 'vector'
   baseLayers = { vector, imagery }
   baseLayers[baseKey].addTo(map)
+  // 片区放在地块下方：片区淡填充可点开编辑，又不会盖住地块的点击
+  map.createPane('zonePane')
+  map.getPane('zonePane').style.zIndex = '380'
   deviceLayer = L.layerGroup().addTo(map)
   fieldLayer = L.layerGroup().addTo(map)
   zoneLayer = L.layerGroup().addTo(map)
   for (const key of ['WATER', 'ELECTRIC', 'NET', 'ROAD'] as const) lineLayers[key] = L.layerGroup().addTo(map)
+  shapeEditor.value?.attach(map)
 }
 
 function toggleLayer(key: LayerKey) {
@@ -426,6 +438,223 @@ function toggleLine(cat: LineCat) {
   lineState[cat] ? lineLayers[cat].addTo(map) : map.removeLayer(lineLayers[cat])
 }
 
+// ---------- 地图绘制：管线 / 地块 / 片区共用编辑器 ----------
+const shapeEditor = ref<InstanceType<typeof MapShapeEditor> | null>(null)
+const activeShape = ref<MapShapeActive | null>(null)
+const infraLines = ref<InfraLine[]>([])
+const lineRevision = ref(0)
+const plotList = ref<Plot[]>([])
+const zoneList = ref<ZoneSummary[]>([])
+const plotByCode = computed(() => new Map(plotList.value.map((plot) => [plot.parcelCode, plot])))
+const zoneOptions = computed(() => zoneList.value.map((zone) => ({ zoneCode: zone.zoneCode, zoneName: zone.zoneName })))
+
+function isDrawing(item: MenuItem): boolean {
+  const shape = activeShape.value
+  if (!shape || shape.kind !== item.draw) return false
+  return item.draw !== 'line' || shape.cat === item.layer
+}
+
+/** 默认名称按同类已有条数递增，用户可改；避免每次绘制都要先起名 */
+function suggestName(kind: MapShapeKind, lineType?: InfraLineType): string {
+  if (kind === 'line' && lineType) {
+    const label = lineTypeLabel(lineType).replace(/（.*/, '')
+    return `${label}${infraLines.value.filter((line) => line.lineType === lineType).length + 1}`
+  }
+  if (kind === 'plot') return `地块${plotList.value.length + 1}`
+  return `片区${zoneList.value.length + 1}`
+}
+
+function startDraw(item: MenuItem) {
+  const editor = shapeEditor.value
+  if (!editor || !item.draw || !map) return
+  if (item.draw === 'line') {
+    if (!item.layer) return
+    // 绘制时打开同类图层，方便沿着已有管线接续
+    if (!lineState[item.layer]) toggleLine(item.layer)
+    editor.startLine(item.layer)
+    return
+  }
+  const key: LayerKey = item.draw === 'plot' ? 'fields' : 'zones'
+  if (!visibleLayers[key]) toggleLayer(key)
+  if (item.draw === 'plot') editor.startPlot()
+  else editor.startZone()
+}
+
+/** 保存后刷新相关图层；不重新 fitBounds，避免把用户正在看的视野拉走 */
+async function handleShapeSaved(saved: MapShapeSaved) {
+  if (saved.kind === 'line') {
+    await loadLines()
+    const line = infraLines.value.find((item) => item.lineCode === saved.code)
+    const cat = line ? categorize(line.lineType) : 'ROAD'
+    if (cat !== 'ROAD' && !lineState[cat]) toggleLine(cat)
+    return
+  }
+  if (saved.kind === 'plot') {
+    // 地块变动会改片区汇总范围与面积，设备点位也依赖地块中心
+    await loadPlots(false)
+    await Promise.all([loadZones(), loadDevices()])
+    return
+  }
+  await loadZones()
+}
+
+async function confirmDelete(message: string, title: string): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(message, title, { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function removeInfraLine(line: InfraLine) {
+  if (!await confirmDelete(`确认删除「${line.lineName}」？删除后一张图不再展示该管线。`, '删除管线')) return
+  try {
+    await plotApi.deleteInfraLine(line.lineCode)
+    ElMessage.success('管线已删除')
+    map?.closePopup()
+    await loadLines()
+  } catch {
+    // 失败原因由请求拦截器提示
+  }
+}
+
+async function removePlot(plot: Plot) {
+  if (!await confirmDelete(`确认删除地块「${plot.name}」？删除后一张图与台账都不再展示该地块。`, '删除地块')) return
+  try {
+    await plotApi.delete(plot.parcelCode)
+    ElMessage.success('地块已删除')
+    map?.closePopup()
+    await loadPlots(false)
+    await Promise.all([loadZones(), loadDevices()])
+  } catch {
+    // 失败原因由请求拦截器提示
+  }
+}
+
+async function removeZone(zone: ZoneSummary) {
+  if (!await confirmDelete(`确认删除片区「${zone.zoneName}」？删除后其手绘范围不再展示。`, '删除片区')) return
+  try {
+    await zoneApi.remove(zone.zoneCode)
+    ElMessage.success('片区已删除')
+    map?.closePopup()
+    await loadZones()
+  } catch {
+    // 失败原因由请求拦截器提示
+  }
+}
+
+interface PopupAction { label: string; danger?: boolean; onClick: () => void }
+
+/** 名称、备注等字段来自用户输入，一律用文本节点，避免被当成 HTML 注入 */
+function shapePopup(title: string, rows: string[], actions: PopupAction[] = []): HTMLElement {
+  const box = document.createElement('div')
+  box.className = 'shape-pop'
+  const head = document.createElement('div')
+  head.className = 'shape-pop-h'
+  head.textContent = title
+  box.appendChild(head)
+  for (const row of rows.filter((text) => text !== '')) {
+    const meta = document.createElement('div')
+    meta.className = 'shape-pop-m'
+    meta.textContent = row
+    box.appendChild(meta)
+  }
+  if (actions.length > 0) {
+    const bar = document.createElement('div')
+    bar.className = 'shape-pop-actions'
+    for (const action of actions) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = action.danger ? 'shape-pop-btn danger' : 'shape-pop-btn'
+      button.textContent = action.label
+      button.addEventListener('click', action.onClick)
+      bar.appendChild(button)
+    }
+    box.appendChild(bar)
+  }
+  return box
+}
+
+function nameTooltip(name: string, detail: string): HTMLElement {
+  const box = document.createElement('div')
+  const strong = document.createElement('strong')
+  strong.textContent = name
+  box.appendChild(strong)
+  if (detail !== '') {
+    box.appendChild(document.createElement('br'))
+    box.appendChild(document.createTextNode(detail))
+  }
+  return box
+}
+
+/** 绘制/改边界期间让点击穿透到地图落点，不弹信息卡 */
+function showPopup(event: any, content: HTMLElement) {
+  if (activeShape.value || !map) return
+  L.popup({ maxWidth: 300 }).setLatLng(event.latlng).setContent(content).openOn(map)
+}
+
+/** Leaflet 环（[纬度, 经度]，可能闭合）→ 编辑器草稿点（[经度, 纬度]，开环） */
+function toDraftPoints(ring: [number, number][]): [number, number][] {
+  const points = ring.map(([lat, lng]) => [lng, lat] as [number, number])
+  const first = points[0]
+  const last = points[points.length - 1]
+  if (points.length > 1 && first && last && first[0] === last[0] && first[1] === last[1]) points.pop()
+  return points
+}
+
+/** 管线几何是 [经度, 纬度]，与编辑器草稿同序，只需剔掉非法点 */
+function lineDraftPoints(line: InfraLine): [number, number][] {
+  return (line.geom?.coordinates ?? [])
+    .map((p) => [Number(p[0]), Number(p[1])] as [number, number])
+    .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat))
+}
+
+/** 进入管线改走向：先保证同类图层可见，否则改完看不到效果 */
+function editLineOnMap(line: InfraLine) {
+  const cat = categorize(line.lineType)
+  if (cat !== 'ROAD' && !lineState[cat]) toggleLine(cat)
+  map?.closePopup()
+  shapeEditor.value?.editLine({
+    code: line.lineCode, name: line.lineName, lineType: line.lineType, points: lineDraftPoints(line),
+  })
+}
+
+/** 列表面板定位：把线拉到视野内并弹出信息卡 */
+function locateLine(line: InfraLine) {
+  if (!map) return
+  const cat = categorize(line.lineType)
+  if (cat !== 'ROAD' && !lineState[cat]) toggleLine(cat)
+  const points = lineDraftPoints(line).map(([lng, lat]) => [lat, lng] as [number, number])
+  if (points.length < 2) return
+  const bounds = L.latLngBounds(points)
+  if (bounds.isValid()) {
+    map.fitBounds(bounds, fitPadding())
+    if (!activeShape.value) L.popup({ maxWidth: 300 }).setLatLng(bounds.getCenter()).setContent(linePopup(line)).openOn(map)
+  }
+}
+
+/** 浮层面板会压住右半屏，缩放时按面板实际宽度留白 */
+function fitPadding(): { paddingTopLeft: [number, number]; paddingBottomRight: [number, number] } {
+  if (!panelOpen.value) return { paddingTopLeft: [180, 60], paddingBottomRight: [60, 60] }
+  if (panelMax.value) return { paddingTopLeft: [280, 60], paddingBottomRight: [60, 60] }
+  const width = Math.min(920, Math.round(window.innerWidth * 0.62)) + 32
+  return { paddingTopLeft: [180, 60], paddingBottomRight: [width, 60] }
+}
+
+function linePopup(line: InfraLine): HTMLElement {
+  const actions: PopupAction[] = allowed('plot:write')
+    ? [
+        { label: '编辑线路', onClick: () => editLineOnMap(line) },
+        { label: '删除该管线', danger: true, onClick: () => void removeInfraLine(line) },
+      ]
+    : []
+  return shapePopup(line.lineName, [`${lineTypeLabel(line.lineType)} · ${line.lengthM.toFixed(0)} 米`, line.lineCode], actions)
+}
+
+/** 管线列表面板只负责查询，定位与改删都通过这里回到地图 */
+provide<LinePanelBridge>(LINE_PANEL_BRIDGE, { revision: lineRevision, locate: locateLine, edit: editLineOnMap, remove: removeInfraLine })
+
 function renderLines(list: InfraLine[]) {
   if (!map) return
   const buckets: Record<LineCat | 'ROAD', any[]> = { WATER: [], ELECTRIC: [], NET: [], ROAD: [] }
@@ -433,8 +662,11 @@ function renderLines(list: InfraLine[]) {
     if (!Array.isArray(line.geom?.coordinates) || line.geom.coordinates.length < 2) continue
     const points = line.geom.coordinates.map((p) => [Number(p[1]), Number(p[0])] as [number, number])
     const cat = categorize(line.lineType)
-    const color = cat === 'ROAD' ? roadColor : lineCatColors[cat]
-    buckets[cat].push(L.polyline(points, { color, weight: cat === 'ROAD' ? 2 : 3, opacity: 0.9, dashArray: cat === 'ROAD' ? '6 6' : undefined }).bindTooltip(`<strong>${line.lineName}</strong>`))
+    buckets[cat].push(
+      L.polyline(points, { color: lineColorOf(line.lineType), weight: cat === 'ROAD' ? 2 : 3, opacity: 0.9, dashArray: cat === 'ROAD' ? '6 6' : undefined })
+        .bindTooltip(nameTooltip(line.lineName, ''))
+        .on('click', (event: any) => showPopup(event, linePopup(line))),
+    )
   }
   for (const key of ['WATER', 'ELECTRIC', 'NET', 'ROAD'] as const) {
     if (lineLayers[key]) map.removeLayer(lineLayers[key])
@@ -446,23 +678,48 @@ function renderLines(list: InfraLine[]) {
 
 async function loadLines() {
   try {
-    renderLines(await plotApi.getInfraLines())
+    infraLines.value = await plotApi.getInfraLines()
   } catch {
-    renderLines([])
+    infraLines.value = []
   }
+  lineRevision.value += 1
+  renderLines(infraLines.value)
+}
+
+function zonePopup(zone: ZoneSummary, ring: [number, number][]): HTMLElement {
+  const handDrawn = !!zone.geom?.coordinates?.[0]
+  const rows = [`${zone.zoneCode} · ${zone.plotCount} 块地块 · ${zone.areaMu.toFixed(2)} 亩`]
+  if (!handDrawn) rows.push('范围由成员地块自动汇总，编辑将以当前范围为起点')
+  const actions: PopupAction[] = []
+  if (allowed('plot:write')) {
+    actions.push({
+      label: handDrawn ? '编辑边界' : '绘制边界',
+      onClick: () => {
+        map?.closePopup()
+        shapeEditor.value?.editZone({ code: zone.zoneCode, name: zone.zoneName, color: zone.color, points: toDraftPoints(ring) })
+      },
+    })
+    // 有成员地块时后端会拒绝删除，这里直接不给入口并说明原因
+    if (zone.plotCount === 0) actions.push({ label: '删除片区', danger: true, onClick: () => void removeZone(zone) })
+    else rows.push(`片区下仍有 ${zone.plotCount} 块地块，移出后才能删除`)
+  }
+  return shapePopup(zone.zoneName, rows, actions)
 }
 
 function renderZones(list: ZoneSummary[]) {
+  zoneList.value = list
   if (!map) return
   if (zoneLayer) map.removeLayer(zoneLayer)
   const shapes = list
     .map((zone) => {
-      const ring = zone.hull?.coordinates?.[0] ?? zone.geom?.coordinates?.[0]
+      // 手绘边界优先于成员地块汇总出的凸包，否则刚画的片区会被旧凸包盖掉
+      const ring = zone.geom?.coordinates?.[0] ?? zone.hull?.coordinates?.[0]
       if (!ring || ring.length < 4) return null
       const points = ring.map((p) => [Number(p[1]), Number(p[0])] as [number, number])
-      return L.polygon(points, { color: zone.color || '#00d4ff', weight: 2, dashArray: '8 6', fill: false }).bindTooltip(
-        `<strong>${zone.zoneName}</strong><br>${zone.zoneCode} · ${zone.plotCount} 块 · ${zone.areaMu.toFixed(2)} 亩`,
-      )
+      const color = zone.color || '#00d4ff'
+      return L.polygon(points, { pane: 'zonePane', color, weight: 2, dashArray: '8 6', fillColor: color, fillOpacity: 0.05 })
+        .bindTooltip(nameTooltip(zone.zoneName, `${zone.zoneCode} · ${zone.plotCount} 块 · ${zone.areaMu.toFixed(2)} 亩`))
+        .on('click', (event: any) => showPopup(event, zonePopup(zone, points)))
     })
     .filter((s): s is any => !!s)
   zoneLayer = L.layerGroup(shapes)
@@ -488,19 +745,49 @@ function centroidOf(ring: [number, number][] | undefined): [number, number] | nu
   return [lat / ring.length, lng / ring.length]
 }
 
-function renderFields(list: PlotBoundary[]) {
+function plotPopup(boundary: PlotBoundary, record: Plot, ring: [number, number][]): HTMLElement {
+  const zoneName = zoneList.value.find((zone) => zone.zoneCode === record.zoneCode)?.zoneName
+  const rows = [
+    `${boundary.areaMu.toFixed(2)} 亩 · ${getPlotTypeText(record.type)}`,
+    boundary.parcelCode,
+    zoneName ? `所属片区：${zoneName}` : '未划入片区',
+  ]
+  const actions: PopupAction[] = allowed('plot:write') ? [
+    {
+      label: '编辑边界',
+      onClick: () => {
+        map?.closePopup()
+        shapeEditor.value?.editPlot({
+          code: record.parcelCode, name: record.name, points: toDraftPoints(ring),
+          plotType: record.type, zoneCode: record.zoneCode ?? null,
+        })
+      },
+    },
+    { label: '删除地块', danger: true, onClick: () => void removePlot(record) },
+  ] : []
+  return shapePopup(boundary.name, rows, actions)
+}
+
+function renderFields(list: PlotBoundary[], fit = true) {
   if (!fieldLayer || !map) return
   map.removeLayer(fieldLayer)
+  parcelCenter.clear()
   const shapes = list.map((b, index) => {
     const ring = b.rings[0]
+    if (!ring) return null
     const c = centroidOf(ring)
     if (c && b.parcelCode) parcelCenter.set(b.parcelCode, c)
     const color = cropColor(b.crop ?? b.name, index)
-    return ring ? L.polygon(ring, { color, weight: 1.5, fillColor: color, fillOpacity: 0.14 }).bindTooltip(`<strong>${b.name}</strong><br>${b.areaMu.toFixed(2)} 亩${b.crop ? ` · ${b.crop}` : ''}`) : null
+    const shape = L.polygon(ring, { color, weight: 1.5, fillColor: color, fillOpacity: 0.14 })
+      .bindTooltip(nameTooltip(b.name, `${b.areaMu.toFixed(2)} 亩${b.crop ? ` · ${b.crop}` : ''}`))
+    // 示范边界没有对应台账记录，不给编辑/删除入口
+    const record = plotByCode.value.get(b.parcelCode)
+    if (record) shape.on('click', (event: any) => showPopup(event, plotPopup(b, record, ring)))
+    return shape
   }).filter((s): s is any => !!s)
   fieldLayer = L.layerGroup(shapes)
   if (visibleLayers.fields) fieldLayer.addTo(map)
-  if (list.length) {
+  if (fit && list.length) {
     const bounds = L.latLngBounds(list.flatMap((b) => b.rings[0] ?? []))
     if (bounds.isValid()) map.fitBounds(bounds, { padding: [60, 60] })
   }
@@ -516,20 +803,22 @@ function demoBoundaries(): PlotBoundary[] {
   ]
 }
 
-async function loadPlots() {
+async function loadPlots(fit = true) {
   try {
     const list = await plotApi.getList({ page: 1, pageSize: 200 })
+    plotList.value = list.items
     const parsed = parsePlotBoundaries(list.items as PlotBoundarySource[])
     if (parsed.length) {
-      renderFields(parsed)
+      renderFields(parsed, fit)
       mapMessage.value = `已加载 ${parsed.length} 个地块边界`
       return
     }
     mapMessage.value = '服务端暂无地块边界，展示示范边界'
-    renderFields(demoBoundaries())
+    renderFields(demoBoundaries(), fit)
   } catch {
+    plotList.value = []
     mapMessage.value = '地块边界加载失败，展示示范边界'
-    renderFields(demoBoundaries())
+    renderFields(demoBoundaries(), fit)
   }
 }
 
@@ -596,7 +885,11 @@ onMounted(() => void loadZones())
 onMounted(() => void loadLines())
 onMounted(() => void loadWeather())
 onMounted(() => { refreshUnread(); unreadTimer = setInterval(refreshUnread, 30000) })
-onUnmounted(() => { map?.remove(); map = null; if (unreadTimer) clearInterval(unreadTimer) })
+onUnmounted(() => {
+  map?.remove()
+  map = null
+  if (unreadTimer) clearInterval(unreadTimer)
+})
 </script>
 
 <style scoped lang="scss">
@@ -624,6 +917,11 @@ onUnmounted(() => { map?.remove(); map = null; if (unreadTimer) clearInterval(un
 .item-dot { width: 6px; height: 6px; border-radius: 50%; background: #4d7f92; flex: none; }
 .swatch { width: 14px; height: 3px; border-radius: 2px; flex: none; }
 .item-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.menu-row { display: flex; align-items: center; gap: 2px; }
+.menu-row .menu-item { flex: 1; width: auto; min-width: 0; }
+.menu-add { flex: none; width: 20px; height: 20px; padding: 0; border: 1px solid rgba(0,212,255,.3); border-radius: 3px; background: rgba(0,98,133,.35); color: #bfe9ff; cursor: pointer; font-size: 13px; line-height: 1; }
+.menu-add:hover { background: rgba(0,150,199,.6); color: #fff; }
+.menu-add.active { background: #00d4ff; border-color: #00d4ff; color: #04121f; }
 
 /* 右上图层与图例 */
 .layer-panel { position: absolute; top: 16px; right: 16px; z-index: 500; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
@@ -688,6 +986,14 @@ onUnmounted(() => { map?.remove(); map = null; if (unreadTimer) clearInterval(un
 .panel-body > * { min-height: 100%; }
 
 :deep(.dev-ico) { background: none; border: 0; }
+:deep(.shape-pop) { min-width: 180px; }
+:deep(.shape-pop-h) { color: #00d4ff; font-size: 13px; font-weight: 600; }
+:deep(.shape-pop-m) { margin-top: 4px; color: #9fc3d3; font-size: 11px; }
+:deep(.shape-pop-actions) { display: flex; gap: 6px; margin-top: 10px; }
+:deep(.shape-pop-btn) { padding: 4px 10px; border: 1px solid rgba(0,212,255,.4); border-radius: 3px; background: rgba(0,98,133,.4); color: #cdeeff; cursor: pointer; font-size: 11px; }
+:deep(.shape-pop-btn:hover) { background: rgba(0,150,199,.6); color: #fff; }
+:deep(.shape-pop-btn.danger) { border-color: rgba(255,138,101,.5); background: rgba(255,71,87,.16); color: #ff8a65; }
+:deep(.shape-pop-btn.danger:hover) { background: rgba(255,71,87,.32); color: #fff; }
 :deep(.dev-pin) { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; color: #04121f; font-size: 12px; font-weight: 700; box-shadow: 0 0 8px rgba(0,0,0,.5); border: 2px solid rgba(255,255,255,.7); }
 :deep(.leaflet-control-zoom) { margin: 16px 16px 0 0; border: 0; }
 :deep(.leaflet-control-zoom a) { color: #b9e6ef; background: rgba(7,25,48,.85); border-color: rgba(0,212,255,.25); }
@@ -725,6 +1031,7 @@ onUnmounted(() => { map?.remove(); map = null; if (unreadTimer) clearInterval(un
   .layer-panel { top: 10px; right: 10px; }
   .weather-card { right: 10px; bottom: 10px; left: 10px; justify-content: space-between; }
   .map-status { display: none; }
+  .cockpit.drawing .weather-card { display: none; }
   .map-panel { top: 48px; left: 172px; right: 8px; bottom: 8px; width: auto; }
   .map-panel.max { left: 12px; }
   .ctl-name { display: none; }

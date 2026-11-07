@@ -38,10 +38,20 @@ export interface InfraLineInput {
   lengthM?: number;
 }
 
+/** 局部更新入参：只覆盖传入的字段，几何变化时长度由调用方重算 */
+export interface InfraLinePatch {
+  lineName?: string;
+  lineType?: InfraLineType;
+  geom?: GeoLineString;
+  lengthM?: number;
+}
+
 export interface InfraLineRepository {
   listByTenant(tenantId: string): Promise<InfraLine[]>;
   findByCode(lineCode: string): Promise<InfraLine | null>;
   create(tx: unknown, record: InfraLine): Promise<InfraLine>;
+  /** 局部更新未删除线路，未命中返回 null */
+  update(tx: unknown, lineCode: string, patch: InfraLinePatch): Promise<InfraLine | null>;
   remove(tx: unknown, lineCode: string, deletedAt: string): Promise<boolean>;
 }
 
@@ -130,6 +140,48 @@ export class SqlInfraLineRepository implements InfraLineRepository {
     return record;
   }
 
+  async update(tx: unknown, lineCode: string, patch: InfraLinePatch): Promise<InfraLine | null> {
+    const executor = this.executor(tx);
+    const rows = await executor.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, created_at, deleted_at
+       FROM infra_lines WHERE line_code = $1 AND deleted_at IS NULL LIMIT 1`,
+      lineCode,
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const next = toLine(row);
+    const sets: string[] = [];
+    // $1 固定是 lineCode，其余按参数个数顺延，避免手写序号与数组错位
+    const params: unknown[] = [lineCode];
+    const add = (column: string, value: unknown, cast = ""): void => {
+      params.push(value);
+      sets.push(`${column} = $${params.length}${cast}`);
+    };
+    if (patch.lineName !== undefined) {
+      add("line_name", patch.lineName);
+      next.lineName = patch.lineName;
+    }
+    if (patch.lineType !== undefined) {
+      add("line_type", patch.lineType);
+      next.lineType = patch.lineType;
+    }
+    if (patch.geom !== undefined) {
+      add("geom", JSON.stringify(patch.geom), "::jsonb");
+      next.geom = patch.geom;
+    }
+    if (patch.lengthM !== undefined) {
+      add("length_m", patch.lengthM);
+      next.lengthM = patch.lengthM;
+    }
+    if (sets.length > 0) {
+      await executor.$executeRawUnsafe(
+        `UPDATE infra_lines SET ${sets.join(", ")} WHERE line_code = $1 AND deleted_at IS NULL`,
+        ...params,
+      );
+    }
+    return next;
+  }
+
   async remove(tx: unknown, lineCode: string, deletedAt: string): Promise<boolean> {
     return (await this.executor(tx).$executeRawUnsafe(
       `UPDATE infra_lines SET deleted_at = $2 WHERE line_code = $1 AND deleted_at IS NULL`,
@@ -160,6 +212,16 @@ export class InMemoryInfraLineRepository implements InfraLineRepository {
   async create(_tx: unknown, record: InfraLine): Promise<InfraLine> {
     this.rows.push(record);
     return record;
+  }
+
+  async update(_tx: unknown, lineCode: string, patch: InfraLinePatch): Promise<InfraLine | null> {
+    const row = this.rows.find((item) => item.lineCode === lineCode && item.deletedAt === undefined);
+    if (!row) return null;
+    if (patch.lineName !== undefined) row.lineName = patch.lineName;
+    if (patch.lineType !== undefined) row.lineType = patch.lineType;
+    if (patch.geom !== undefined) row.geom = patch.geom;
+    if (patch.lengthM !== undefined) row.lengthM = patch.lengthM;
+    return row;
   }
 
   async remove(_tx: unknown, lineCode: string, deletedAt: string): Promise<boolean> {

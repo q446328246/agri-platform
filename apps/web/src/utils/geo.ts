@@ -113,6 +113,27 @@ export function parsePlotBoundaries(plots: Array<Partial<Plot> | PlotBoundarySou
   return plots.map(parsePlotBoundary).filter((item): item is PlotBoundary => !!item)
 }
 
+/** 折线长度（米），入参为 [经度, 纬度]；与后端 estimateLengthM 用同一套等距圆柱近似，便于绘制时实时预览。 */
+export function polylineLengthM(points: Array<[number, number]>): number {
+  let total = 0
+  for (let i = 1; i < points.length; i += 1) {
+    const from = points[i - 1]!
+    const to = points[i]!
+    const midLat = ((from[1] + to[1]) / 2) * (Math.PI / 180)
+    const dx = (to[0] - from[0]) * 111320 * Math.cos(midLat)
+    const dy = (to[1] - from[1]) * 110540
+    total += Math.sqrt(dx * dx + dy * dy)
+  }
+  return total
+}
+
+/** 绘制中的多边形面积（亩），入参为 [经度, 纬度] 顶点，可不闭合；不足 3 点返回 0。 */
+export function polygonAreaMu(points: Array<[number, number]>): number {
+  if (points.length < 3) return 0
+  const ring = points.map(([lng, lat]) => [lat, lng] as [number, number])
+  return boundaryAreaMu({ name: '', parcelCode: '', rings: [ring], center: [0, 0], areaMu: 0 })
+}
+
 export function boundaryAreaMu(boundary: PlotBoundary): number {
   if (boundary.areaMu > 0) return boundary.areaMu
   const [ring] = boundary.rings
