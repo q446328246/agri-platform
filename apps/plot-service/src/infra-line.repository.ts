@@ -10,10 +10,10 @@ import { toIsoTimestamp } from "@agri/shared";
  * 几何统一存 LineString，前端按类型给不同颜色即可叠加渲染。
  */
 
-/** 线路类型：灌水管、施肥管、电力线、机耕道 */
-export type InfraLineType = "IRRIGATION_PIPE" | "FERTILIZATION_PIPE" | "ELECTRIC_LINE" | "ROAD";
+/** 线路类型：灌水管、施肥管、电力线、机耕道、通信网线 */
+export type InfraLineType = "IRRIGATION_PIPE" | "FERTILIZATION_PIPE" | "ELECTRIC_LINE" | "ROAD" | "TELECOM";
 
-export const INFRA_LINE_TYPES: InfraLineType[] = ["IRRIGATION_PIPE", "FERTILIZATION_PIPE", "ELECTRIC_LINE", "ROAD"];
+export const INFRA_LINE_TYPES: InfraLineType[] = ["IRRIGATION_PIPE", "FERTILIZATION_PIPE", "ELECTRIC_LINE", "ROAD", "TELECOM"];
 
 /** 线路记录 */
 export interface InfraLine {

@@ -104,8 +104,8 @@ export const plotApi = {
   }
 }
 
-/** 管线类型：灌水管、施肥管、电力线、机耕道 */
-export type InfraLineType = 'IRRIGATION_PIPE' | 'FERTILIZATION_PIPE' | 'ELECTRIC_LINE' | 'ROAD'
+/** 管线类型：灌水管、施肥管、电力线、机耕道、通信网线 */
+export type InfraLineType = 'IRRIGATION_PIPE' | 'FERTILIZATION_PIPE' | 'ELECTRIC_LINE' | 'ROAD' | 'TELECOM'
 
 export interface InfraLine {
   id: string

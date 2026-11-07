@@ -660,3 +660,20 @@
 | 2026-11-06 | 配置纠错 kid/sub | 实测对调返回 200：控制台 `CGPNHGDK3Q` 为凭据ID(Header.kid)、`28TNW6CCEQ` 为项目ID(Payload.sub)，`.env` 已更正 |
 | 2026-11-06 | `npx vitest run apps/weather-service` + `pnpm run build` | 54 用例通过 / build exit 0 |
 | 2026-11-06 | 容器实跑（真实凭据 + 真实 Host）| `和风天气同步已启用 auth=jwt-ed25519`；预警同步完成（total 0 无生效预警，**无 401/403**）；服务实际客户端 `fetchDaily3=3 / fetchHourly24=24 / fetchWarning=0` 全 **HTTP 200 真实取数**；读取接口返回 401 WEATHER-401（路由存在受平台鉴权守卫，符合设计）|
+| 2026-11-07 | 首页按参考图重构为“一张图驾驶舱” | `apps/web/src/views/dashboard/Index.vue` 重写：全屏天地图影像 + 左侧功能菜单树（基本信息/四情监控/视频监控/控制设备，可项跳路由、图层项就地切换）+ 右上图层可视下拉与水线/电线/网线图例 + 右下真实天气卡片（weatherApi.getForecast 5 日）+ 设备按地块中心聚合打点 |
+| 2026-11-07 | `vue-tsc -b` + `vite build` | 均 exit 0（类型/模板/打包无错） |
+| 2026-11-07 | 重建 edge 镜像 + 容器内产物核对 | `agri-platform-edge:local` 重建，`/usr/share/nginx/html/assets` 命中改版标记 `func-menu/一张图/wx-strip`，新首页已部署至 http://localhost |
+| 2026-11-07 | 首页改版收尾·天气卡 | 天气卡新增实时要素行（`getRealtime` 按 label/key 正则匹配温/湿/风）与活跃预警红点角标（`getAlerts.total>0` 显示红底闪烁），拉取失败静默不影响预报展示 |
+| 2026-11-07 | 首页改版收尾·设备弹窗 | 设备点位 `bindPopup` 展开按地块聚合的设备清单（在线绿/离线橙状态点，超 10 台省略“共 N 台”），保留原悬浮 tooltip |
+| 2026-11-07 | 首页改版收尾·响应式 | 新增 `min-width:1600px` 大屏放大（菜单宽/字号/温度）与 `max-width:640px` 窄屏适配（菜单上收、天气卡占满底行、隐藏状态条） |
+| 2026-11-07 | “网线”图层落地 | 后端 `InfraLineType`/`INFRA_LINE_TYPES` 增 `TELECOM`；前端 `api/index.ts` union 同步、`categorize` 显式归网；新增迁移 `013_infra_telecom_line.sql`（DROP+ADD 重建 `line_type` CHECK 约束纳入 TELECOM + 两条示范通信线） |
+| 2026-11-07 | 迁移落库（容器内 `psql -f` UTF8） | `INSERT 0 2`，`infra-line-net-1/2`（避开已被 010 占用的 `demo-9/10` id）中文落库正确；首次经 PowerShell 管道传 `Get-Content` 会损坏中文编码，须 `docker cp` + `psql -f` |
+| 2026-11-07 | `npx tsc -b apps/plot-service` + `vitest infra-line.spec.ts` | 均通过（build exit 0 / 3 用例） |
+| 2026-11-07 | `apps/web vue-tsc -b` + `vite build` | 均 exit 0（首遇 `devices:[]` 推断为 `never[]` 报错，加类型断言后修正） |
+| 2026-11-07 | 重建 app + edge 镜像并 `up -d` | 两镜像重建、容器 Recreated，`infra-app-1` healthy |
+| 2026-11-07 | 经网关实跑 `GET /api/v1/plots/infra-lines` | 线型分布 `{FERTILIZATION_PIPE:2,IRRIGATION_PIPE:2,TELECOM:2,ELECTRIC_LINE:2,ROAD:4}`，`telecom=示范区监控通信主干,东南片区物联网支线`（“网线”图层已有真实数据）；edge 产物命中新标记 `wx-alert/dev-pop/func-menu` |
+| 2026-11-07 | 自动化浏览器验收 | 受阻：edge 强制 HTTPS + 镜像内自签证书 `ERR_CERT_AUTHORITY_INVALID`，且预览窗口隐藏致截图不可用（环境限制、非渲染缺陷）；需用户手动开 `https://localhost` 接受证书目视 |
+| 2026-11-07 | 全局一张图：取消外围导航 | `MainLayout.vue` 删除 el-aside 侧边栏与 el-header 顶栏，改为全屏 `position:fixed` router-view；原顶栏的消息未读/用户名/退出下沉到首页右上控制簇；仅在“展开为完整页”（detach）时浮一个“返回一张图”入口（`route.path!=='/dashboard'`） |
+| 2026-11-07 | 首页菜单改为地图内浮层面板 | `dashboard/Index.vue`：菜单项由 `router.push` 改为 `openPanel`，右侧多标签浮层面板用 `defineAsyncComponent` 就地内嵌目标页组件（`panelComps` 映射 17 个顶级路由），支持切换/关闭/最大化/展开为完整页；菜单扩为 7 组覆盖全部页面并按 `checkPermission` 过滤 |
+| 2026-11-07 | `vue-tsc -b` + `vite build` | 均 exit 0（2314 模块，含内嵌页面异步 chunk） |
+| 2026-11-07 | 重建 edge + 产物核对 | `agri-platform-edge:local` 重建并 Recreated；`Index-*.js/css` 命中 `map-panel/ctl-cluster/panel-tabs`，`MainLayout-*.js` 命中“返回一张图”，全局一张图已部署 |
