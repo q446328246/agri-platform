@@ -39,6 +39,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
 import { TooltipComponent, LegendComponent, GridComponent } from 'echarts/components'
 import { iotApi, telemetryApi } from '@/api'
+import { formatDateTime } from '@/utils'
 import type { TelemetryHistoryPoint } from '@/api'
 
 use([CanvasRenderer, LineChart, TooltipComponent, LegendComponent, GridComponent])
@@ -97,7 +98,11 @@ async function updateLatest() {
 async function loadHistory() {
   try {
     const points = await telemetryApi.getHistorySeries(selectedDeviceId.value, selectedMetric.value)
-    historyTimes.value = points.map((point: TelemetryHistoryPoint) => point.recordedAt.slice(11, 19))
+    // 直接切 ISO 字符串会拿到 UTC 时分秒，与页面其它时间差 8 小时；跨天序列还必须带日期，否则轴标签看着像乱序
+    const first = points[0]
+    const last = points[points.length - 1]
+    const crossDay = !!first && !!last && formatDateTime(first.recordedAt, 'YYYY-MM-DD') !== formatDateTime(last.recordedAt, 'YYYY-MM-DD')
+    historyTimes.value = points.map((point: TelemetryHistoryPoint) => formatDateTime(point.recordedAt, crossDay ? 'MM-DD HH:mm' : 'HH:mm:ss'))
     historyValues.value = points.map((point: TelemetryHistoryPoint) => point.value)
     historyLoaded.value = points.length > 0
   } catch {
@@ -135,3 +140,31 @@ onUnmounted(() => {
   if (timer) clearInterval(timer)
 })
 </script>
+
+<style scoped>
+.monitor-card {
+  margin-bottom: 20px;
+  padding: 16px 18px;
+  background: #fff;
+  border-left: 3px solid var(--el-color-primary);
+  border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.06);
+}
+.monitor-label { font-size: 13px; color: var(--el-text-color-secondary); }
+.monitor-value {
+  margin: 6px 0 8px;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--el-text-color-primary);
+  font-variant-numeric: tabular-nums;
+}
+.monitor-value .unit { margin-left: 4px; font-size: 13px; font-weight: 400; color: var(--el-text-color-secondary); }
+.monitor-status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+.monitor-status.normal { color: var(--el-color-success); background: var(--el-color-success-light-9); }
+.monitor-status.warning { color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
+.monitor-status.abnormal { color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
+.history-controls { display: flex; gap: 12px; }
+/* vue-echarts 的根节点没有 intrinsic 高度，不给高度图表会塌成 0 像素 */
+.chart { height: 320px; }
+</style>

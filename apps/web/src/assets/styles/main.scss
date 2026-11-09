@@ -177,6 +177,7 @@ a {
 // 通用工具类
 .mt-20 { margin-top: 20px; }
 .mb-20 { margin-bottom: 20px; }
+.mb-16 { margin-bottom: 16px; }
 .text-center { text-align: center; }
 .flex-center {
   display: flex;
@@ -273,6 +274,19 @@ a {
   background: white;
   padding: 20px;
   border-radius: 4px;
+}
+
+// 列表页查询区与表格工具条：工具条左侧放批量操作，右侧放刷新
+.search-bar {
+  margin-bottom: 4px;
+}
+
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
 .table-operations {

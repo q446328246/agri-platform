@@ -39,6 +39,8 @@
               muted
               playsinline
               preload="auto"
+              @playing="playState[camera.id] = 'playing'"
+              @error="onVideoError(camera.id, $event)"
             />
             <div v-if="!playable(camera)" class="camera-placeholder">
               <el-icon :size="40"><VideoCameraFilled /></el-icon>
@@ -161,6 +163,13 @@ async function startPlayback(camera: Camera) {
 function destroyEngine(cameraId: string) {
   engines.get(cameraId)?.()
   engines.delete(cameraId)
+}
+
+/** 切换/销毁播放器会清空 src 并触发一次空错误，只有真的带错误码的媒体故障才算拉流失败 */
+function onVideoError(cameraId: string, event: Event) {
+  const video = event.target as HTMLVideoElement
+  if (!video.error || !video.currentSrc) return
+  playState[cameraId] = 'error'
 }
 
 function retry(camera: Camera) {

@@ -40,13 +40,21 @@ async function main() {
   if (!token) fail("登录", `status=${login.status}`);
   pass("登录获取 token", token.slice(0, 12) + "...");
 
-  // 1. 五日预报
-  const forecast = await call("/weather/forecast");
-  if (forecast.status !== 200) fail("五日预报", `status=${forecast.status} msg=${forecast.message}`);
+  // 1. 今天起七日预报：日期按农场时区（东八区）取日，窗口内严格升序
+  const farmToday = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
+  const farmDay = (offset) => new Date(Date.now() + 8 * 3600_000 + offset * 86_400_000).toISOString().slice(0, 10);
+  const forecast = await call("/weather/forecast?days=7");
+  if (forecast.status !== 200) fail("七日预报", `status=${forecast.status} msg=${forecast.message}`);
   const days = forecast.data?.forecast ?? [];
-  if (days.length < 5) fail("五日预报条数", `期望≥5, 实际${days.length}`);
+  if (days.length < 5) fail("七日预报条数", `期望≥5, 实际${days.length}`);
   if (!days[0]?.date || !days[0]?.weather || days[0]?.tempMax === undefined) fail("预报字段", JSON.stringify(days[0]));
-  pass("五日预报", `${days.length} 天`);
+  if (forecast.data?.today !== farmToday) fail("预报 today 口径", `期望${farmToday}, 实际${forecast.data?.today}`);
+  if (days[0]?.date !== farmToday) fail("预报首日非今天", `期望${farmToday}, 实际${days[0]?.date}`);
+  const dates = days.map((d) => d.date);
+  if (dates.some((d, i) => (i > 0 && d <= dates[i - 1]) || d < farmToday || d >= farmDay(7))) {
+    fail("预报窗口", `期望 [${farmToday}, ${farmDay(7)}) 升序, 实际${dates.join(",")}`);
+  }
+  pass("七日预报", `${days.length} 天 ${dates[0]}~${dates[dates.length - 1]}`);
 
   // 2. 作业提示
   if (!forecast.data?.headline) fail("作业提示", "headline 为空");

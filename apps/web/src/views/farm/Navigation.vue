@@ -1,5 +1,5 @@
 <template>
-  <div class="page-container nav-page">
+  <div class="page-container">
     <div class="card-container nav-toolbar">
       <el-form :inline="true" @submit.prevent="plan">
         <el-form-item label="起点">

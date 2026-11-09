@@ -56,19 +56,37 @@ function dedupe(points: [number, number][]): [number, number][] {
   return result
 }
 
+/**
+ * 环面积（亩），入参为 Leaflet 序 [纬度, 经度]。
+ * 先以环重心为原点投影到等距圆柱平面再做鞋带公式：逐点乘 cos(lat) 会让 107/30 量级的坐标项
+ * 互相抵消，纬度稍有跨度就在真实面积上叠出几十个百分点的误差；平移到重心后各项都是米级小量。
+ */
+function ringAreaMu(ring: [number, number][]): number {
+  if (ring.length < 3) return 0
+  const [lat0, lng0] = ringCenter(ring)
+  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180)
+  const ky = 110540
+  let total = 0
+  for (let i = 0; i < ring.length; i += 1) {
+    const [lat1, lng1] = ring[i]!
+    const [lat2, lng2] = ring[(i + 1) % ring.length]!
+    const x1 = (lng1 - lng0) * kx
+    const y1 = (lat1 - lat0) * ky
+    const x2 = (lng2 - lng0) * kx
+    const y2 = (lat2 - lat0) * ky
+    total += x1 * y2 - x2 * y1
+  }
+  // 平方米 -> 亩
+  return Math.abs(total / 2) / 666.6667
+}
+
 /** 找出面积最大的外环，避免内环、洞或顺序异常的多边形导致展示翻转。 */
 function primaryRing(rings: [number, number][][]): [number, number][] | null {
   let best: [number, number][] | null = null
   let bestArea = 0
   for (const ring of rings) {
-    let area = 0
-    for (let i = 0; i < ring.length; i += 1) {
-      const [lat1, lng1] = ring[i]!
-      const [lat2, lng2] = ring[(i + 1) % ring.length]!
-      area += lat1 * lng2 - lat2 * lng1
-    }
-    const size = Math.abs(area / 2)
-    if (size > bestArea && ring.length >= 3) {
+    const size = ringAreaMu(ring)
+    if (size > bestArea) {
       bestArea = size
       best = ring
     }
@@ -100,7 +118,8 @@ export function parsePlotBoundary(plot: PlotBoundarySource): PlotBoundary | null
   return {
     name: String(plot.name ?? plot.parcelName ?? parcelCode),
     parcelCode,
-    rings,
+    // 主环放首位：调用方按 rings[0] 定位与拟合视野，必须和 center 取自同一个环
+    rings: [ring, ...rings.filter((item) => item !== ring)],
     center: ringCenter(ring),
     areaMu: Number(plot.areaMu ?? 0) || 0,
     ...(plot.currentCrop ? { crop: String(plot.currentCrop) } : {}),
@@ -136,16 +155,8 @@ export function polygonAreaMu(points: Array<[number, number]>): number {
 
 export function boundaryAreaMu(boundary: PlotBoundary): number {
   if (boundary.areaMu > 0) return boundary.areaMu
-  const [ring] = boundary.rings
-  if (!ring) return 0
-  let total = 0
-  for (let i = 0; i < ring.length; i += 1) {
-    const [lat1, lng1] = ring[i]!
-    const [lat2, lng2] = ring[(i + 1) % ring.length]!
-    total += (lat1 * lng2 - lat2 * lng1) * Math.cos((lat1 * Math.PI) / 180)
-  }
-  // 平方度 -> 平方米 -> 亩
-  return Math.abs((total / 2) * 111320 * 111320) / 666.6667
+  const ring = boundary.rings[0]
+  return ring ? ringAreaMu(ring) : 0
 }
 
 

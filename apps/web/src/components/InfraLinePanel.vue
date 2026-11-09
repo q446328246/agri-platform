@@ -52,7 +52,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onActivated, onMounted, ref, watch } from 'vue'
+import { computed, inject, onActivated, ref, watch } from 'vue'
 import { plotApi } from '@/api'
 import type { InfraLine } from '@/api'
 import { useUserStore } from '@/stores'
@@ -81,14 +81,17 @@ const rows = computed(() => {
 })
 const totalLengthM = computed(() => rows.value.reduce((sum, line) => sum + Number(line.lengthM ?? 0), 0))
 
+let reloadSeq = 0
 async function reload() {
+  const seq = ++reloadSeq
   loading.value = true
   try {
-    lines.value = await plotApi.getInfraLines()
+    const list = await plotApi.getInfraLines()
+    if (seq === reloadSeq) lines.value = list
   } catch {
-    lines.value = []
+    if (seq === reloadSeq) lines.value = []
   } finally {
-    loading.value = false
+    if (seq === reloadSeq) loading.value = false
   }
 }
 
@@ -100,12 +103,11 @@ function reset() {
 
 async function handleRemove(line: InfraLine) {
   if (!bridge) return
-  // 二次确认与地图图层刷新都在一张图侧完成，这里只需要重新拉一次列表
+  // 二次确认与地图图层刷新都在一张图侧完成，删除成功后 revision 会带动下面的 watch 重查
   await bridge.remove(line)
-  await reload()
 }
 
-onMounted(reload)
+// 面板挂在 KeepAlive 下，首次挂载也会触发 activated，不要再叠一次 onMounted
 onActivated(reload)
 // 改走向发生在一张图地图上，面板收不到事件只能跟着地图的加载次数重查
 watch(() => bridge?.revision.value, reload)

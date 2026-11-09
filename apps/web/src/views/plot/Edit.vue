@@ -1,6 +1,6 @@
 <template>
   <div class="page-container">
-    <div class="card-container form-container">
+    <div class="card-container">
       <h3 class="mb-20">{{ isEdit ? '编辑地块' : '新增地块' }}</h3>
       <el-form
         ref="formRef"

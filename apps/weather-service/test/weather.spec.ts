@@ -4,11 +4,12 @@ import type { AddressInfo } from "node:net";
 import { InMemoryAlertRepository, SqlAlertRepository } from "../src/alert.repository.js";
 import type { WeatherAlert } from "../src/alert.repository.js";
 import { demoAlerts, demoForecastDays, demoForecastHours } from "../src/demo.js";
+import { farmDateOffset, farmToday } from "../src/farm-time.js";
 import { InMemoryForecastRepository, SqlForecastRepository } from "../src/forecast.repository.js";
 import { createWeatherHttpServer } from "../src/http.js";
 
 /**
- * 天气服务接口验证：五日预报与作业提示、逐小时预报、灾害预警筛选、
+ * 天气服务接口验证：今天起七日预报窗口与作业提示、逐小时预报、灾害预警筛选、
  * 气象历史曲线转发遥测读数并做指标白名单校验。
  */
 
@@ -33,12 +34,14 @@ async function get(base: string, path: string): Promise<{ status: number; body: 
 }
 
 describe("天气服务 HTTP 接口", () => {
-  it("五日预报带风、雨要素与农事作业提示", async () => {
+  it("预报默认今天起七日窗口，带风雨要素与农事作业提示（演示种子只有 5 天）", async () => {
     await withServer(async (base) => {
       const forecast = await get(base, "/api/v1/weather/forecast");
       expect(forecast.status).toBe(200);
       expect(forecast.body.data.location).toBe("达州市");
       expect(forecast.body.data.forecast).toHaveLength(5);
+      expect(forecast.body.data.today).toBe(farmToday());
+      expect(forecast.body.data.forecast[0].date).toBe(forecast.body.data.today);
       const first = forecast.body.data.forecast[0];
       expect(Object.keys(first)).toEqual(expect.arrayContaining(["date", "weather", "tempMin", "tempMax", "windDirection", "windLevel", "windSpeed", "rainProbability", "rainAmount"]));
       // 第三日为明显降雨日，用于触发「暂缓灌溉」类提示
@@ -50,7 +53,26 @@ describe("天气服务 HTTP 接口", () => {
 
       const days = await get(base, "/api/v1/weather/forecast?days=2");
       expect(days.body.data.forecast).toHaveLength(2);
+
+      const week = await get(base, "/api/v1/weather/forecast?days=7");
+      expect(week.body.data.forecast.map((item: { date: string }) => item.date)).toEqual(
+        Array.from({ length: 5 }, (_, index) => farmDateOffset(index)),
+      );
     });
+  });
+
+  it("早于今天与超出窗口的预报行都不返回，旧行仍保留在仓储里", async () => {
+    const stale = demoForecastDays(new Date(Date.now() - 10 * 86_400_000));
+    const future = demoForecastDays(new Date(Date.now() + 10 * 86_400_000));
+    const store = new InMemoryForecastRepository({ days: [...stale, ...demoForecastDays(), ...future] });
+    await withServer(async (base) => {
+      const res = await get(base, "/api/v1/weather/forecast?days=7");
+      const dates: string[] = res.body.data.forecast.map((item: { date: string }) => item.date);
+      expect(dates).toEqual(Array.from({ length: 5 }, (_, index) => farmDateOffset(index)));
+      expect(dates).not.toContain(stale[0]?.date);
+      expect(dates).not.toContain(future[0]?.date);
+      expect(await store.count()).toBe(15);
+    }, { forecasts: store });
   });
 
   it("逐小时预报返回未来时次并可用于作业窗口", async () => {
@@ -79,7 +101,8 @@ describe("天气服务 HTTP 接口", () => {
   });
 
   it("预报有降雨时作业提示转为暂缓，并给出排涝准备", async () => {
-    const now = new Date("2026-11-06T02:00:00.000Z");
+    // 种子必须锚到真实今天：查询窗口只返回「今天起 N 天」，写死的历史日期会被整体挡掉
+    const now = new Date();
     const rainyTomorrow = demoForecastDays(now).map((day, index) => (index === 0 ? { ...day, weather: "中雨", tempMax: 26, rainProbability: 85, rainAmount: 28, windLevel: 4, windSpeed: 9.2 } : day));
     const server = createWeatherHttpServer({
       forecasts: new InMemoryForecastRepository({ days: rainyTomorrow, hours: [] }),
@@ -179,6 +202,25 @@ describe("天气服务 HTTP 接口", () => {
     });
   });
 
+  it("跨服务读取遥测时透传网关身份头，enforce 部署下才不会被判 401", async () => {
+    const seen: Array<Record<string, string>> = [];
+    await withServer(async (base) => {
+      const identity = { "x-user-id": "user-admin", "x-permissions": "telemetry:read,weather:read", "x-tenant-id": "tenant-demo" };
+      const realtime = await fetch(`${base}/api/v1/weather/realtime`, { headers: identity });
+      expect(realtime.status).toBe(200);
+      const history = await fetch(`${base}/api/v1/weather/history?metric=airTemperature`, { headers: identity });
+      expect(history.status).toBe(200);
+      expect(seen).toHaveLength(2);
+      for (const headers of seen) expect(headers).toMatchObject(identity);
+    }, {
+      telemetryUrl: "http://telemetry.stub",
+      fetchReading: async (_url: string, headers: Record<string, string>) => {
+        seen.push(headers);
+        return { data: [{ metric: "airTemperature", value: 28, unit: "°C", recordedAt: "2026-11-05T03:00:00.000Z" }] };
+      },
+    });
+  });
+
   it("要素目录与预警仓储行为符合约定", async () => {
     await withServer(async (base) => {
       const metrics = await get(base, "/api/v1/weather/metrics");
@@ -234,6 +276,21 @@ describe("天气 SQL 仓储行映射", () => {
       windLevel: 2, windSpeed: 3, rainProbability: 10, rainAmount: 0, refreshedAt: "2026-11-06T02:00:00.000Z",
     });
     expect(executed.at(-1)?.[0]).toContain("INSERT INTO weather_forecasts");
+  });
+
+  it("upcoming 按农场时区界定 [今天, 今天+days) 窗口，SQL 不依赖数据库时区", async () => {
+    const queries: unknown[][] = [];
+    const repository = new SqlForecastRepository({
+      async $queryRawUnsafe(...args: unknown[]) { queries.push(args); return []; },
+      async $executeRawUnsafe() { return 0; },
+    } as never);
+    // 容器时区 UTC：11-08T20:00Z 已是农场 11-09 凌晨
+    await repository.upcoming(new Date("2026-11-08T20:00:00.000Z"), 7);
+    const args = queries[0] ?? [];
+    expect(String(args[0])).toContain("forecast_date >= $1::date AND forecast_date < $2::date");
+    expect(args[1]).toBe("2026-11-09");
+    expect(args[2]).toBe("2026-11-16");
+    expect(args[3]).toBe(7);
   });
 
   it("逐小时预报按时间升序读取，预警行映射保留可选失效时间", async () => {

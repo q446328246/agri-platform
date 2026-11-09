@@ -7,7 +7,7 @@ import type { PrescriptionIssuedPayload } from "@agri/contracts";
 import { OutboxService, InMemoryEventPublisher, InMemoryOutboxStore, publishEvent, setDefaultPublisher } from "@agri/mq";
 import type { EventPublisher, OutboxStore } from "@agri/mq";
 import { snowflakeId } from "@agri/shared";
-import { authorizeRequest } from "@agri/shared";
+import { authorizeRequest, identityHeaders } from "@agri/shared";
 
 import { InMemoryPrescriptionRepository } from "./prescription.repository.js";
 import type { CreatePrescriptionInput, PrescriptionQuery, PrescriptionRecord, PrescriptionRepository, PrescriptionStatus } from "./prescription.repository.js";
@@ -29,9 +29,9 @@ export interface DecisionDependencies {
   /** 事件发布器：接入事件日志时由启动层注入，缺省进程内发布 */
   publisher?: EventPublisher;
   /** 处方生成时向遥测服务补齐最新墒情，缺省直接使用请求体中的数值 */
-  fetchSoilMoisture?: (plotCode: string) => Promise<number | undefined>;
+  fetchSoilMoisture?: (plotCode: string, identity: Record<string, string>) => Promise<number | undefined>;
   /** 处方生成时从天气预报取未来降雨概率，缺省使用请求体或 0 */
-  fetchRainProbability?: (plotCode?: string) => Promise<number | undefined>;
+  fetchRainProbability?: (plotCode: string | undefined, identity: Record<string, string>) => Promise<number | undefined>;
   tenantId?: string;
 }
 
@@ -72,21 +72,6 @@ function rulePayload(body: Record<string, unknown>): Omit<CreateRuleInput, "id" 
     condition: normalizeCondition(body.condition),
     action: normalizeAction(body.action ?? body.actions, type),
     enabled: body.enabled !== false,
-  };
-}
-
-/** 默认墒情来源：遥测服务的最新读数 */
-function defaultSoilMoistureFetcher(telemetryUrl: string): (plotCode: string) => Promise<number | undefined> {
-  return async (plotCode: string) => {
-    try {
-      const response = await fetch(`${telemetryUrl}/api/v1/telemetry/latest?deviceId=${encodeURIComponent(plotCode)}`, { signal: AbortSignal.timeout(2000) });
-      if (!response.ok) return undefined;
-      const payload = (await response.json()) as { data?: Array<{ metric: string; value: number }> };
-      const soil = payload.data?.find((item) => item.metric === "soilMoisture");
-      return soil ? Number(soil.value) : undefined;
-    } catch {
-      return undefined;
-    }
   };
 }
 
@@ -189,8 +174,9 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
         const plotName = String(body.plotName ?? "").trim();
         const reportedSoil = Number(body.soilMoisture);
         const reportedRain = Number(body.rainProbability);
-        const liveSoil = plotCode ? await fetchSoilMoisture?.(plotCode) : undefined;
-        const liveRain = !Number.isFinite(reportedRain) && fetchRainProbability ? await fetchRainProbability(plotCode || undefined) : undefined;
+        const identity = identityHeaders(req);
+        const liveSoil = plotCode ? await fetchSoilMoisture?.(plotCode, identity) : undefined;
+        const liveRain = !Number.isFinite(reportedRain) && fetchRainProbability ? await fetchRainProbability(plotCode || undefined, identity) : undefined;
         const soilMoisture = Number.isFinite(reportedSoil) ? reportedSoil : liveSoil ?? 100;
         const rainProbability = Number.isFinite(reportedRain) ? reportedRain : liveRain ?? 0;
         const growthStage = String(body.growthStage ?? "").trim();

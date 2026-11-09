@@ -1,5 +1,5 @@
 <template>
-  <div v-if="active" class="shape-editor">
+  <div v-if="active" ref="rootEl" class="shape-editor">
     <div class="shape-editor__head">
       <span class="se-dot" :style="{ background: color }"></span>
       <span class="se-title">{{ title }}</span>
@@ -51,7 +51,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import L from 'leaflet'
 import { ElMessage } from 'element-plus'
 import { plotApi, toPolygonGeom, zoneApi } from '@/api'
@@ -88,6 +88,7 @@ const mode = ref<'create' | 'edit'>('create')
 const target = ref<MapShapeTarget | null>(null)
 /** 草稿顶点，[经度, 纬度]，与后端 GeoJSON 一致 */
 const points = ref<[number, number][]>([])
+const rootEl = ref<HTMLElement | null>(null)
 const draftName = ref('')
 const draftType = ref<InfraLineType>('IRRIGATION_PIPE')
 const draftPlotType = ref<PlotType>(PlotType.FIELD)
@@ -137,6 +138,8 @@ function openLayers() {
   draftLayer = L.layerGroup().addTo(map)
   rubberBand = L.polyline([], { color: color.value, weight: 2, opacity: 0.7, dashArray: '4 6', interactive: false }).addTo(map)
   map.getContainer().style.cursor = 'crosshair'
+  // 绘制期间双击落在地图上会缩放并连带平移，草图会跑掉
+  map.doubleClickZoom?.disable()
   render()
 }
 
@@ -145,6 +148,7 @@ function closeLayers() {
     if (draftLayer) map.removeLayer(draftLayer)
     if (rubberBand) map.removeLayer(rubberBand)
     map.getContainer().style.cursor = ''
+    map.doubleClickZoom?.enable()
   }
   draftLayer = null
   draftShape = null
@@ -237,29 +241,45 @@ function handleTypeChange() {
   render()
 }
 
-function begin(next: MapShapeActive) {
-  if (saving.value) return
+/** 保存请求在途时不接受新草稿，否则请求回来后的 cancel() 会把新草稿一起清掉 */
+function begin(next: MapShapeActive): boolean {
+  if (saving.value) return false
   closeLayers()
   points.value = []
   target.value = null
   mode.value = next.mode
   setActive(next)
+  return true
 }
 
-function fitToPoints() {
+/** 编辑卡片压住地图一角，留白按卡片实际位置算，保证顶点和拖拽手柄都露在可点区域 */
+async function fitToPoints() {
   if (!map || points.value.length === 0) return
-  map.fitBounds(L.latLngBounds(latlngs()), { paddingTopLeft: [250, 60], paddingBottomRight: [60, 60], maxZoom: 17 })
+  const bounds = L.latLngBounds(latlngs())
+  if (!bounds.isValid()) return
+  await nextTick()
+  if (!map) return
+  const size = map.getSize()
+  const container = map.getContainer().getBoundingClientRect()
+  const card = rootEl.value?.getBoundingClientRect()
+  const pad = { top: 60, right: 60, bottom: 60, left: 60 }
+  if (card) {
+    // 窄屏时卡片贴底（见样式断点），其余情况靠左；至少留 120px 视野，避免 fitBounds 退化到最小缩放
+    if (size.x <= 640) pad.bottom = Math.max(60, Math.min(size.y - 120, container.bottom - card.top + 16))
+    else pad.left = Math.max(60, Math.min(size.x - 120, card.right - container.left + 16))
+  }
+  map.fitBounds(bounds, { paddingTopLeft: [pad.left, pad.top], paddingBottomRight: [pad.right, pad.bottom], maxZoom: 17 })
 }
 
 function startLine(cat: LineCat) {
-  begin({ kind: 'line', mode: 'create', cat })
+  if (!begin({ kind: 'line', mode: 'create', cat })) return
   draftType.value = defaultTypeOfCat[cat]
   draftName.value = props.suggestName('line', draftType.value)
   openLayers()
 }
 
 function startPlot() {
-  begin({ kind: 'plot', mode: 'create' })
+  if (!begin({ kind: 'plot', mode: 'create' })) return
   draftName.value = props.suggestName('plot')
   draftPlotType.value = PlotType.FIELD
   draftZoneCode.value = ''
@@ -267,7 +287,7 @@ function startPlot() {
 }
 
 function startZone() {
-  begin({ kind: 'zone', mode: 'create' })
+  if (!begin({ kind: 'zone', mode: 'create' })) return
   draftName.value = props.suggestName('zone')
   draftColor.value = '#00d4ff'
   openLayers()
@@ -275,7 +295,7 @@ function startZone() {
 
 /** 载入既有边界进入修改态；points 为开环，保存时再闭合 */
 function edit(shape: 'plot' | 'zone', source: MapShapeTarget) {
-  begin({ kind: shape, mode: 'edit' })
+  if (!begin({ kind: shape, mode: 'edit' })) return
   target.value = source
   points.value = source.points.map(([lng, lat]) => [lng, lat])
   draftName.value = source.name
@@ -286,7 +306,7 @@ function edit(shape: 'plot' | 'zone', source: MapShapeTarget) {
     draftColor.value = source.color || '#00d4ff'
   }
   openLayers()
-  fitToPoints()
+  void fitToPoints()
 }
 
 function editPlot(source: MapShapeTarget) {
@@ -301,13 +321,13 @@ function editZone(source: MapShapeTarget) {
 function editLine(source: MapShapeTarget) {
   const lineType = source.lineType ?? 'IRRIGATION_PIPE'
   const cat = categorize(lineType)
-  begin({ kind: 'line', mode: 'edit', ...(cat === 'ROAD' ? {} : { cat }) })
+  if (!begin({ kind: 'line', mode: 'edit', ...(cat === 'ROAD' ? {} : { cat }) })) return
   target.value = source
   points.value = source.points.map(([lng, lat]) => [lng, lat])
   draftName.value = source.name
   draftType.value = lineType
   openLayers()
-  fitToPoints()
+  void fitToPoints()
 }
 
 function cancel() {
@@ -324,6 +344,12 @@ async function save() {
   const name = draftName.value.trim()
   if (name === '') {
     ElMessage.warning(`请填写${kindLabel.value}名称`)
+    return
+  }
+  // 共线/重合的顶点数量够但围不成面、也拉不出长度，存进去就是一条脏档案
+  const degenerate = isPolygon.value ? polygonAreaMu(points.value) <= 0 : polylineLengthM(points.value) <= 0
+  if (degenerate) {
+    ElMessage.warning(`${kindLabel.value}${isPolygon.value ? '面积为 0' : '长度为 0'}，请拖动圆点错开重合或共线的点`)
     return
   }
   saving.value = true

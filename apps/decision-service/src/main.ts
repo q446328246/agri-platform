@@ -16,6 +16,19 @@ function parseLogLevel(value?: string): "debug" | "info" | "warn" | "error" {
   return value === "debug" || value === "warn" || value === "error" ? value : "info";
 }
 
+/** 从天气预报服务取未来 24h 降雨概率，用于规则求值（无降雨时不会误推迟） */
+function createRainProbabilityFetcher(weatherUrl: string): NonNullable<DecisionDependencies["fetchRainProbability"]> {
+  return async (_plotCode, identity) => {
+    try {
+      // 服务侧守卫为 enforce 时必须透传身份头，否则天气服务判 401，降雨概率静默退化成 0
+      const res = await fetch(`${weatherUrl}/api/v1/weather/forecast?days=1`, { headers: identity, signal: AbortSignal.timeout(2000) });
+      if (!res.ok) return undefined;
+      const json = (await res.json()) as { data?: { forecast?: Array<{ rainProbability: number }> } };
+      return json.data?.forecast?.[0]?.rainProbability;
+    } catch { return undefined; }
+  };
+}
+
 async function bootstrap(): Promise<void> {
   const port = Number(process.env.PORT ?? 3006);
   const logger = new LoggerService({ serviceName: "decision-service", level: parseLogLevel(process.env.LOG_LEVEL) });
@@ -36,15 +49,7 @@ async function bootstrap(): Promise<void> {
     const outbox = new SqlOutboxStore(client);
     const tenantId = process.env.TENANT_ID ?? "tenant-demo";
     const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
-    // 从天气预报服务取未来 24h 降雨概率，用于规则求值（无降雨时不会误推迟）
-    const fetchRainProbability = async (): Promise<number | undefined> => {
-      try {
-        const res = await fetch(`${weatherUrl}/api/v1/weather/forecast?days=1`, { signal: AbortSignal.timeout(2000) });
-        if (!res.ok) return undefined;
-        const json = (await res.json()) as { data?: { forecast?: Array<{ rainProbability: number }> } };
-        return json.data?.forecast?.[0]?.rainProbability;
-      } catch { return undefined; }
-    };
+    const fetchRainProbability = createRainProbabilityFetcher(weatherUrl);
     // 中继把本地消息表投递到共享事件日志，其他服务据此消费处方事件
     const publisher = new EventLogPublisher(new PgEventLogStore(client), { tenantId, traceId: "decision-relay", producer: "decision" });
     const relay = new OutboxService(outbox, publisher, { tenantId, traceId: "decision-relay", producer: "decision" });
@@ -64,14 +69,7 @@ async function bootstrap(): Promise<void> {
 
   if (process.env.SERVICE_MODE === "http") {
     const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
-    const fetchRainProbability = async (): Promise<number | undefined> => {
-      try {
-        const res = await fetch(`${weatherUrl}/api/v1/weather/forecast?days=1`, { signal: AbortSignal.timeout(2000) });
-        if (!res.ok) return undefined;
-        const json = (await res.json()) as { data?: { forecast?: Array<{ rainProbability: number }> } };
-        return json.data?.forecast?.[0]?.rainProbability;
-      } catch { return undefined; }
-    };
+    const fetchRainProbability = createRainProbabilityFetcher(weatherUrl);
     const server = createDecisionHttpServer({ fetchRainProbability });
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（内存实现）", { port }));
     return;

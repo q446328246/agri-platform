@@ -58,7 +58,7 @@
           <el-button type="danger" :disabled="!selectedIds.length" @click="handleBatchDelete">
             <el-icon><Delete /></el-icon>批量删除
           </el-button>
-          <el-button>
+          <el-button :loading="exporting" @click="handleExport">
             <el-icon><Download /></el-icon>导出
           </el-button>
         </div>
@@ -155,6 +155,7 @@ import { plotApi } from '@/api'
 import type { PlotQuery, PlotStatus, PlotType } from '@/types'
 import { PlotStatus as PS, PlotType as PT, SoilType as ST } from '@/types'
 import { formatDateTime } from '@/utils'
+import { exportCsv } from '@/utils/export'
 
 // 简单的工具函数
 const getPlotTypeText = (type: PlotType) => {
@@ -192,6 +193,8 @@ const loading = ref(false)
 const tableData = ref<any[]>([])
 const total = ref(0)
 const selectedIds = ref<string[]>([])
+const selectedRows = ref<any[]>([])
+const exporting = ref(false)
 
 const queryForm = reactive<PlotQuery>({
   page: 1,
@@ -291,7 +294,54 @@ async function handleBatchDelete() {
 }
 
 function handleSelectionChange(selection: any[]) {
+  selectedRows.value = selection
   selectedIds.value = selection.map(item => item.id)
+}
+
+const exportHeaders = ['地块编码', '地块名称', '所属片区', '地块类型', '状态', '面积(亩)', '当前作物', '负责人', '创建时间']
+
+function toExportRow(plot: any) {
+  return [
+    plot.parcelCode,
+    plot.name,
+    plot.zoneCode || '未划入',
+    getPlotTypeText(plot.type),
+    getPlotStatusText(plot.status),
+    Number(plot.areaMu ?? 0).toFixed(2),
+    plot.currentCrop || '',
+    plot.ownerName || '',
+    plot.createdAt ? formatDateTime(plot.createdAt) : ''
+  ]
+}
+
+/** 列表接口单页上限 200，按当前筛选条件逐页取全量 */
+async function fetchAllByFilter() {
+  const first = await plotApi.getList({ ...queryForm, page: 1, pageSize: 200 })
+  const items = first.items ?? first.list ?? []
+  const rows = [...items]
+  const pages = Math.ceil((first.total ?? 0) / 200)
+  for (let page = 2; page <= pages; page += 1) {
+    const res = await plotApi.getList({ ...queryForm, page, pageSize: 200 })
+    rows.push(...(res.items ?? res.list ?? []))
+  }
+  return rows
+}
+
+async function handleExport() {
+  exporting.value = true
+  try {
+    const rows = selectedRows.value.length ? selectedRows.value : await fetchAllByFilter()
+    if (!rows.length) {
+      ElMessage.warning('没有可导出的地块')
+      return
+    }
+    exportCsv(`地块列表_${formatDateTime(new Date(), 'YYYYMMDD_HHmmss')}.csv`, exportHeaders, rows.map(toExportRow))
+    ElMessage.success(`已导出 ${rows.length} 条地块`)
+  } catch (error) {
+    console.error('导出地块列表失败', error)
+  } finally {
+    exporting.value = false
+  }
 }
 
 onMounted(() => {

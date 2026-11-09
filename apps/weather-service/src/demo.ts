@@ -1,5 +1,6 @@
 import type { WeatherForecastDay, WeatherHourlyPoint } from "./forecast.repository.js";
 import type { WeatherAlert } from "./alert.repository.js";
+import { farmDate } from "./farm-time.js";
 
 /**
  * 天气演示种子：与迁移 012_weather_forecast.sql 的演示数据同一口径，
@@ -40,7 +41,7 @@ function hourlyTemperature(hour: number, tempMin: number, tempMax: number): numb
 export function demoForecastDays(now = new Date()): WeatherForecastDay[] {
   const refreshedAt = now.toISOString();
   return DAY_PLAN.map((plan, index) => {
-    const date = new Date(now.getTime() + index * 86_400_000).toISOString().slice(0, 10);
+    const date = farmDate(new Date(now.getTime() + index * 86_400_000));
     return { id: `wx-day-demo-${index + 1}`, date, city: CITY, refreshedAt, ...plan };
   });
 }

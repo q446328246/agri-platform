@@ -37,6 +37,19 @@ export function authzGuardEnabled(): boolean {
   return process.env.AUTH_GUARD_MODE === "enforce";
 }
 
+/**
+ * 服务间调用时透传网关已校验的身份头。
+ * 被调方仍按自己的策略二次判定权限，因此透传不会放大调用方的权限。
+ */
+export function identityHeaders(request: IncomingMessage): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const name of ["x-user-id", "x-permissions", "x-tenant-id"]) {
+    const value = request.headers[name]?.toString();
+    if (value) headers[name] = value;
+  }
+  return headers;
+}
+
 function normalize(pathname: string): string {
   return pathname.replace(/\/+$/, "") || "/";
 }

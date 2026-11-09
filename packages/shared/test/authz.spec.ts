@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage } from "node:http";
 import type { AuthzPolicy } from "../src/authz.js";
-import { authorizeRequest, authzGuardEnabled } from "../src/authz.js";
+import { authorizeRequest, authzGuardEnabled, identityHeaders } from "../src/authz.js";
 
 const policy: AuthzPolicy = {
   read: "plot:read",
@@ -59,5 +59,30 @@ describe("服务侧权限守卫", () => {
       message: "无权限执行该操作（需要 system:audit）",
     });
     expect(authorizeRequest(request("GET", "/api/v1/plots/audit", { "x-user-id": "user-1", "x-permissions": "system:audit" }), policy)).toBeNull();
+  });
+});
+
+describe("identityHeaders", () => {
+  it("只透传身份三项，缺失项不写空值，其余请求头不外泄", () => {
+    expect(identityHeaders(request("GET", "/api/v1/plots", {
+      "x-user-id": "user-1",
+      "x-permissions": "plot:read",
+      "x-tenant-id": "tenant-demo",
+      authorization: "Bearer secret",
+      cookie: "session=secret",
+    }))).toEqual({ "x-user-id": "user-1", "x-permissions": "plot:read", "x-tenant-id": "tenant-demo" });
+    expect(identityHeaders(request("GET", "/api/v1/plots", { "x-user-id": "user-1" }))).toEqual({ "x-user-id": "user-1" });
+    expect(identityHeaders(request("GET", "/api/v1/plots"))).toEqual({});
+  });
+
+  it("透传的身份头能让被调方守卫按原权限放行", () => {
+    vi.stubEnv("AUTH_GUARD_MODE", "enforce");
+    const inbound = request("GET", "/api/v1/plots", { "x-user-id": "user-1", "x-permissions": "plot:read" });
+    const forwarded = request("GET", "/api/v1/telemetry/latest", identityHeaders(inbound));
+    expect(authorizeRequest(forwarded, { read: "plot:read", write: "plot:write" })).toBeNull();
+    expect(authorizeRequest(forwarded, { read: "plot:write", write: "plot:write" })).toEqual({
+      status: 403,
+      message: "无权限执行该操作（需要 plot:write）",
+    });
   });
 });

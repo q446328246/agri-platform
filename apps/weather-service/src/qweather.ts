@@ -2,6 +2,7 @@ import { createPrivateKey, sign as ed25519Sign } from "node:crypto";
 import type { CreateForecastInput, WeatherHourlyPoint } from "./forecast.repository.js";
 import type { WeatherAlert, WeatherAlertLevel, WeatherAlertType } from "./alert.repository.js";
 import { newAlertId } from "./alert.repository.js";
+import { farmDate } from "./farm-time.js";
 
 /**
  * 和风天气 API 接入：可插拔的实时气象数据源，同时支持 v1（新）与 v7（旧，2026 起逐步弃用）两套接口。
@@ -291,7 +292,8 @@ export type FetchLike = (
  * sync.ts 不感知具体 API 版本。
  */
 export interface QWeatherClient {
-  fetchDaily3(): Promise<Record<string, unknown>[]>;
+  /** 日预报天数由调用方决定：v1 最多 10 天，v7 只有 3d/7d 两档 */
+  fetchDaily(days: number): Promise<Record<string, unknown>[]>;
   fetchHourly24(): Promise<Record<string, unknown>[]>;
   fetchWarning(): Promise<Record<string, unknown>[]>;
 }
@@ -335,7 +337,7 @@ function createQWeatherClientV7(resolved: ResolvedQWeatherConfig, fetchImpl: Fet
     return Array.isArray(items) ? (items as Record<string, unknown>[]) : [];
   }
   return {
-    fetchDaily3: () => call("/v7/weather/3d", "daily"),
+    fetchDaily: (days) => call(days <= 3 ? "/v7/weather/3d" : "/v7/weather/7d", "daily"),
     fetchHourly24: () => call("/v7/weather/24h", "hourly"),
     fetchWarning: () => call("/v7/warning/now", "warning"),
   };
@@ -362,8 +364,8 @@ function createQWeatherClientV1(resolved: ResolvedQWeatherConfig, fetchImpl: Fet
 
   const coord = `${resolved.latitude.toFixed(2)}/${resolved.longitude.toFixed(2)}`;
   return {
-    // v1 每日预报最多 10 天，days 参数控制；本项目取 3 天与业务对齐
-    fetchDaily3: () => call(`/weather/v1/daily/${coord}?days=3`, "days"),
+    // v1 每日预报最多 10 天，days 参数控制；默认取 7 天覆盖「今天起一周」
+    fetchDaily: (days) => call(`/weather/v1/daily/${coord}?days=${Math.max(1, Math.min(10, Math.round(days)))}`, "days"),
     // v1 逐小时最多 240 小时，hours 参数控制；本项目取 24 小时
     fetchHourly24: () => call(`/weather/v1/hourly/${coord}?hours=24`, "hours"),
     // v1 实时天气预警
@@ -426,17 +428,6 @@ export function toIsoTime(value: string | undefined): string {
   const parsed = Date.parse(value);
   if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
   return value;
-}
-
-/** v1 forecastStartTime "2024-08-10T22:00Z" → 本地日历日 YYYY-MM-DD（业务 date 字段） */
-export function toLocalDate(value: string | undefined): string {
-  const iso = toIsoTime(value);
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
 }
 
 /** v7 颜色（红/橙/黄/蓝）→ 本地三级 */
@@ -574,7 +565,7 @@ function v1DailyToInput(item: QWeatherV1DailyItem, city: string, refreshedAt: st
     ? Math.min(100, Math.max(0, Math.round(probability * 100)))
     : estimateRainProbability(daytime?.condition?.text ?? "", rainAmount);
   return {
-    date: toLocalDate(item.forecastStartTime),
+    date: farmDate(item.forecastStartTime),
     city,
     weather: daytime?.condition?.text || "未知",
     tempMin: Number(item.temperatureMin?.value ?? 0),
@@ -598,7 +589,7 @@ function v1DailyToInputFallback(item: Record<string, unknown>, city: string, ref
     ? Math.min(100, Math.max(0, Math.round(probability * 100)))
     : estimateRainProbability("", rainAmount);
   return {
-    date: toLocalDate(daily.forecastStartTime),
+    date: farmDate(daily.forecastStartTime),
     city,
     weather: "未知",
     tempMin: Number(daily.temperatureMin?.value ?? 0),

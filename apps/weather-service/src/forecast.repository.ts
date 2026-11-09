@@ -1,5 +1,6 @@
 import type { PrismaClientLike, Tx } from "@agri/db";
 import { toIsoTimestamp, ulid } from "@agri/shared";
+import { farmDate, farmDateOffset } from "./farm-time.js";
 
 /**
  * 天气预报仓储：对应文档 5.3「本地五天天气状况」。
@@ -7,7 +8,7 @@ import { toIsoTimestamp, ulid } from "@agri/shared";
  * 表结构由迁移 012_weather_forecast.sql 管理；内存实现用于单测与未启用数据库的本地模式。
  */
 
-/** 未来五日预报的一天 */
+/** 预报窗口内的一天（默认今天起七日） */
 export interface WeatherForecastDay {
   id: string;
   /** 预报日期 YYYY-MM-DD */
@@ -59,7 +60,7 @@ export interface CreateForecastInput {
 }
 
 export interface ForecastRepository {
-  /** 从指定时刻起的天窗口预报，按日期升序 */
+  /** 农场时区「今天起 days 天」窗口内的预报，按日期升序；早于今天与超出窗口的行都不返回 */
   upcoming(from: Date, days: number): Promise<WeatherForecastDay[]>;
   /** 未来 N 小时的逐小时预报，按时间升序 */
   hourly(from: Date, hours: number): Promise<WeatherHourlyPoint[]>;
@@ -123,12 +124,13 @@ export class SqlForecastRepository implements ForecastRepository {
   }
 
   async upcoming(from: Date, days: number): Promise<WeatherForecastDay[]> {
-    const start = new Date(from.getTime() - 3600_000).toISOString().slice(0, 10);
+    const span = Math.max(1, Math.min(15, days));
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `SELECT id, forecast_date, city, weather, temp_min, temp_max, wind_direction, wind_level, wind_speed, rain_probability, rain_amount, refreshed_at
-         FROM weather_forecasts WHERE forecast_date >= $1::date ORDER BY forecast_date LIMIT $2`,
-      start,
-      Math.max(1, Math.min(15, days)),
+         FROM weather_forecasts WHERE forecast_date >= $1::date AND forecast_date < $2::date ORDER BY forecast_date LIMIT $3`,
+      farmDate(from),
+      farmDateOffset(span, from),
+      span,
     );
     return rows.map(toForecastDay);
   }
@@ -242,11 +244,13 @@ export class InMemoryForecastRepository implements ForecastRepository {
   }
 
   async upcoming(from: Date, days: number): Promise<WeatherForecastDay[]> {
-    const start = new Date(from.getTime() - 3600_000).toISOString().slice(0, 10);
+    const span = Math.max(1, Math.min(15, days));
+    const start = farmDate(from);
+    const end = farmDateOffset(span, from);
     return [...this.days]
-      .filter((row) => row.date >= start)
+      .filter((row) => row.date >= start && row.date < end)
       .sort((a, b) => a.date.localeCompare(b.date))
-      .slice(0, Math.max(1, Math.min(15, days)));
+      .slice(0, span);
   }
 
   async hourly(from: Date, hours: number): Promise<WeatherHourlyPoint[]> {

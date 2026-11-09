@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { ApiResponse, PageResult } from "@agri/contracts";
-import { authorizeRequest } from "@agri/shared";
+import { authorizeRequest, identityHeaders } from "@agri/shared";
 
 import { InMemoryAlertRepository, WEATHER_ALERT_LEVELS, WEATHER_ALERT_TYPES } from "./alert.repository.js";
 import type { AlertQuery, WeatherAlert } from "./alert.repository.js";
@@ -10,6 +10,7 @@ import { demoAlerts, demoForecastDays, demoForecastHours } from "./demo.js";
 import { InMemoryForecastRepository } from "./forecast.repository.js";
 import type { ForecastRepository, WeatherForecastDay, WeatherHourlyPoint } from "./forecast.repository.js";
 import { WEATHER_METRICS, buildAdvice } from "./weather.js";
+import { farmToday } from "./farm-time.js";
 
 const API_PREFIX = "/api/v1/weather";
 const CITY = "达州市";
@@ -21,7 +22,7 @@ export interface WeatherDependencies {
   /** 气象站读数来源：遥测服务的最新读数与历史曲线 */
   telemetryUrl?: string | undefined;
   /** 单测可注入 fetch，缺省使用全局 fetch */
-  fetchReading?: (url: string) => Promise<{ data: unknown } | null>;
+  fetchReading?: (url: string, headers: Record<string, string>) => Promise<{ data: unknown } | null>;
   /** 预报数据源标识："demo" / "sql" / "qweather"；返回体透传到 dataSource 字段，便于前端展示。
    *  注意：三种模式下前端各接口读取的都是本地仓储，外部 API 只在同步器内部按周期调用 */
   source?: "demo" | "sql" | "qweather";
@@ -115,14 +116,15 @@ export function createWeatherHttpServer(dependencies: WeatherDependencies = {}):
   }
 
   /** 读取遥测服务：失败返回 null，由调用方保留兜底 */
-  async function readTelemetry(path: string): Promise<ReadingLike[] | null> {
+  async function readTelemetry(path: string, identity: Record<string, string>): Promise<ReadingLike[] | null> {
     try {
       if (dependencies.fetchReading) {
-        const payload = await dependencies.fetchReading(`${telemetryUrl}${path}`);
+        const payload = await dependencies.fetchReading(`${telemetryUrl}${path}`, identity);
         const data = payload?.data;
         return Array.isArray(data) ? (data as ReadingLike[]) : null;
       }
-      const response = await fetch(`${telemetryUrl}${path}`, { signal: AbortSignal.timeout(2500) });
+      // 部署环境服务侧守卫为 enforce，不带身份头会被遥测判 401，实时气象站与历史曲线就整块空掉
+      const response = await fetch(`${telemetryUrl}${path}`, { headers: identity, signal: AbortSignal.timeout(2500) });
       if (!response.ok) return null;
       const payload = (await response.json()) as { data?: unknown };
       return Array.isArray(payload.data) ? (payload.data as ReadingLike[]) : null;
@@ -131,13 +133,14 @@ export function createWeatherHttpServer(dependencies: WeatherDependencies = {}):
     }
   }
 
-  /** 五日 + 逐小时 + 作业提示的统一装配，forecast 与 advice 两个接口共用 */
+  /** 七日 + 逐小时 + 作业提示的统一装配，forecast 与 advice 两个接口共用 */
   async function loadOutlook(days: number, hours: number) {
     const list = await forecasts.upcoming(new Date(), days);
     const hourly = await forecasts.hourly(new Date(), hours);
     const refreshedAt = list[0]?.refreshedAt ?? new Date().toISOString();
     const advice = buildAdvice(list, hourly, CITY);
-    return { list, hourly, refreshedAt, advice };
+    // today 用农场时区给出，前端据此判定「今天」，不再把数组第一条当作今天
+    return { list, hourly, refreshedAt, advice, today: farmToday() };
   }
 
   return createServer(async (req, res) => {
@@ -194,7 +197,7 @@ export function createWeatherHttpServer(dependencies: WeatherDependencies = {}):
           : plotCode
             ? `/api/v1/telemetry/latest?plotCode=${encodeURIComponent(plotCode)}`
             : "/api/v1/telemetry/latest";
-        const readings = await readTelemetry(query);
+        const readings = await readTelemetry(query, identityHeaders(req));
         const known = (readings ?? []).filter((item) => metricKeys.includes(item.metric));
         const elements: WeatherElement[] = WEATHER_METRICS.map((metric) => {
           const hit = known.find((item) => item.metric === metric.key);
@@ -226,9 +229,9 @@ export function createWeatherHttpServer(dependencies: WeatherDependencies = {}):
         return;
       }
 
-      // 五日预报：首页面板数据，附农事作业提示（文档 5.3）
+      // 七日预报：首页面板数据，附农事作业提示（文档 5.3）
       if (req.method === "GET" && url.pathname === `${API_PREFIX}/forecast`) {
-        const days = Math.min(15, paramNumber(url.searchParams, "days") ?? 5);
+        const days = Math.min(15, paramNumber(url.searchParams, "days") ?? 7);
         const wantHours = param(url.searchParams, "hours");
         const hourLimit = wantHours === undefined ? 0 : Math.min(120, Number(wantHours) || 0);
         const outlook = await loadOutlook(days, hourLimit > 0 ? hourLimit : 24);
@@ -237,6 +240,7 @@ export function createWeatherHttpServer(dependencies: WeatherDependencies = {}):
           location: CITY,
           city: CITY,
           dataSource: src.dataSource,
+          today: outlook.today,
           forecast: outlook.list,
           refreshedAt: outlook.refreshedAt,
           headline: outlook.advice.headline,
@@ -249,7 +253,7 @@ export function createWeatherHttpServer(dependencies: WeatherDependencies = {}):
 
       // 农事作业提示：单独暴露给决策服务与首页快捷查询
       if (req.method === "GET" && url.pathname === `${API_PREFIX}/advice`) {
-        const outlook = await loadOutlook(5, 24);
+        const outlook = await loadOutlook(7, 24);
         const src = currentSource();
         send(res, 200, { location: CITY, dataSource: src.dataSource, headline: outlook.advice.headline, items: outlook.advice.items, judges: outlook.advice.judges, refreshedAt: outlook.refreshedAt }, traceId);
         return;
@@ -297,7 +301,7 @@ export function createWeatherHttpServer(dependencies: WeatherDependencies = {}):
         if (plotCode) parts.push(`plotCode=${encodeURIComponent(plotCode)}`);
         if (from) parts.push(`from=${encodeURIComponent(from)}`);
         if (to) parts.push(`to=${encodeURIComponent(endOfDay(to))}`);
-        const rows = (await readTelemetry(`/api/v1/telemetry/history?${parts.join("&")}`)) ?? [];
+        const rows = (await readTelemetry(`/api/v1/telemetry/history?${parts.join("&")}`, identityHeaders(req))) ?? [];
         const meta = WEATHER_METRICS.find((item) => item.key === metric);
         const points = rows
           .map((row) => ({ recordedAt: row.recordedAt, value: Number(row.value), unit: row.unit }))

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryAlertRepository } from "../src/alert.repository.js";
 import type { WeatherAlert } from "../src/alert.repository.js";
 import { demoAlerts, demoForecastDays, demoForecastHours } from "../src/demo.js";
+import { farmDate, farmDateOffset, farmToday } from "../src/farm-time.js";
 import { InMemoryForecastRepository } from "../src/forecast.repository.js";
 import {
   createEd25519JwtSigner,
@@ -130,6 +131,35 @@ describe("qweather 字段映射", () => {
   });
 });
 
+// ---------- 农场时区取日 ----------
+
+describe("farm-time", () => {
+  it("farmDate 固定按东八区取日，不受宿主时区影响", () => {
+    // 容器时区为 UTC：11-08T20:00Z 已是农场 11-09 凌晨
+    expect(farmDate("2026-11-08T20:00:00.000Z")).toBe("2026-11-09");
+    expect(farmDate("2026-11-09T15:59:59.000Z")).toBe("2026-11-09");
+    expect(farmDate("2026-11-09T16:00:00.000Z")).toBe("2026-11-10");
+    expect(farmDate("2026-11-06T15:00+08:00")).toBe("2026-11-06");
+    expect(farmDate("2026-11-06")).toBe("2026-11-06");
+    expect(farmDate(new Date("2026-11-08T20:00:00.000Z"))).toBe("2026-11-09");
+  });
+
+  it("farmDateOffset 跨月跨年按日历日推进，无夏令时漂移", () => {
+    const from = new Date("2026-12-30T20:00:00.000Z"); // 农场 12-31
+    expect(farmDate(from)).toBe("2026-12-31");
+    expect(farmDateOffset(1, from)).toBe("2027-01-01");
+    expect(farmDateOffset(7, from)).toBe("2027-01-07");
+    expect(farmDateOffset(-1, from)).toBe("2026-12-30");
+    expect(farmDateOffset(0, from)).toBe("2026-12-31");
+  });
+
+  it("无法解析的输入退回原串前 10 位，farmToday 给出农场当日日历日", () => {
+    expect(farmDate("not-a-date")).toBe("not-a-date");
+    expect(farmToday()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(farmToday()).toBe(farmDate(Date.now()));
+  });
+});
+
 // ---------- 客户端：mock fetch ----------
 
 describe("createQWeatherClient (v7 Deprecated)", () => {
@@ -140,21 +170,24 @@ describe("createQWeatherClient (v7 Deprecated)", () => {
       json: async () => ({ code: "403", daily: [], hourly: [], warning: [] }),
     }));
     const client = createQWeatherClient({ apiVersion: "v7", key: "test-key" }, fetchMock as never);
-    await expect(client.fetchDaily3()).rejects.toThrow(/code=403/);
+    await expect(client.fetchDaily(7)).rejects.toThrow(/code=403/);
   });
 
-  it("URL 携带 location + key，默认 host 使用 devapi.qweather.com", async () => {
+  it("URL 携带 location + key，默认 host 使用 devapi.qweather.com；天数决定 3d/7d 档位", async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
       status: 200,
       json: async () => ({ code: "200", daily: [] }),
     }));
     const client = createQWeatherClient({ apiVersion: "v7", key: "abc", locationId: "101270600" }, fetchMock as never);
-    await client.fetchDaily3();
+    await client.fetchDaily(7);
     const url = String(fetchMock.mock.calls[0]?.[0]);
-    expect(url).toContain("https://devapi.qweather.com/v7/weather/3d");
+    expect(url).toContain("https://devapi.qweather.com/v7/weather/7d");
     expect(url).toContain("location=101270600");
     expect(url).toContain("key=abc");
+
+    await client.fetchDaily(3);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("/v7/weather/3d");
   });
 
   it("HTTP 非 2xx 抛错", async () => {
@@ -170,12 +203,18 @@ describe("createQWeatherClient (v1)", () => {
   it("默认 apiVersion=v1：基于经纬度拼接 URL，带 X-QW-Api-Key 头", async () => {
     const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ days: [] }) }));
     const client = createQWeatherClient({ key: "cred-key", host: "https://ab12cd34.nx.qweatherapi.com", latitude: 31.21, longitude: 107.5 }, fetchMock as never);
-    await client.fetchDaily3();
+    await client.fetchDaily(7);
     const url = String(fetchMock.mock.calls[0]?.[0]);
     const init = fetchMock.mock.calls[0]?.[1] as { headers?: Record<string, string> } | undefined;
     expect(url).toContain("https://ab12cd34.nx.qweatherapi.com/weather/v1/daily/31.21/107.50");
-    expect(url).toContain("days=3");
+    expect(url).toContain("days=7");
     expect(init?.headers?.["X-QW-Api-Key"]).toBe("cred-key");
+
+    // v1 每日预报上限 10 天，越界值收敛到边界而不是报错
+    await client.fetchDaily(30);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("days=10");
+    await client.fetchDaily(0);
+    expect(String(fetchMock.mock.calls[2]?.[0])).toContain("days=1");
   });
 
   it("提供 jwt 时走 Authorization: Bearer，优先于 key", async () => {
@@ -207,7 +246,7 @@ describe("createQWeatherClient (v1)", () => {
       json: async () => ({ error: { title: "Invalid Key", detail: "The provided key is invalid." } }),
     }));
     const client = createQWeatherClient({ host: "https://ab12cd34.nx.qweatherapi.com", key: "bad" }, fetchMock as never);
-    await expect(client.fetchDaily3()).rejects.toThrow(/401 \(Invalid Key\): The provided key is invalid\./);
+    await expect(client.fetchDaily(7)).rejects.toThrow(/401 \(Invalid Key\): The provided key is invalid\./);
   });
 });
 
@@ -229,6 +268,8 @@ describe("v1 mapper", () => {
   it("mapDaily v1：从 daytime 提取温度/风/降水，probability [0,1] → [0,100]，m/s 不变", () => {
     const mapper = getQWeatherMapper("v1");
     const mapped = mapper.mapDaily(v1Daily as unknown as Record<string, unknown>, "达州市", "2026-11-06T00:00:00.000Z");
+    // 和风 v1 的 22:00Z 已是农场次日 06:00，取日必须按东八区，否则整周预报前移一天
+    expect(mapped.date).toBe("2026-11-07");
     expect(mapped.weather).toBe("小雨");
     expect(mapped.tempMax).toBeCloseTo(29.94, 2);
     expect(mapped.tempMin).toBeCloseTo(20.93, 2);
@@ -304,8 +345,11 @@ describe("createWeatherSyncer", () => {
   });
 
   function fakeClient(overrides: Partial<{ daily: QWeatherDailyItem[]; hourly: QWeatherHourlyItem[]; warning: QWeatherWarningItem[]; error?: Error }> = {}) {
+    const requestedDays: number[] = [];
     return {
-      fetchDaily3: async () => {
+      requestedDays,
+      fetchDaily: async (days: number) => {
+        requestedDays.push(days);
         if (overrides.error) throw overrides.error;
         return overrides.daily ?? [];
       },
@@ -320,30 +364,38 @@ describe("createWeatherSyncer", () => {
     };
   }
 
-  it("syncForecastNow 把 daily 落到 weather_forecasts（同日覆盖、新日追加），并把 hourly upsert", async () => {
+  it("syncForecastNow 默认拉取今天起 7 天，把 daily 落到 weather_forecasts（同日覆盖、新日追加），并把 hourly upsert", async () => {
     const before = await forecasts.count();
+    const today = farmToday();
+    const tomorrow = farmDateOffset(1);
     const daily: QWeatherDailyItem[] = [
-      { fxDate: "2026-11-06", tempMax: "28", tempMin: "18", textDay: "小雨", windDirDay: "东北风", windScaleDay: "≤3", windSpeedDay: "10", precip: "3.5" },
-      { fxDate: "2026-11-07", tempMax: "24", tempMin: "15", textDay: "晴", windDirDay: "东风", windScaleDay: "3-4", windSpeedDay: "12", precip: "0" },
+      { fxDate: today, tempMax: "28", tempMin: "18", textDay: "小雨", windDirDay: "东北风", windScaleDay: "≤3", windSpeedDay: "10", precip: "3.5" },
+      { fxDate: tomorrow, tempMax: "24", tempMin: "15", textDay: "晴", windDirDay: "东风", windScaleDay: "3-4", windSpeedDay: "12", precip: "0" },
     ];
+    // 时次锚到当前时间的下一个整点，容器时区（UTC）与农场时区不同也不会落到查询窗口外
+    const nextHour = new Date(Math.ceil((Date.now() + 3_600_000) / 3_600_000) * 3_600_000).toISOString();
     const hourly: QWeatherHourlyItem[] = [
-      { fxTime: "2026-11-06T16:00+08:00", temp: "22", text: "晴", windDir: "东", windSpeed: "5", humidity: "70", precip: "0", pop: "10" },
+      { fxTime: nextHour, temp: "22", text: "晴", windDir: "东", windSpeed: "5", humidity: "70", precip: "0", pop: "10" },
     ];
-    const syncer = createWeatherSyncer({ client: fakeClient({ daily, hourly }), mapper: getQWeatherMapper("v7"), forecasts, alerts, city: "达州市", logger });
+    const client = fakeClient({ daily, hourly });
+    const syncer = createWeatherSyncer({ client, mapper: getQWeatherMapper("v7"), forecasts, alerts, city: "达州市", logger });
 
     await syncer.syncForecastNow();
 
+    expect(client.requestedDays).toEqual([7]);
+
     const after = await forecasts.count();
-    // 首日与 2026-11-06 demo 同日覆盖，2026-11-07 若已在 demo 里也是覆盖；至少不应新增超过 2 天
+    // 今天与 demo 种子同日覆盖，明天若已在 demo 里也是覆盖；至少不应新增超过 2 天
     expect(after).toBeLessThanOrEqual(before + 1);
 
-    const list = await forecasts.upcoming(new Date(), 5);
+    const list = await forecasts.upcoming(new Date(), 7);
     const firstDay = list[0];
+    expect(firstDay?.date).toBe(today);
     expect(firstDay?.weather).toBe("小雨");
     expect(firstDay?.rainAmount).toBe(3.5);
 
     const hourList = await forecasts.hourly(new Date(), 24);
-    const target = hourList.find((h) => h.hourAt.startsWith("2026-11-06T08:00"));
+    const target = hourList.find((h) => h.hourAt === nextHour);
     expect(target?.weather).toBe("晴");
     expect(target?.rainProbability).toBe(10);
 
@@ -351,7 +403,27 @@ describe("createWeatherSyncer", () => {
     expect(stats.dataSource).toBe("qweather");
     expect(stats.forecastSyncCount).toBe(1);
     expect(stats.lastForecastError).toBeUndefined();
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("和风"), expect.objectContaining({ daily: 2 }));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("和风"), expect.objectContaining({ days: 7, daily: 2 }));
+  });
+
+  it("forecastDays 可配且收敛到 1~10；同步保留早于今天的旧行，由查询窗口挡掉", async () => {
+    const yesterday = farmDateOffset(-1);
+    await forecasts.upsertDay({
+      date: yesterday, city: "达州市", weather: "阴", tempMin: 12, tempMax: 20,
+      windDirection: "北风", windLevel: 2, windSpeed: 3, rainProbability: 10, rainAmount: 0,
+      refreshedAt: new Date().toISOString(),
+    });
+    const client = fakeClient();
+    const syncer = createWeatherSyncer({
+      client, forecasts, alerts, city: "达州市", logger, forecastDays: 30,
+    });
+    await syncer.syncForecastNow();
+    // v1 每日预报上限 10 天
+    expect(client.requestedDays).toEqual([10]);
+    expect(forecasts.all().some((row) => row.date === yesterday)).toBe(true);
+    const list = await forecasts.upcoming(new Date(), 7);
+    expect(list.some((row) => row.date === yesterday)).toBe(false);
+    expect(list.every((row) => row.date >= farmToday() && row.date < farmDateOffset(7))).toBe(true);
   });
 
   it("syncAlertsNow 幂等落库并把和风已撤销的 QW-* 预警自动 deactivate", async () => {
@@ -415,7 +487,7 @@ describe("createWeatherSyncer", () => {
     let forecastCalls = 0;
     let warningCalls = 0;
     const client = {
-      fetchDaily3: async () => { forecastCalls += 1; return []; },
+      fetchDaily: async () => { forecastCalls += 1; return []; },
       fetchHourly24: async () => [],
       fetchWarning: async () => { warningCalls += 1; return []; },
     };
@@ -447,7 +519,7 @@ describe("createWeatherSyncer", () => {
   it("今日调用达到 dailyCallLimit 时后续 sync 直接跳过，不再请求外部", async () => {
     let calls = 0;
     const client = {
-      fetchDaily3: async () => { calls += 1; return []; },
+      fetchDaily: async () => { calls += 1; return []; },
       fetchHourly24: async () => [],
       fetchWarning: async () => [],
     };
@@ -468,7 +540,7 @@ describe("createWeatherSyncer", () => {
     let currentDate = new Date(2026, 10, 6, 23, 59, 0);
     let calls = 0;
     const client = {
-      fetchDaily3: async () => { calls += 1; return []; },
+      fetchDaily: async () => { calls += 1; return []; },
       fetchHourly24: async () => [],
       fetchWarning: async () => [],
     };
@@ -493,7 +565,7 @@ describe("createWeatherSyncer", () => {
     let daily = 0;
     let warning = 0;
     const client = {
-      fetchDaily3: async () => { daily += 1; return []; },
+      fetchDaily: async () => { daily += 1; return []; },
       fetchHourly24: async () => [],
       fetchWarning: async () => { warning += 1; return []; },
     };
@@ -523,8 +595,9 @@ describe("createWeatherSyncer", () => {
 });
 
 describe("buildSyncerOptionsFromEnv", () => {
-  it("未配置时返回空对象，由 createWeatherSyncer 默认采用每日一次", () => {
+  it("未配置时返回空对象，由 createWeatherSyncer 默认采用每日一次、拉取 7 天", () => {
     const options = buildSyncerOptionsFromEnv({});
+    expect(options.forecastDays).toBeUndefined();
     expect(options.forecastRefreshMinutes).toBeUndefined();
     expect(options.alertRefreshMinutes).toBeUndefined();
     expect(options.dailyCallLimit).toBeUndefined();
@@ -532,17 +605,20 @@ describe("buildSyncerOptionsFromEnv", () => {
 
   it("配置时透传为正数，非法值回落 undefined", () => {
     const options = buildSyncerOptionsFromEnv({
+      QWEATHER_FORECAST_DAYS: "7",
       QWEATHER_FORECAST_REFRESH_MINUTES: "1440",
       QWEATHER_ALERT_REFRESH_MINUTES: "180",
       QWEATHER_HOURLY_RETAIN_HOURS: "72",
       QWEATHER_DAILY_CALL_LIMIT: "20",
     });
+    expect(options.forecastDays).toBe(7);
     expect(options.forecastRefreshMinutes).toBe(1440);
     expect(options.alertRefreshMinutes).toBe(180);
     expect(options.hourlyRetainHours).toBe(72);
     expect(options.dailyCallLimit).toBe(20);
 
-    const bad = buildSyncerOptionsFromEnv({ QWEATHER_FORECAST_REFRESH_MINUTES: "abc", QWEATHER_DAILY_CALL_LIMIT: "-1" });
+    const bad = buildSyncerOptionsFromEnv({ QWEATHER_FORECAST_DAYS: "0", QWEATHER_FORECAST_REFRESH_MINUTES: "abc", QWEATHER_DAILY_CALL_LIMIT: "-1" });
+    expect(bad.forecastDays).toBeUndefined();
     expect(bad.forecastRefreshMinutes).toBeUndefined();
     expect(bad.dailyCallLimit).toBeUndefined();
   });
@@ -657,7 +733,7 @@ describe("createQWeatherClient (v1 JWT signer)", () => {
       { host: "https://ab12cd34.nx.qweatherapi.com", jwt: "static-should-be-ignored", jwtSigner: signer },
       fetchMock as never,
     );
-    await client.fetchDaily3();
+    await client.fetchDaily(7);
     const init = fetchMock.mock.calls[0]?.[1] as { headers?: Record<string, string> } | undefined;
     const auth = init?.headers?.["Authorization"] ?? "";
     expect(auth.startsWith("Bearer ")).toBe(true);

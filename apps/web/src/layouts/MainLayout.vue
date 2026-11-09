@@ -1,5 +1,5 @@
 <template>
-  <div class="layout-root">
+  <div class="layout-root" :class="{ 'has-back': showBack }">
     <router-view />
     <button v-if="showBack" class="detach-back" type="button" @click="goMap">‹ 返回一张图</button>
   </div>
@@ -27,6 +27,10 @@ function goMap() {
   inset: 0;
   overflow: auto;
   background: #f0f2f5;
+}
+/* 返回按钮是浮在左上角的，页面内容整体下移一格，避免压住卡片标题 */
+.layout-root.has-back {
+  padding-top: 52px;
 }
 .detach-back {
   position: fixed;

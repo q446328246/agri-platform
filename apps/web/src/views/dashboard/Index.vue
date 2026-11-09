@@ -103,7 +103,7 @@
         <span class="wx-alert-dot"></span>预警 {{ weather.alertTotal }}
       </div>
       <div v-if="weather.today" class="wx-main">
-        <div class="wx-date">{{ weather.today.date }}<span class="wx-week">{{ weather.today.week }}</span></div>
+        <div class="wx-date">{{ weather.today.date.slice(5) }}<span class="wx-week">{{ weather.today.week }}</span></div>
         <div class="wx-temp">{{ weather.today.tempMax }}<small>°C</small></div>
         <div class="wx-cond">
           <span class="wx-icon" v-html="weatherIcon(weather.today.weather)"></span>
@@ -113,9 +113,10 @@
         <div v-if="weather.realtime" class="wx-realtime">实时 {{ weather.realtime }}</div>
       </div>
       <div v-else class="wx-empty">{{ weather.message }}</div>
-      <div v-if="weather.days.length > 1" class="wx-strip">
-        <div v-for="d in weather.days.slice(1, 5)" :key="d.date" class="wx-day">
+      <div v-if="weather.upcoming.length" class="wx-strip">
+        <div v-for="d in weather.upcoming" :key="d.date" class="wx-day">
           <span class="wx-day-label">{{ d.week }}</span>
+          <span class="wx-day-date">{{ d.date.slice(5) }}</span>
           <span class="wx-icon sm" v-html="weatherIcon(d.weather)"></span>
           <span class="wx-day-temp">{{ d.tempMax }}°</span>
         </div>
@@ -325,8 +326,13 @@ function handleMenu(item: MenuItem) {
 
 // ---------- 天气卡片 ----------
 const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-const weather = reactive<{ today: WxDay | null; days: WxDay[]; message: string; realtime: string; alertTotal: number }>({ today: null, days: [], message: '气象数据加载中', realtime: '', alertTotal: 0 })
+const weather = reactive<{ today: WxDay | null; days: WxDay[]; upcoming: WxDay[]; message: string; realtime: string; alertTotal: number }>({ today: null, days: [], upcoming: [], message: '气象数据加载中', realtime: '', alertTotal: 0 })
 interface WxDay { date: string; week: string; weather: string; tempMin: number; tempMax: number; windDirection: string; windLevel: number }
+/** 按日历日算星期，锚到 UTC 避免观看者时区把星期挪一天 */
+function weekOf(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`)
+  return Number.isFinite(d.getTime()) ? WEEK[d.getUTCDay()] ?? date.slice(5) : date.slice(5)
+}
 function weatherIcon(text: string): string {
   const t = text || ''
   if (t.includes('雷')) return icon('M13 2 4 14h6l-1 8 9-12h-6l1-8Z')
@@ -337,18 +343,19 @@ function weatherIcon(text: string): string {
 }
 async function loadWeather() {
   try {
-    const res = await weatherApi.getForecast({ days: 5 })
+    const res = await weatherApi.getForecast({ days: 7 })
     const list: any[] = res?.forecast ?? []
     if (!list.length) {
       weather.message = '暂无气象预报数据'
       return
     }
-    const map = (d: any, i: number): WxDay => {
+    // 今天由后端按农场时区给出，不能拿数组第一条当今天
+    const todayStr = String(res?.today ?? '')
+    const map = (d: any): WxDay => {
       const date = String(d.date ?? '')
-      const dt = new Date(date)
       return {
-        date: date.slice(5),
-        week: i === 0 ? '今天' : Number.isFinite(dt.getTime()) ? WEEK[dt.getDay()] as string : date.slice(5),
+        date,
+        week: date === todayStr ? '今天' : weekOf(date),
         weather: d.weather ?? '—',
         tempMin: Number(d.tempMin ?? 0),
         tempMax: Number(d.tempMax ?? 0),
@@ -357,7 +364,9 @@ async function loadWeather() {
       }
     }
     weather.days = list.map(map)
-    weather.today = weather.days[0] ?? null
+    weather.today = weather.days.find((d) => d.date === todayStr) ?? null
+    weather.upcoming = weather.days.filter((d) => d.date !== todayStr).slice(0, 6)
+    weather.message = weather.today ? '' : '今日预报尚未同步'
   } catch {
     weather.message = '气象数据暂不可用'
   }
@@ -615,6 +624,9 @@ function editLineOnMap(line: InfraLine) {
   const cat = categorize(line.lineType)
   if (cat !== 'ROAD' && !lineState[cat]) toggleLine(cat)
   map?.closePopup()
+  // 列表浮层压住右半屏，不收起来的话线和拖拽手柄都落在面板底下点不到
+  openPanels.value = []
+  activePanel.value = ''
   shapeEditor.value?.editLine({
     code: line.lineCode, name: line.lineName, lineType: line.lineType, points: lineDraftPoints(line),
   })
@@ -948,6 +960,7 @@ onUnmounted(() => {
 .wx-icon.sm { color: #ffd54f; }
 .wx-strip { display: flex; gap: 14px; padding-left: 16px; border-left: 1px solid rgba(0,212,255,.2); }
 .wx-day { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #b6d2de; font-size: 12px; }
+.wx-day-date { color: #7fa3b3; font-size: 11px; }
 .wx-day-temp { color: #e9f4f6; }
 .wx-realtime { color: #7fe7ff; font-size: 11px; margin-top: 4px; }
 .wx-alert { position: absolute; top: -1px; right: -1px; display: flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 0 4px 0 6px; background: rgba(255, 71, 87, .92); color: #fff; font-size: 11px; font-weight: 600; }

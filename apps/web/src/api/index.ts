@@ -324,8 +324,13 @@ export const iotApi = {
   getDevice(id: string): Promise<any> {
     return get<any>(`/devices/${encodeURIComponent(id)}`)
   },
-  sendCommand(id: string, command: Record<string, unknown>): Promise<any> {
-    return post<any>(`/devices/${encodeURIComponent(id)}/commands`, command)
+  /** 登记新设备：deviceNo 台账内唯一，type/status 取值见 utils/device.ts；返回的 lastSeenAt 为 null 表示尚未上报 */
+  createDevice(data: { deviceNo: string; name: string; type: string; status: 'ONLINE' | 'OFFLINE'; plotCode?: string | undefined }): Promise<any> {
+    return post<any>('/devices', data)
+  },
+  /** 台账配置编辑：字段省略即不改，plotCode 传空串表示解绑地块；设备编号不可改 */
+  updateDevice(id: string, data: { name?: string; type?: string; status?: 'ONLINE' | 'OFFLINE'; plotCode?: string }): Promise<any> {
+    return put<any>(`/devices/${encodeURIComponent(id)}`, data)
   }
 }
 
@@ -481,6 +486,10 @@ export const operationApi = {
   createTask(data: { plotCode: string; type: string; name: string; scheduledAt?: string }): Promise<any> {
     return post<any>('/farm-tasks', data)
   },
+  /** 单条任务详情：含 startedAt/completedAt 实际作业时间，不存在时服务端返回 404 */
+  getTask(id: string): Promise<any> {
+    return get<any>(`/farm-tasks/${encodeURIComponent(id)}`)
+  },
   updateStatus(id: string, status: string): Promise<any> {
     return post<any>(`/farm-tasks/${id}/status`, { status })
   },
@@ -534,7 +543,8 @@ export const controlApi = {
   getCommands(params?: { plotCode?: string; origin?: 'EVENT' | 'MANUAL'; type?: string; status?: string; deviceId?: string; from?: string; to?: string; page?: number; size?: number }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/control/commands', cleanParams(params))
   },
-  sendCommand(data: { deviceId: string; plotCode?: string; type: string; parameters?: Record<string, unknown> }): Promise<any> {
+  /** 人工下发控制指令：需二次确认头，reason 写明处置依据供指令列表与生产档案复盘 */
+  sendCommand(data: { deviceId: string; plotCode?: string; type: string; parameters?: Record<string, unknown>; reason?: string }): Promise<any> {
     return post<any>('/control/commands', data, { headers: { 'X-Confirm-Action': 'CONFIRM' } })
   },
   /** 变量灌溉方案预演：只算不执行，返回分区时序与累计供水曲线 */

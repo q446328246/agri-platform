@@ -105,15 +105,63 @@
       </el-form>
       <template #footer><el-button @click="createVisible = false">取消</el-button><el-button type="primary" :loading="creating" @click="submitCreate">创建</el-button></template>
     </el-dialog>
+    <el-dialog v-model="detailVisible" title="农事任务详情" width="760px">
+      <div v-loading="detailLoading">
+        <el-descriptions v-if="taskDetail" :column="2" border>
+          <el-descriptions-item label="任务名称">{{ taskDetail.name }}</el-descriptions-item>
+          <el-descriptions-item label="任务类型">{{ getTaskTypeText(taskDetail.type) }}</el-descriptions-item>
+          <el-descriptions-item label="状态">
+            <el-tag :type="getTaskStatusType(displayStatus(taskDetail.status))" size="small">
+              {{ getTaskStatusText(displayStatus(taskDetail.status)) }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="所属地块">{{ taskPlot ? `${taskPlot.parcelName}（${taskDetail.plotCode}）` : taskDetail.plotCode || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="地块面积">{{ taskPlot ? `${taskPlot.areaMu.toFixed(2)} 亩` : '-' }}</el-descriptions-item>
+          <el-descriptions-item label="计划时间">{{ formatDateTime(taskDetail.scheduledAt) }}</el-descriptions-item>
+          <el-descriptions-item label="开始作业">{{ formatDateTime(taskDetail.startedAt) }}</el-descriptions-item>
+          <el-descriptions-item label="完成作业">{{ formatDateTime(taskDetail.completedAt) }}</el-descriptions-item>
+          <el-descriptions-item label="创建时间">{{ formatDateTime(taskDetail.createdAt) }}</el-descriptions-item>
+          <el-descriptions-item label="任务编号">{{ taskDetail.id }}</el-descriptions-item>
+        </el-descriptions>
+
+        <div class="detail-subtitle">该地块控制指令</div>
+        <el-table v-if="taskCommands.length" :data="taskCommands" size="small" border>
+          <el-table-column label="类型" width="80">
+            <template #default="{ row }">{{ getControlTypeText(row.type) }}</template>
+          </el-table-column>
+          <el-table-column label="来源" width="80" align="center">
+            <template #default="{ row }">
+              <el-tag :type="getControlOriginType(row.origin)" size="small" effect="dark">{{ getControlOriginText(row.origin) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="90" align="center">
+            <template #default="{ row }">
+              <el-tag :type="getControlStatusType(row.status)" size="small">{{ getControlStatusText(row.status) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="deviceId" label="执行设备" min-width="150" show-overflow-tooltip />
+          <el-table-column prop="reason" label="缘由" min-width="200" show-overflow-tooltip />
+          <el-table-column label="下达时间" width="160">
+            <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else :description="taskDetail?.plotCode ? '该地块暂无控制指令' : '任务未绑定地块，无从关联指令'" :image-size="60" />
+      </div>
+      <template #footer>
+        <el-button v-if="taskDetail && taskDetail.plotCode" @click="goCommands">查看全部指令</el-button>
+        <el-button type="primary" @click="detailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import type { FarmTaskQuery } from '@/types'
-import { formatDateTime, getTaskStatusText, getTaskStatusType } from '@/utils'
-import { operationApi } from '@/api'
+import type { FarmTaskQuery, FarmTaskStatus } from '@/types'
+import { formatDateTime, getControlOriginText, getControlOriginType, getControlStatusText, getControlStatusType, getControlTypeText, getTaskStatusText, getTaskStatusType } from '@/utils'
+import { controlApi, operationApi, plotApi } from '@/api'
 
 const getTaskTypeText = (type: string) => {
   const map: Record<string, string> = {
@@ -211,8 +259,46 @@ async function submitCreate() {
   try { await operationApi.createTask(createForm); ElMessage.success('任务已创建'); createVisible.value = false; await fetchList() } catch (error) { console.error('任务创建失败', error) } finally { creating.value = false }
 }
 
-function showDetail(row: { name: string; plotCode: string; status: string }) { ElMessage.info(`${row.name}：${row.plotCode}，状态 ${getTaskStatusText(row.status as any)}`) }
+/* ---------------- 任务详情 ---------------- */
 
+const router = useRouter()
+const detailVisible = ref(false)
+const detailLoading = ref(false)
+const taskDetail = ref<any | null>(null)
+const taskPlot = ref<{ parcelCode: string; parcelName: string; areaMu: number } | null>(null)
+const taskCommands = ref<any[]>([])
+
+/** 服务端用 RUNNING，页面与筛选统一显示「进行中」，与列表同口径 */
+function displayStatus(status: string): FarmTaskStatus {
+  return (status === 'RUNNING' ? 'IN_PROGRESS' : status) as FarmTaskStatus
+}
+
+async function showDetail(row: { id: string }) {
+  detailVisible.value = true
+  detailLoading.value = true
+  taskDetail.value = null
+  taskPlot.value = null
+  taskCommands.value = []
+  try {
+    const task = await operationApi.getTask(row.id)
+    taskDetail.value = task
+    // 地块档案与指令分属地块、控制两个服务，任一侧取不到只让对应区块显示空态，不影响任务本身
+    const [plots, commands] = await Promise.all([
+      task.plotCode ? plotApi.getBounds().catch(() => []) : Promise.resolve([]),
+      task.plotCode ? controlApi.getCommands({ plotCode: task.plotCode, size: 50 }).catch(() => ({ items: [] as any[] })) : Promise.resolve({ items: [] as any[] })
+    ])
+    taskPlot.value = plots.find((plot) => plot.parcelCode === task.plotCode) ?? null
+    taskCommands.value = commands.items
+  } catch (error) {
+    console.error('任务详情加载失败', error)
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+function goCommands() {
+  void router.push('/device/commands')
+}
 async function handleStatus(row: { id: string; status: string }, status: string) {
   try {
     await operationApi.updateStatus(row.id, status)
@@ -227,3 +313,12 @@ onMounted(() => {
   fetchList()
 })
 </script>
+
+<style scoped>
+.detail-subtitle {
+  margin: 16px 0 8px;
+  color: #303133;
+  font-size: 14px;
+  font-weight: 600;
+}
+</style>

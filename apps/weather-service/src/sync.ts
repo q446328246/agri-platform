@@ -45,6 +45,8 @@ export interface WeatherSyncerConfig {
   alerts: AlertRepositoryLike;
   city: string;
   logger: SyncLogger;
+  /** 日预报拉取天数，默认 7（今天起一周）；v1 上限 10 天，v7 超过 3 天走 7d 档 */
+  forecastDays?: number;
   /** 预报/逐小时刷新间隔分钟，默认 1440（每日一次，与和风免费额度对齐） */
   forecastRefreshMinutes?: number;
   /** 预警刷新间隔分钟，默认 1440（每日一次）；若关注突发灾害可调短，仍在免费额度内 */
@@ -96,6 +98,7 @@ function localDate(d: Date): string {
 }
 
 export function createWeatherSyncer(config: WeatherSyncerConfig): WeatherSyncer {
+  const forecastDays = Math.max(1, Math.min(10, config.forecastDays ?? 7));
   const forecastIntervalMs = Math.max(1, config.forecastRefreshMinutes ?? 1440) * 60_000;
   const alertIntervalMs = Math.max(1, config.alertRefreshMinutes ?? 1440) * 60_000;
   const retainHours = Math.max(6, config.hourlyRetainHours ?? 72);
@@ -164,7 +167,8 @@ export function createWeatherSyncer(config: WeatherSyncerConfig): WeatherSyncer 
   async function performForecastSync(): Promise<void> {
     const refreshedAt = new Date().toISOString();
     try {
-      const [daily, hourly] = await Promise.all([config.client.fetchDaily3(), config.client.fetchHourly24()]);
+      const [daily, hourly] = await Promise.all([config.client.fetchDaily(forecastDays), config.client.fetchHourly24()]);
+      // 早于今天的旧行（含迁移演示种子）刻意保留，由查询侧的「今天起 N 天」窗口挡掉，便于回溯历史预报
       for (const item of daily) {
         await config.forecasts.upsertDay(mapper.mapDaily(item, config.city, refreshedAt));
       }
@@ -179,7 +183,7 @@ export function createWeatherSyncer(config: WeatherSyncerConfig): WeatherSyncer 
       stats.lastForecastError = undefined;
       stats.forecastSyncCount += 1;
       stats.dataSource = "qweather";
-      config.logger.info("和风天气同步完成", { daily: daily.length, hourly: hourly.length });
+      config.logger.info("和风天气同步完成", { days: forecastDays, daily: daily.length, hourly: hourly.length });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       stats.lastForecastError = message;
@@ -404,14 +408,18 @@ function parseNumberOption<T>(value: string | undefined, build: (n: number) => T
   return Number.isFinite(n) ? build(n) : {};
 }
 
-/** 从环境变量解析同步器扩展配置（刷新间隔与每日上限） */
-export function buildSyncerOptionsFromEnv(env: NodeJS.ProcessEnv): Pick<WeatherSyncerConfig, "forecastRefreshMinutes" | "alertRefreshMinutes" | "hourlyRetainHours" | "dailyCallLimit"> {
+type SyncerEnvOptions = Pick<WeatherSyncerConfig, "forecastDays" | "forecastRefreshMinutes" | "alertRefreshMinutes" | "hourlyRetainHours" | "dailyCallLimit">;
+
+/** 从环境变量解析同步器扩展配置（拉取天数、刷新间隔与每日上限） */
+export function buildSyncerOptionsFromEnv(env: NodeJS.ProcessEnv): SyncerEnvOptions {
   const num = (value: string | undefined): number | undefined => {
     if (!value) return undefined;
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
   };
-  const options: Pick<WeatherSyncerConfig, "forecastRefreshMinutes" | "alertRefreshMinutes" | "hourlyRetainHours" | "dailyCallLimit"> = {};
+  const options: SyncerEnvOptions = {};
+  const days = num(env.QWEATHER_FORECAST_DAYS);
+  if (days !== undefined) options.forecastDays = days;
   const forecast = num(env.QWEATHER_FORECAST_REFRESH_MINUTES);
   if (forecast !== undefined) options.forecastRefreshMinutes = forecast;
   const alert = num(env.QWEATHER_ALERT_REFRESH_MINUTES);

@@ -23,18 +23,20 @@
     <!-- 作业提示 -->
     <el-alert v-if="headline" :title="headline" type="info" show-icon :closable="false" class="mb-16" />
 
-    <!-- 五日预报卡片 -->
-    <el-row :gutter="12" class="forecast-row">
-      <el-col v-for="day in forecastDays" :key="day.date" :span="4" class="forecast-col">
-        <div class="forecast-card">
-          <div class="fc-date">{{ day.date.slice(5) }} {{ isToday(day.date) ? '今天' : '' }}</div>
-          <div class="fc-weather">{{ day.weather }}</div>
-          <div class="fc-temp">{{ day.tempMin }}~{{ day.tempMax }}°C</div>
-          <div class="fc-wind">{{ day.windDirection }} {{ day.windLevel }}级</div>
-          <div class="fc-rain">降水 {{ day.rainProbability }}%</div>
+    <!-- 七日预报卡片：今天起一周，日期与「今天」都由后端按农场时区给出 -->
+    <div class="forecast-row">
+      <div v-for="day in forecastDays" :key="day.date" :class="['forecast-card', { 'fc-today': isToday(day.date) }]">
+        <div class="fc-date">
+          {{ day.date.slice(5) }}
+          <span v-if="isToday(day.date)" class="fc-today-tag">今天</span>
+          <span v-else class="fc-week">{{ weekOf(day.date) }}</span>
         </div>
-      </el-col>
-    </el-row>
+        <div class="fc-weather">{{ day.weather }}</div>
+        <div class="fc-temp">{{ day.tempMin }}~{{ day.tempMax }}°C</div>
+        <div class="fc-wind">{{ day.windDirection }} {{ day.windLevel }}级</div>
+        <div class="fc-rain">降水 {{ day.rainProbability }}%</div>
+      </div>
+    </div>
 
     <!-- 逐要素适宜性 -->
     <el-card v-if="judges.length" shadow="never" class="mt-16">
@@ -166,7 +168,15 @@ function fmt(iso: string): string {
   const d = new Date(iso)
   return `${d.getMonth() + 1}-${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
-function isToday(date: string): boolean { return date === new Date().toISOString().slice(0, 10) }
+const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+/** 今天由后端按农场时区给出，浏览器时区与农场不一致时也不会误标 */
+const today = ref('')
+function isToday(date: string): boolean { return date === today.value }
+/** 按日历日算星期，锚到 UTC 避免观看者时区把星期挪一天 */
+function weekOf(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`)
+  return Number.isFinite(d.getTime()) ? WEEK[d.getUTCDay()] ?? '' : ''
+}
 
 const loading = ref(false)
 const headline = ref('')
@@ -190,11 +200,12 @@ async function loadAll() {
   loading.value = true
   try {
     const [forecast, alerts, metrics] = await Promise.all([
-      weatherApi.getForecast({ days: 5, hours: 24 }),
+      weatherApi.getForecast({ days: 7, hours: 24 }),
       weatherApi.getAlerts({ page: 1, size: 10 }),
       weatherApi.getMetrics()
     ])
     forecastDays.value = forecast.forecast ?? []
+    today.value = forecast.today ?? ''
     headline.value = forecast.headline ?? ''
     judges.value = forecast.judges ?? []
     hourlyList.value = forecast.hourly ?? []
@@ -234,10 +245,12 @@ onMounted(() => { loadAll(); if (canSync.value) refreshSyncStatus() })
 .mb-16 { margin-bottom: 16px; }
 .mt-16 { margin-top: 16px; }
 .mt-8 { margin-top: 8px; }
-.forecast-row { margin-top: 12px; }
-.forecast-col { margin-bottom: 8px; }
-.forecast-card { background: #f5f7fa; border-radius: 8px; padding: 14px 12px; text-align: center; }
+.forecast-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 12px; margin-top: 12px; }
+.forecast-card { background: #f5f7fa; border: 1px solid transparent; border-radius: 8px; padding: 14px 12px; text-align: center; }
+.fc-today { background: #ecf5ff; border-color: #d9ecff; }
 .fc-date { font-size: 13px; color: #909399; }
+.fc-today-tag { margin-left: 6px; padding: 0 5px; border-radius: 8px; background: #409eff; color: #fff; font-size: 11px; }
+.fc-week { margin-left: 6px; color: #c0c4cc; }
 .fc-weather { font-size: 18px; font-weight: 600; margin: 6px 0; }
 .fc-temp { font-size: 14px; color: #303133; }
 .fc-wind { font-size: 12px; color: #606266; margin-top: 4px; }

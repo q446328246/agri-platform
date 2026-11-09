@@ -10,17 +10,32 @@ type TaskStatus = "PENDING" | "RUNNING" | "COMPLETED" | "CANCELLED";
 type TaskType = "TILLAGE" | "SEEDING" | "IRRIGATION" | "WEEDING" | "SPRAYING" | "FERTILIZATION";
 const TASK_TYPES: TaskType[] = ["TILLAGE", "SEEDING", "IRRIGATION", "WEEDING", "SPRAYING", "FERTILIZATION"];
 const TASK_STATUSES: TaskStatus[] = ["PENDING", "RUNNING", "COMPLETED", "CANCELLED"];
-interface Task { id: string; tenantId: string; plotCode: string; type: TaskType; name: string; status: TaskStatus; scheduledAt?: string; createdAt: string }
+interface Task {
+  id: string;
+  tenantId: string;
+  plotCode: string;
+  type: TaskType;
+  name: string;
+  status: TaskStatus;
+  scheduledAt?: string;
+  createdAt: string;
+  /** 首次进入 RUNNING 的时刻 */
+  startedAt?: string;
+  /** 首次进入 COMPLETED 的时刻 */
+  completedAt?: string;
+}
 const hoursFromNow = (hours: number): string => new Date(Date.now() + hours * 3600000).toISOString();
-/** 演示农事任务：覆盖六种作业类型与四种状态，任务调度页一进就能看到排程 */
+/** 演示农事任务：覆盖六种作业类型与四种状态，任务调度页一进就能看到排程
+ * startedAt/completedAt 与状态对齐（进行中的任务按计划时间开工，已完成的补一个作业时长），
+ * 已取消的任务从未开工，不留时间戳。 */
 const tasks: Task[] = [
-  { id: "task-demo-001", tenantId: "tenant-demo", plotCode: "511723-000001-02-00005-0000-C", type: "IRRIGATION", name: "西区一号田补灌执行", status: "RUNNING", scheduledAt: hoursFromNow(-4), createdAt: hoursFromNow(-8) },
+  { id: "task-demo-001", tenantId: "tenant-demo", plotCode: "511723-000001-02-00005-0000-C", type: "IRRIGATION", name: "西区一号田补灌执行", status: "RUNNING", scheduledAt: hoursFromNow(-4), createdAt: hoursFromNow(-8), startedAt: hoursFromNow(-4) },
   { id: "task-demo-002", tenantId: "tenant-demo", plotCode: "511723-000001-01-00003-0000-T", type: "SPRAYING", name: "东区三号田病虫害喷防", status: "PENDING", scheduledAt: hoursFromNow(6), createdAt: hoursFromNow(-10) },
   { id: "task-demo-003", tenantId: "tenant-demo", plotCode: "511723-000001-03-00009-0000-J", type: "FERTILIZATION", name: "联片二号田抽穗期追肥", status: "PENDING", scheduledAt: hoursFromNow(20), createdAt: hoursFromNow(-26) },
   { id: "task-demo-004", tenantId: "tenant-demo", plotCode: "511723-000001-04-00012-0000-D", type: "TILLAGE", name: "演练田耕整地作业", status: "PENDING", scheduledAt: hoursFromNow(30), createdAt: hoursFromNow(-30) },
-  { id: "task-demo-005", tenantId: "tenant-demo", plotCode: "511723-000001-03-00010-0000-U", type: "WEEDING", name: "联片三号田除草作业", status: "RUNNING", scheduledAt: hoursFromNow(-2), createdAt: hoursFromNow(-14) },
-  { id: "task-demo-006", tenantId: "tenant-demo", plotCode: "511723-000001-01-00001-0000-5", type: "IRRIGATION", name: "东区一号田水肥一体化追肥", status: "COMPLETED", scheduledAt: hoursFromNow(-50), createdAt: hoursFromNow(-60) },
-  { id: "task-demo-007", tenantId: "tenant-demo", plotCode: "511723-000001-02-00007-0000-0", type: "SPRAYING", name: "西区三号田叶面肥喷施", status: "COMPLETED", scheduledAt: hoursFromNow(-96), createdAt: hoursFromNow(-110) },
+  { id: "task-demo-005", tenantId: "tenant-demo", plotCode: "511723-000001-03-00010-0000-U", type: "WEEDING", name: "联片三号田除草作业", status: "RUNNING", scheduledAt: hoursFromNow(-2), createdAt: hoursFromNow(-14), startedAt: hoursFromNow(-2) },
+  { id: "task-demo-006", tenantId: "tenant-demo", plotCode: "511723-000001-01-00001-0000-5", type: "IRRIGATION", name: "东区一号田水肥一体化追肥", status: "COMPLETED", scheduledAt: hoursFromNow(-50), createdAt: hoursFromNow(-60), startedAt: hoursFromNow(-50), completedAt: hoursFromNow(-46) },
+  { id: "task-demo-007", tenantId: "tenant-demo", plotCode: "511723-000001-02-00007-0000-0", type: "SPRAYING", name: "西区三号田叶面肥喷施", status: "COMPLETED", scheduledAt: hoursFromNow(-96), createdAt: hoursFromNow(-110), startedAt: hoursFromNow(-96), completedAt: hoursFromNow(-93) },
   { id: "task-demo-008", tenantId: "tenant-demo", plotCode: "511723-000001-01-00002-0000-Z", type: "SEEDING", name: "东区二号田机插秧", status: "CANCELLED", scheduledAt: hoursFromNow(-140), createdAt: hoursFromNow(-150) },
 ];
 /** 最近的导航方案；导航是瞬时计算，进程内保留 20 条供页面回看，不落库 */
@@ -47,8 +62,20 @@ export function createOperationHttpServer(): Server { return createServer(async 
   if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
   if (req.method === "GET" && url.pathname === "/api/v1/farm-tasks") { send(res, 200, page(url.searchParams), traceId); return; }
   if (req.method === "POST" && url.pathname === "/api/v1/farm-tasks") { const body = await json(req); const type = (body.type as TaskType) || "IRRIGATION"; if (!TASK_TYPES.includes(type)) { send(res, 400, null, traceId, "任务类型非法"); return; } const task: Task = { id: randomUUID(), tenantId: req.headers["x-tenant-id"]?.toString() || "tenant-demo", plotCode: String(body.plotCode ?? ""), type, name: String(body.name ?? "未命名农事任务"), status: "PENDING", createdAt: new Date().toISOString() }; if (typeof body.scheduledAt === "string") task.scheduledAt = body.scheduledAt; tasks.unshift(task); send(res, 201, task, traceId); return; }
-  const statusMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/status$/); const taskId = statusMatch?.[1];
-  if (taskId && req.method === "POST") { const body = await json(req); const task = tasks.find((item) => item.id === taskId); if (!task) { send(res, 404, null, traceId, "任务不存在"); return; } const status = body.status as TaskStatus; if (!TASK_STATUSES.includes(status)) { send(res, 400, null, traceId, "任务状态非法"); return; } task.status = status; send(res, 200, task, traceId); return; }
+  const statusMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/status$/);
+  const detailMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)$/);
+  if (statusMatch?.[1] && req.method === "POST") { const body = await json(req); const task = tasks.find((item) => item.id === statusMatch[1]); if (!task) { send(res, 404, null, traceId, "任务不存在"); return; } const status = body.status as TaskStatus; if (!TASK_STATUSES.includes(status)) { send(res, 400, null, traceId, "任务状态非法"); return; }
+    // 作业时间只在首次进入该状态时写入，重复置状态或回滚都不覆盖已发生的作业窗口
+    const occurredAt = new Date().toISOString();
+    if (status === "RUNNING" && !task.startedAt) task.startedAt = occurredAt;
+    if (status === "COMPLETED" && !task.completedAt) task.completedAt = occurredAt;
+    task.status = status; send(res, 200, task, traceId); return; }
+  if (detailMatch?.[1] && req.method === "GET") {
+    const task = tasks.find((item) => item.id === detailMatch[1]);
+    if (!task) { send(res, 404, null, traceId, "任务不存在"); return; }
+    send(res, 200, task, traceId);
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/v1/operations/path-plan") { const parsed = parseNavigationRequest(await json(req)); if (!parsed.ok || !parsed.input) { send(res, 400, null, traceId, parsed.errors.join("；")); return; } const plan = planNavigation(parsed.input); navPlans.unshift(plan); if (navPlans.length > 20) navPlans.pop(); send(res, 200, plan, traceId); return; }
   if (req.method === "GET" && url.pathname === "/api/v1/operations/path-plans") { send(res, 200, navPlans, traceId); return; }
   send(res, 404, null, traceId, "接口不存在");
