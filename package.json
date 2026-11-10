@@ -35,7 +35,8 @@
     "smoke:zones": "pnpm run build && node scripts/smoke-zones-navigation.mjs",
     "smoke:demo": "node scripts/smoke-demo-data.mjs",
     "smoke:filters": "node scripts/smoke-filters.mjs",
-    "smoke:weather": "node scripts/smoke-weather.mjs"
+    "smoke:weather": "node scripts/smoke-weather.mjs",
+    "seed:test-plots": "pnpm run build && node scripts/seed-test-plots.mjs"
   },
   "devDependencies": {
     "@nestjs/common": "^11.2.8",
