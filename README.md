@@ -60,6 +60,7 @@ pnpm --filter @agri/web dev
 | `pnpm init:minio` | 创建 S3/MinIO bucket |
 | `pnpm health:infra` | 检查 PostgreSQL 和 MinIO |
 | `pnpm db:migrate` | 使用 `DB_URL` 执行 PostgreSQL 初始化迁移 |
+| `pnpm seed:test-plots` | **会写演示库**：清掉早期验证地块，按边界几何现算面积重建三块测试地块；同名地块就地更新，可重复执行，示范数据不碰。默认 `https://localhost`，可用 `BASE_URL` 覆盖 |
 | `pnpm --filter @agri/web dev` | 启动前端开发服务器 |
 | `pnpm --filter @agri/web build` | 构建前端生产包 |
 
