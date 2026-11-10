@@ -11,7 +11,7 @@ import {
   InMemoryOutboxStore,
   OutboxService,
 } from "@agri/mq";
-import { ulid } from "@agri/shared";
+import { polygonAreaMu, roundAreaMu, ulid } from "@agri/shared";
 import { describe, expect, it } from "vitest";
 
 import { PlotCodeService } from "../src/plot-code.service.js";
@@ -39,6 +39,9 @@ const DEMO_GEOM = {
   ],
   srid: 4490,
 };
+
+/** 带边界的夹具面积一律现算，不写死申报值（口径见 packages/shared/src/area.ts） */
+const DEMO_AREA_MU = roundAreaMu(polygonAreaMu(DEMO_GEOM.coordinates[0] ?? []));
 
 /** 组装一套独立实例，避免用例之间互相污染 */
 async function buildSut(): Promise<{
@@ -77,7 +80,7 @@ function makeInput(overrides: Partial<RegisterPlotInput> = {}): RegisterPlotInpu
     area: "01",
     parcel: "00001",
     parcelName: "开江县任市镇示范田一号地块",
-    areaMu: 12.5,
+    areaMu: DEMO_AREA_MU,
     soilType: "PADDY_SOIL",
     geom: DEMO_GEOM,
     traceId: ulid(),

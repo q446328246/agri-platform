@@ -21,7 +21,7 @@ import {
   setDefaultPublisher,
 } from "@agri/mq";
 import { configureDecorators, LoggerService, MetricsService } from "@agri/observability";
-import { ulid } from "@agri/shared";
+import { polygonAreaMu, roundAreaMu, ulid } from "@agri/shared";
 
 import { PlotCodeService } from "./plot-code.service.js";
 import { PlotEventConsumer } from "./plot.consumer.js";
@@ -33,17 +33,17 @@ import { createExamplePrismaFactory } from "./prisma.factory.js";
 import { createPlotHttpServer } from "./http.js";
 
 /** 演示用的地块边界：矩形，首尾闭合，坐标为 CGCS2000 十进制度 */
+const DEMO_RING = [
+  [107.8421, 30.9942],
+  [107.8433, 30.9942],
+  [107.8433, 30.9951],
+  [107.8421, 30.9951],
+  [107.8421, 30.9942],
+];
+
 const DEMO_GEOM = {
   type: "Polygon" as const,
-  coordinates: [
-    [
-      [107.8421, 30.9942],
-      [107.8433, 30.9942],
-      [107.8433, 30.9951],
-      [107.8421, 30.9951],
-      [107.8421, 30.9942],
-    ],
-  ],
+  coordinates: [DEMO_RING],
   srid: 4490,
 };
 
@@ -132,7 +132,8 @@ async function bootstrap(): Promise<void> {
     area: "01",
     parcel: "00001",
     parcelName: "开江县任市镇示范田一号地块",
-    areaMu: 12.5,
+    // 面积一律由边界现算，与前端预览、迁移 015 同口径；写死的申报值会和几何对不上
+    areaMu: roundAreaMu(polygonAreaMu(DEMO_RING)),
     soilType: "PADDY_SOIL",
     geom: DEMO_GEOM,
     traceId,

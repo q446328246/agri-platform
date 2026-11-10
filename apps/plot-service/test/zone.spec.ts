@@ -2,6 +2,7 @@ import "reflect-metadata";
 
 import { PrismaService } from "@agri/db";
 import { InMemoryEventPublisher, InMemoryOutboxStore, OutboxService } from "@agri/mq";
+import { polygonAreaMu, roundAreaMu } from "@agri/shared";
 import type { Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -62,6 +63,9 @@ const DEMO_GEOM = {
   srid: 4490,
 };
 
+/** 带边界的夹具面积一律现算，片区汇总断言跟着同一个数走 */
+const DEMO_AREA_MU = roundAreaMu(polygonAreaMu(DEMO_GEOM.coordinates[0] ?? []));
+
 async function createPlot(base: string, parcel: string): Promise<string> {
   const created = await call<{ parcelCode: string }>(base, "POST", "/api/v1/plots", {
     region: "511723",
@@ -69,7 +73,7 @@ async function createPlot(base: string, parcel: string): Promise<string> {
     area: "01",
     parcel,
     parcelName: `片区验证地块 ${parcel}`,
-    areaMu: 12.5,
+    areaMu: DEMO_AREA_MU,
     soilType: "PADDY_SOIL",
     farmId: "farm-kaijiang-01",
     geom: DEMO_GEOM,
@@ -123,7 +127,7 @@ describe("片区台账与地块归属", () => {
     const list = await call<Array<{ zoneCode: string; plotCount: number; areaMu: number }>>(base, "GET", "/api/v1/zones");
     const zone = list.body.data.find((item) => item.zoneCode === "ZONE-T1");
     expect(zone?.plotCount).toBe(1);
-    expect(zone?.areaMu).toBe(12.5);
+    expect(zone?.areaMu).toBe(DEMO_AREA_MU);
 
     const filtered = await call<{ total: number; items: Array<{ parcelCode: string }> }>(base, "GET", "/api/v1/plots?zoneCode=ZONE-T1");
     expect(filtered.body.data.total).toBe(1);

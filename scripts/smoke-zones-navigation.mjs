@@ -2,20 +2,25 @@
  * 片区与田间导航冒烟：走真实网关，验证片区建档/划入/凸包、机耕道沿路导航与清理。
  *
  * 用法：
- *   node scripts/smoke-zones-navigation.mjs                       # 默认 https://localhost
+ *   pnpm smoke:zones                                              # 默认 https://localhost
  *   $env:BASE_URL="http://127.0.0.1:8080"; node scripts/smoke-zones-navigation.mjs
  */
+import { polygonAreaMu, roundAreaMu } from "../packages/shared/dist/index.js";
+
 const BASE = (process.env.BASE_URL ?? "https://localhost").replace(/\/+$/, "");
 const API = `${BASE}/api/v1`;
 if (BASE.startsWith("https:")) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 const zoneCode = `ZONE-SMOKE-${Date.now().toString(36).toUpperCase()}`;
 const parcel = String(Date.now() % 100000).padStart(5, "0");
+const DEMO_RING = [[107.4205, 30.9812], [107.4245, 30.9812], [107.4245, 30.9832], [107.4205, 30.9832], [107.4205, 30.9812]];
 const DEMO_GEOM = {
   type: "Polygon",
   srid: 4490,
-  coordinates: [[[107.4205, 30.9812], [107.4245, 30.9812], [107.4245, 30.9832], [107.4205, 30.9832], [107.4205, 30.9812]]],
+  coordinates: [DEMO_RING],
 };
+// 面积按边界现算，与前端预览、迁移 015 同口径；写死的申报值会和几何差一个数量级
+const areaMu = roundAreaMu(polygonAreaMu(DEMO_RING));
 
 let token = "";
 const headers = (extra = {}) => ({ "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}), ...extra });
@@ -62,12 +67,13 @@ async function main() {
     area: "01",
     parcel,
     parcelName: `导航冒烟地块 ${parcel}`,
-    areaMu: 18.6,
+    areaMu,
     soilType: "PADDY_SOIL",
     farmId: "farm-kaijiang-01",
     geom: DEMO_GEOM,
   }), 201, "新建地块");
   const parcelCode = plot.parcelCode;
+  if (Number(plot.areaMu) !== areaMu) throw new Error(`建档面积与边界几何不符: ${plot.areaMu} != ${areaMu}`);
   const assigned = expect(await call("POST", `/zones/${zoneCode}/plots`, { parcelCode }), 200, "划入地块");
   if (assigned.zoneCode !== zoneCode) throw new Error("地块未写入片区归属");
 
@@ -75,7 +81,7 @@ async function main() {
   const zoneMap = expect(await call("GET", "/zones/map"), 200, "片区一张图");
   const summary = zoneMap.find((item) => item.zoneCode === zoneCode);
   if (!summary || summary.plotCount !== 1) throw new Error(`片区地块数异常: ${summary?.plotCount}`);
-  if (Number(summary.areaMu) !== 18.6) throw new Error(`片区面积汇总异常: ${summary.areaMu}`);
+  if (Number(summary.areaMu) !== areaMu) throw new Error(`片区面积汇总异常: ${summary.areaMu} != ${areaMu}`);
   if (!summary.hull?.coordinates?.[0]?.length) throw new Error("片区缺少成员地块凸包");
   const filtered = expect(await call("GET", `/plots?zoneCode=${encodeURIComponent(zoneCode)}`), 200, "按片区过滤地块");
   if (filtered.total !== 1 || filtered.items[0]?.parcelCode !== parcelCode) throw new Error("按片区过滤地块结果异常");

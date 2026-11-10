@@ -5,6 +5,7 @@
 export * from "./errors.js";
 export * from "./datetime.js";
 export * from "./unit.js";
+export * from "./area.js";
 export * from "./paging.js";
 export * from "./id.js";
 export * from "./utils.js";

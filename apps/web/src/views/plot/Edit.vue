@@ -56,7 +56,8 @@
         <el-row :gutter="20">
           <el-col :span="12">
             <el-form-item label="面积(亩)" prop="areaMu">
-              <el-input-number v-model="form.areaMu" :min="0.01" :precision="2" style="width: 100%" />
+              <el-input-number v-model="form.areaMu" :min="0" :precision="2" :disabled="hasBoundary" style="width: 100%" />
+              <div v-if="hasBoundary" class="field-hint">已绘制边界，面积按边界自动计算，不接受手填</div>
             </el-form-item>
           </el-col>
           <el-col :span="12">
@@ -106,7 +107,7 @@
         <el-form-item label="地块边界" prop="coordinates">
           <div class="boundary-editor">
             <PlotPolygonEditor v-model="form.coordinates" @area-change="handleBoundaryArea" />
-            <div class="boundary-editor__hint">单击地图逐个添加顶点，至少 3 个点自动闭合成不规则多边形；面积会按边界自动回填，可再手动修正。</div>
+            <div class="boundary-editor__hint">单击地图逐个添加顶点，至少 3 个点自动闭合成不规则多边形；面积由边界唯一确定，绘制后自动回填且不可手改。只有尚未补边界的老地块才需要申报面积。</div>
           </div>
         </el-form-item>
         <el-form-item label="备注">
@@ -134,7 +135,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { plotApi } from '@/api'
 import PlotPolygonEditor from '@/components/PlotPolygonEditor.vue'
-import { parsePlotBoundary, type PlotBoundarySource } from '@/utils/geo'
+import { parsePlotBoundary, polygonAreaMu, type PlotBoundarySource } from '@/utils/geo'
 import type { Plot, PlotForm } from '@/types'
 import { PlotStatus as PS, PlotType as PT, SoilType as ST } from '@/types'
 
@@ -150,7 +151,7 @@ const form = reactive<PlotForm & { id?: string }>({
   villageCode: '',
   type: PT.FIELD,
   status: PS.ACTIVE,
-  areaMu: 1,
+  areaMu: 0,
   soilType: undefined,
   ownerName: '',
   ownerPhone: '',
@@ -158,6 +159,9 @@ const form = reactive<PlotForm & { id?: string }>({
   coordinates: [],
   remark: ''
 })
+
+// 有边界时面积只有一个来源：边界几何。手填会让台账和地图对不上（迁移 015 就是来收拾这种漂移的）
+const hasBoundary = computed(() => (form.coordinates?.length ?? 0) >= 3)
 
 const regionPath = ref<string[]>([])
 const regionOptions = ref([
@@ -207,7 +211,13 @@ const rules: FormRules = {
   type: [{ required: true, message: '请选择地块类型', trigger: 'change' }],
   regionCode: [{ required: true, message: '请选择行政区', trigger: 'change' }],
   villageCode: [{ required: true, message: '请选择村组', trigger: 'change' }],
-  areaMu: [{ required: true, message: '请输入面积', trigger: 'blur' }],
+  areaMu: [{
+    validator: (_rule, value, callback) => {
+      if (Number(value) > 0) callback()
+      else callback(new Error('请绘制地块边界自动计算面积，无边界时须填写申报面积'))
+    },
+    trigger: 'blur'
+  }],
   coordinates: [{
     validator: (_rule, value, callback) => {
       const count = Array.isArray(value) ? value.length : 0
@@ -234,6 +244,8 @@ async function handleSubmit() {
   if (!formRef.value) return
   await formRef.value.validate(async (valid) => {
     if (valid) {
+      // 提交前再按边界算一次，杜绝任何绕过禁用态的手填值写进台账
+      if (hasBoundary.value) form.areaMu = Number(polygonAreaMu(form.coordinates ?? []).toFixed(2))
       submitting.value = true
       try {
         if (isEdit.value) {
@@ -286,6 +298,12 @@ onMounted(() => {
 }
 .boundary-editor__hint {
   margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.field-hint {
+  width: 100%;
   color: #909399;
   font-size: 12px;
   line-height: 1.6;

@@ -16,7 +16,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { boundaryAreaMu } from '@/utils/geo'
+import { polygonAreaMu } from '@/utils/geo'
 
 const props = defineProps<{ modelValue?: [number, number][] | undefined }>()
 const emit = defineEmits<{
@@ -56,12 +56,6 @@ function samePoints(a: [number, number][], b: [number, number][]): boolean {
   return a.length === b.length && a.every((point, index) => point[0] === b[index]?.[0] && point[1] === b[index]?.[1])
 }
 
-function calcArea(list: [number, number][]): number {
-  if (list.length < 3) return 0
-  const ring = list.map(([lng, lat]) => [lat, lng] as [number, number])
-  return boundaryAreaMu({ name: '', parcelCode: '', rings: [ring], center: [0, 0], areaMu: 0 })
-}
-
 function draw() {
   if (!map || !shapeLayer) return
   shapeLayer.clearLayers()
@@ -94,13 +88,13 @@ function syncFromProps(value?: [number, number][], fit = false) {
   const next = normalize(value)
   if (samePoints(next, points.value)) return
   points.value = next
-  areaMu.value = calcArea(next)
+  areaMu.value = polygonAreaMu(next)
   draw()
   if (fit) fitToPoints()
 }
 
 function commit() {
-  areaMu.value = calcArea(points.value)
+  areaMu.value = polygonAreaMu(points.value)
   draw()
   emit('update:modelValue', points.value.map((point) => [...point] as [number, number]))
   emit('area-change', areaMu.value)

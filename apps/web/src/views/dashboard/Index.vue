@@ -374,10 +374,11 @@ async function loadWeather() {
   try {
     const rt = await weatherApi.getRealtime()
     const els: any[] = rt?.elements ?? []
-    const pick = (re: RegExp) => els.find((e) => re.test(String(e.label ?? '')) || re.test(String(e.key ?? '')))
+    const pick = (re: RegExp) => els.find((e) => e.value !== null && e.value !== undefined && (re.test(String(e.label ?? '')) || re.test(String(e.key ?? ''))))
     const t = pick(/温度|temperature/i)
     const h = pick(/湿度|humid/i)
-    const w = pick(/风速|wind/i)
+    // 风向（windDirection，单位 °）排在风速前面且常缺测，宽松的 /wind/ 会先命中它，把「风 null°」印上卡片
+    const w = pick(/风速|windSpeed/i)
     const parts: string[] = []
     if (t) parts.push(`${t.value}${t.unit ?? '°C'}`)
     if (h) parts.push(`湿度 ${h.value}${h.unit ?? '%'}`)

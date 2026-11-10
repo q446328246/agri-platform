@@ -32,7 +32,7 @@
     "smoke:messages": "pnpm run build && node scripts/smoke-message-preferences.mjs",
     "smoke:authz": "pnpm run build && node scripts/smoke-authz.mjs",
     "smoke:identity": "pnpm run build && node scripts/smoke-identity.mjs",
-    "smoke:zones": "node scripts/smoke-zones-navigation.mjs",
+    "smoke:zones": "pnpm run build && node scripts/smoke-zones-navigation.mjs",
     "smoke:demo": "node scripts/smoke-demo-data.mjs",
     "smoke:filters": "node scripts/smoke-filters.mjs",
     "smoke:weather": "node scripts/smoke-weather.mjs"

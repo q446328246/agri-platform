@@ -61,17 +61,20 @@ function dedupe(points: [number, number][]): [number, number][] {
  * 先以环重心为原点投影到等距圆柱平面再做鞋带公式：逐点乘 cos(lat) 会让 107/30 量级的坐标项
  * 互相抵消，纬度稍有跨度就在真实面积上叠出几十个百分点的误差；平移到重心后各项都是米级小量。
  * 平台唯一的面积口径：顶点去重（dedupe）、取最大环（primaryRing）、本函数与 666.6667 的换算
- * 被 infra/postgres/migrations/015_plot_area_from_boundary.sql 逐位复刻，改这里要同步改那个迁移。
+ * 被 packages/shared/src/area.ts 与 infra/postgres/migrations/015_plot_area_from_boundary.sql
+ * 逐位复刻，改这里要同步改那两处；TS 侧由 test/geo.spec.ts 的一致性用例钉住。
  */
 function ringAreaMu(ring: [number, number][]): number {
-  if (ring.length < 3) return 0
-  const [lat0, lng0] = ringCenter(ring)
+  // 绘制中的顶点可能重复或首尾闭合，去重后再算才和落库值（迁移 015 同样去重）一致
+  const points = dedupe(ring)
+  if (points.length < 3) return 0
+  const [lat0, lng0] = ringCenter(points)
   const kx = 111320 * Math.cos((lat0 * Math.PI) / 180)
   const ky = 110540
   let total = 0
-  for (let i = 0; i < ring.length; i += 1) {
-    const [lat1, lng1] = ring[i]!
-    const [lat2, lng2] = ring[(i + 1) % ring.length]!
+  for (let i = 0; i < points.length; i += 1) {
+    const [lat1, lng1] = points[i]!
+    const [lat2, lng2] = points[(i + 1) % points.length]!
     const x1 = (lng1 - lng0) * kx
     const y1 = (lat1 - lat0) * ky
     const x2 = (lng2 - lng0) * kx
@@ -151,12 +154,11 @@ export function polylineLengthM(points: Array<[number, number]>): number {
 /** 绘制中的多边形面积（亩），入参为 [经度, 纬度] 顶点，可不闭合；不足 3 点返回 0。 */
 export function polygonAreaMu(points: Array<[number, number]>): number {
   if (points.length < 3) return 0
-  const ring = points.map(([lng, lat]) => [lat, lng] as [number, number])
-  return boundaryAreaMu({ name: '', parcelCode: '', rings: [ring], center: [0, 0], areaMu: 0 })
+  return ringAreaMu(points.map(([lng, lat]) => [lat, lng] as [number, number]))
 }
 
+/** 边界面积只认几何：area_mu 本身就是按同一套公式落库的，台账值不能反过来覆盖边界 */
 export function boundaryAreaMu(boundary: PlotBoundary): number {
-  if (boundary.areaMu > 0) return boundary.areaMu
   const ring = boundary.rings[0]
   return ring ? ringAreaMu(ring) : 0
 }
