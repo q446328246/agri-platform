@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: infrastructure
-title: 基础设施编排与数据库迁移
+title: 本地基础设施编排与数据库迁移
 scope:
     - infra/
 source_files: []

@@ -12,19 +12,23 @@
 - [apps/plot-service/src/infra-line.repository.ts](file://apps/plot-service/src/infra-line.repository.ts)
 - [apps/operation-service/src/navigation.ts](file://apps/operation-service/src/navigation.ts)
 - [apps/operation-service/src/http.ts](file://apps/operation-service/src/http.ts)
+- [apps/iot-service/src/http.ts](file://apps/iot-service/src/http.ts)
+- [apps/iot-service/src/device.repository.ts](file://apps/iot-service/src/device.repository.ts)
+- [packages/shared/src/authz.ts](file://packages/shared/src/authz.ts)
 - [packages/contracts/src/dto/geo.dto.ts](file://packages/contracts/src/dto/geo.dto.ts)
 - [packages/contracts/src/messages/message-template.ts](file://packages/contracts/src/messages/message-template.ts)
 - [packages/contracts/src/index.ts](file://packages/contracts/src/index.ts)
 - [README.md](file://README.md)
+- [infra/postgres/migrations/014_iot_devices.sql](file://infra/postgres/migrations/014_iot_devices.sql)
 </cite>
 
 ## 更新摘要
 **变更内容**   
-- 新增片区管理API端点，支持CRUD操作和地块归属管理
-- 扩展基础设施管线API，支持灌水管、施肥管、电力线和机耕道管理
-- 新增导航规划API，实现田间作业路径优化和里程计算
-- 增强消息模板系统，支持虫情识别告警和处方通知
-- 扩展Geo DTOs以支持新的几何类型和多边形处理
+- 新增设备管理API接口（GET/POST/PUT /api/v1/devices，POST /api/v1/devices/:id/commands），支持设备台账管理和控制指令下发
+- 完善基础设施管线API，增强管线CRUD操作、几何数据处理和长度自动计算
+- 增强认证授权逻辑，改进权限验证机制和身份头透传安全性
+- 扩展设备类型枚举，支持气象站、传感器、无人机等10种设备类型
+- 新增设备数据库持久化，支持SQL存储和内存存储两种模式
 
 ## 目录
 1. [简介](#简介)
@@ -47,9 +51,9 @@
 - API接口定义、类型安全与Mock数据支持
 - 性能优化：请求合并、缓存机制与懒加载
 
-本项目采用前后端分离架构：前端基于Vue3 + Element Plus，通过Axios统一发起HTTP请求；网关服务负责路由转发；认证服务提供登录、鉴权与会话管理；业务服务（如地块服务、操作服务）实现领域接口。公共契约包集中定义跨端共享的类型与响应信封。
+本项目采用前后端分离架构：前端基于Vue3 + Element Plus，通过Axios统一发起HTTP请求；网关服务负责路由转发；认证服务提供登录、鉴权与会话管理；业务服务（如地块服务、IoT设备服务、操作服务）实现领域接口。公共契约包集中定义跨端共享的类型与响应信封。
 
-**更新** 新增了片区管理、基础设施管线、导航规划和增强的消息模板功能。
+**更新** 新增了设备管理API、完善的基础设施管线API和增强的认证授权逻辑。
 
 ## 项目结构
 从API集成视角，关键目录与职责如下：
@@ -57,18 +61,22 @@
 - apps/gateway-service：网关服务，统一入口、路由转发与透传上下文
 - apps/auth-service：认证服务，提供登录、用户信息与登出
 - apps/plot-service：地块服务，演示REST接口、分页、错误码、片区管理和基础设施管线
+- apps/iot-service：IoT设备服务，提供设备台账管理、控制指令和状态监控
 - apps/operation-service：操作服务，提供导航规划和农事任务管理
 - packages/contracts：公共契约包，定义跨端共享的响应信封、枚举、Geo DTOs和消息模板
+- packages/shared：共享工具包，提供权限验证、身份透传等通用功能
 
 ```mermaid
 graph TB
 FE["前端应用<br/>apps/web"] --> GW["网关服务<br/>apps/gateway-service"]
 GW --> AUTH["认证服务<br/>apps/auth-service"]
 GW --> PLOT["地块服务<br/>apps/plot-service"]
+GW --> IOT["IoT设备服务<br/>apps/iot-service"]
 GW --> OPERATION["操作服务<br/>apps/operation-service"]
 GW --> OTHER["其他业务服务..."]
 FE --> TYPES["类型契约<br/>apps/web/src/types/index.ts"]
 SERVICES --> CONTRACTS["公共契约包<br/>packages/contracts/src/index.ts"]
+IOT --> SHARED["共享工具包<br/>packages/shared/src/authz.ts"]
 ```
 
 **图示来源**
@@ -76,6 +84,7 @@ SERVICES --> CONTRACTS["公共契约包<br/>packages/contracts/src/index.ts"]
 - [apps/gateway-service/src/http.ts:6-23](file://apps/gateway-service/src/http.ts#L6-L23)
 - [apps/auth-service/src/http.ts:14-20](file://apps/auth-service/src/http.ts#L14-L20)
 - [apps/plot-service/src/http.ts:40-104](file://apps/plot-service/src/http.ts#L40-L104)
+- [apps/iot-service/src/http.ts:39-136](file://apps/iot-service/src/http.ts#L39-L136)
 - [apps/operation-service/src/http.ts:44-55](file://apps/operation-service/src/http.ts#L44-L55)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
 
@@ -86,23 +95,27 @@ SERVICES --> CONTRACTS["公共契约包<br/>packages/contracts/src/index.ts"]
 - 前端请求封装：Axios实例、请求/响应拦截器、通用方法get/post/put/del
 - 网关服务：默认路由表、最长前缀匹配、下游转发、错误包装
 - 认证服务：登录、获取用户信息、登出、会话存储与过期控制
+- IoT设备服务：设备台账CRUD、控制指令下发、状态监控、权限验证
 - 业务服务（以地块为例）：统计、边界、CRUD、分页、错误码与traceId透传
 - 片区管理服务：片区CRUD、地块归属管理、地图视图聚合
-- 基础设施管线管理：管线CRUD、类型分类、几何数据处理
+- 基础设施管线管理：管线CRUD、类型分类、几何数据处理、长度自动计算
 - 导航规划服务：路径优化、里程计算、路网吸附
 - 消息模板系统：多主题模板、去重键生成、级别过滤
 - 类型契约：ApiResponse/PageResult等通用类型，以及领域模型与枚举
+- 权限验证：服务侧权限守卫、身份头透传、路径级权限覆盖
 
-**更新** 新增了片区管理、基础设施管线、导航规划和消息模板相关组件。
+**更新** 新增了IoT设备服务、增强的权限验证和相关组件。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:5-109](file://apps/web/src/utils/request.ts#L5-L109)
 - [apps/gateway-service/src/http.ts:4-40](file://apps/gateway-service/src/http.ts#L4-L40)
 - [apps/auth-service/src/http.ts:6-20](file://apps/auth-service/src/http.ts#L6-L20)
+- [apps/iot-service/src/http.ts:39-136](file://apps/iot-service/src/http.ts#L39-L136)
 - [apps/plot-service/src/http.ts:9-104](file://apps/plot-service/src/http.ts#L9-L104)
 - [apps/plot-service/src/zone.repository.ts:14-55](file://apps/plot-service/src/zone.repository.ts#L14-L55)
 - [apps/plot-service/src/infra-line.repository.ts:18-46](file://apps/plot-service/src/infra-line.repository.ts#L18-L46)
 - [apps/operation-service/src/navigation.ts:16-56](file://apps/operation-service/src/navigation.ts#L16-L56)
+- [packages/shared/src/authz.ts:66-80](file://packages/shared/src/authz.ts#L66-L80)
 - [packages/contracts/src/messages/message-template.ts:62-81](file://packages/contracts/src/messages/message-template.ts#L62-L81)
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
@@ -116,14 +129,16 @@ participant FE as "前端应用"
 participant AX as "Axios实例"
 participant GW as "网关服务"
 participant AUTH as "认证服务"
+participant IOT as "IoT设备服务"
 participant PLOT as "地块服务"
 participant OPERATION as "操作服务"
-FE->>AX : "GET /api/v1/plots?page=1&size=20"
+FE->>AX : "GET /api/v1/devices?page=1&size=20"
 AX->>AX : "请求拦截器注入Authorization/X-Request-Id"
 AX->>GW : "HTTP请求(带Headers)"
 GW->>GW : "最长前缀匹配路由"
-GW->>PLOT : "转发请求(透传Headers)"
-PLOT-->>GW : "统一响应信封 ApiResponse"
+GW->>IOT : "转发请求(透传Headers)"
+IOT->>IOT : "权限验证(authorizeRequest)"
+IOT-->>GW : "统一响应信封 ApiResponse"
 GW-->>AX : "透传响应体"
 AX->>AX : "响应拦截器解析code/success"
 AX-->>FE : "data或抛出错误"
@@ -134,7 +149,7 @@ Note over FE,AX : "若code为未授权，前端提示并跳转登录"
 - [apps/web/src/utils/request.ts:13-35](file://apps/web/src/utils/request.ts#L13-L35)
 - [apps/web/src/utils/request.ts:37-86](file://apps/web/src/utils/request.ts#L37-L86)
 - [apps/gateway-service/src/http.ts:27-39](file://apps/gateway-service/src/http.ts#L27-L39)
-- [apps/plot-service/src/http.ts:16-20](file://apps/plot-service/src/http.ts#L16-L20)
+- [apps/iot-service/src/http.ts:47-48](file://apps/iot-service/src/http.ts#L47-L48)
 
 ## 详细组件分析
 
@@ -221,6 +236,54 @@ GW-->>FE : "透传响应"
 **章节来源**
 - [apps/auth-service/src/http.ts:6-20](file://apps/auth-service/src/http.ts#L6-L20)
 
+### IoT设备管理API
+- 健康检查：/health
+- 设备列表：/api/v1/devices GET，支持分页、关键词、类型、状态、地块筛选
+- 设备详情：/api/v1/devices/{id} GET
+- 创建设备：/api/v1/devices POST，支持设备编号、名称、类型、状态、地块绑定
+- 更新设备：/api/v1/devices/{id} PUT，支持部分更新，不允许修改设备编号
+- 删除设备：/api/v1/devices/{id} DELETE
+- 控制指令：/api/v1/devices/{id}/commands POST，异步下发控制命令
+- 权限验证：需要device:read和device:control权限
+
+```mermaid
+classDiagram
+class DeviceHttpServer {
++createIotHttpServer(dependencies)
+-trace(request) string
+-send(response, status, data, traceId, message) void
+-authorizeRequest(req, policy) AuthzDenial|null
+}
+class DeviceRepository {
++list(filter) Promise~Device[]~
++find(id) Promise~Device~
++findByDeviceNo(deviceNo) Promise~Device~
++create(input) Promise~Device~
++update(id, input) Promise~Device~
+}
+class Device {
++id
++deviceNo
++name
++type
++status
++plotCode
++lastSeenAt
++createdAt
++updatedAt
+}
+DeviceHttpServer --> DeviceRepository : "使用"
+DeviceRepository --> Device : "操作"
+```
+
+**图示来源**
+- [apps/iot-service/src/http.ts:39-136](file://apps/iot-service/src/http.ts#L39-L136)
+- [apps/iot-service/src/device.repository.ts:78-86](file://apps/iot-service/src/device.repository.ts#L78-L86)
+
+**章节来源**
+- [apps/iot-service/src/http.ts:39-136](file://apps/iot-service/src/http.ts#L39-L136)
+- [apps/iot-service/src/device.repository.ts:1-321](file://apps/iot-service/src/device.repository.ts#L1-L321)
+
 ### 业务服务接口（以地块为例）
 - 健康检查：/health
 - 统计接口：/api/v1/plots/stats
@@ -299,9 +362,12 @@ ZoneAPI --> Remove["DELETE /zones/:code/plots/:parcelCode<br/>移除地块"]
 
 ### 基础设施管线API
 - 管线列表：/api/v1/plots/infra-lines GET，支持按类型筛选
-- 创建管线：/api/v1/plots/infra-lines POST，支持LineString几何
+- 创建管线：/api/v1/plots/infra-lines POST，支持LineString几何，自动计算长度
+- 更新管线：/api/v1/plots/infra-lines/{lineCode} PUT，支持部分更新，几何变化时重新计算长度
 - 删除管线：/api/v1/plots/infra-lines/{lineCode} DELETE
-- 管线类型：IRRIGATION_PIPE（灌水管）、FERTILIZATION_PIPE（施肥管）、ELECTRIC_LINE（电力线）、ROAD（机耕道）
+- 管线类型：IRRIGATION_PIPE（灌水管）、FERTILIZATION_PIPE（施肥管）、ELECTRIC_LINE（电力线）、ROAD（机耕道）、TELECOM（通信线）
+- 几何验证：确保LineString至少包含两个坐标点
+- 长度计算：根据几何坐标自动估算管线长度
 
 ```mermaid
 classDiagram
@@ -309,6 +375,7 @@ class InfraLineRepository {
 +listByTenant(tenantId) Promise~InfraLine[]~
 +findByCode(lineCode) Promise~InfraLine~
 +create(tx, record) Promise~InfraLine~
++update(tx, lineCode, patch) Promise~InfraLine~
 +remove(tx, lineCode, deletedAt) Promise~boolean~
 }
 class InfraLine {
@@ -393,6 +460,35 @@ Level --> Output["输出消息"]
 **章节来源**
 - [packages/contracts/src/messages/message-template.ts:1-196](file://packages/contracts/src/messages/message-template.ts#L1-L196)
 
+### 权限验证与身份透传
+- 服务侧权限守卫：基于环境变量AUTH_GUARD_MODE控制是否启用
+- 身份头透传：只透传x-user-id、x-permissions、x-tenant-id三个可信头
+- 路径级权限覆盖：支持按路径前缀覆盖默认的读写权限
+- 公开路径白名单：无需身份即可访问的路径（如登录、设备上报）
+- 会话路径白名单：仅需登录、不校验具体权限的路径（如个人信息、退出登录）
+- 权限解析：从x-permissions头解析权限列表并进行hasPermission检查
+
+```mermaid
+flowchart TD
+Request["接收请求"] --> CheckEnabled{"权限守卫启用?"}
+CheckEnabled --> |否| Allow["直接放行"]
+CheckEnabled --> |是| PublicCheck{"是否公开路径?"}
+PublicCheck --> |是| Allow
+PublicCheck --> |否| UserIdCheck{"是否有用户ID?"}
+UserIdCheck --> |否| Deny401["返回401未登录"]
+UserIdCheck --> |是| SessionCheck{"是否会话路径?"}
+SessionCheck --> |是| Allow
+SessionCheck --> |否| PermissionCheck{"权限是否足够?"}
+PermissionCheck --> |否| Deny403["返回403无权限"]
+PermissionCheck --> |是| Allow
+```
+
+**图示来源**
+- [packages/shared/src/authz.ts:66-80](file://packages/shared/src/authz.ts#L66-L80)
+
+**章节来源**
+- [packages/shared/src/authz.ts:1-81](file://packages/shared/src/authz.ts#L1-L81)
+
 ### 类型安全与Mock数据支持
 - 类型契约：ApiResponse、PageResult、领域模型与枚举在前端types中集中定义
 - 类型安全：Axios泛型T确保返回值类型正确
@@ -413,36 +509,16 @@ number page
 number size
 number pages
 }
-PLOT {
-string id
-string parcelCode
-string name
-number areaMu
-string soilType
-string createdAt
-string updatedAt
-}
 DEVICE {
 string id
-string deviceCode
+string deviceNo
 string name
 string type
 string status
-}
-FARM_TASK {
-string id
-string taskName
-string parcelCode
-string status
-string planStartDate
-string planEndDate
-}
-ZONE_SUMMARY {
-string id
-string zoneCode
-string zoneName
-number plotCount
-number areaMu
+string plotCode
+string lastSeenAt
+string createdAt
+string updatedAt
 }
 INFRA_LINE {
 string id
@@ -465,8 +541,7 @@ object polyline
 **图示来源**
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
 - [apps/web/src/api/index.ts:125-146](file://apps/web/src/api/index.ts#L125-L146)
-- [apps/web/src/api/index.ts:110-118](file://apps/web/src/api/index.ts#L110-L118)
-- [apps/web/src/api/index.ts:466-474](file://apps/web/src/api/index.ts#L466-L474)
+- [apps/iot-service/src/device.repository.ts:31-44](file://apps/iot-service/src/device.repository.ts#L31-L44)
 
 **章节来源**
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
@@ -475,10 +550,12 @@ object polyline
 - 前端依赖Axios与Element Plus，统一封装请求与错误提示
 - 网关服务依赖Node原生http模块与环境变量配置
 - 认证服务依赖内存Map存储会话，简单但非持久化
+- IoT设备服务依赖设备仓储（内存或SQL实现）和权限验证
 - 业务服务依赖公共契约包定义响应信封与分页结构
 - 公共契约包仅导出类型与枚举，不依赖能力包，便于前后端共享
+- 权限验证依赖合约包的权限解析函数
 
-**更新** 新增了操作服务和消息模板的依赖关系。
+**更新** 新增了IoT设备服务和权限验证的依赖关系。
 
 ```mermaid
 graph LR
@@ -486,27 +563,34 @@ WEB["前端应用"] --> AXIOS["Axios"]
 WEB --> TYPES["前端类型定义"]
 GATEWAY["网关服务"] --> NODE_HTTP["node:http"]
 AUTH["认证服务"] --> MAP["内存会话Map"]
+IOT["IoT设备服务"] --> DEVICE_REPO["设备仓储"]
+IOT --> AUTHZ["权限验证"]
 PLOT["地块服务"] --> CONTRACTS["公共契约包"]
 OPERATION["操作服务"] --> NAVIGATION["导航算法"]
 CONTRACTS --> MESSAGES["消息模板"]
 TYPES --> CONTRACTS
+AUTHZ --> CONTRACTS
 ```
 
 **图示来源**
 - [apps/web/src/utils/request.ts:1-11](file://apps/web/src/utils/request.ts#L1-L11)
 - [apps/gateway-service/src/http.ts:1-4](file://apps/gateway-service/src/http.ts#L1-L4)
 - [apps/auth-service/src/http.ts:6-8](file://apps/auth-service/src/http.ts#L6-L8)
+- [apps/iot-service/src/http.ts:1-8](file://apps/iot-service/src/http.ts#L1-L8)
 - [apps/plot-service/src/http.ts:4-7](file://apps/plot-service/src/http.ts#L4-L7)
 - [apps/operation-service/src/navigation.ts:1-3](file://apps/operation-service/src/navigation.ts#L1-L3)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
+- [packages/shared/src/authz.ts:1-3](file://packages/shared/src/authz.ts#L1-L3)
 
 **章节来源**
 - [apps/web/src/utils/request.ts:1-11](file://apps/web/src/utils/request.ts#L1-L11)
 - [apps/gateway-service/src/http.ts:1-4](file://apps/gateway-service/src/http.ts#L1-L4)
 - [apps/auth-service/src/http.ts:6-8](file://apps/auth-service/src/http.ts#L6-L8)
+- [apps/iot-service/src/http.ts:1-8](file://apps/iot-service/src/http.ts#L1-L8)
 - [apps/plot-service/src/http.ts:4-7](file://apps/plot-service/src/http.ts#L4-L7)
 - [apps/operation-service/src/navigation.ts:1-3](file://apps/operation-service/src/navigation.ts#L1-L3)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
+- [packages/shared/src/authz.ts:1-3](file://packages/shared/src/authz.ts#L1-L3)
 
 ## 性能与优化
 - 请求合并：可在Axios层引入轻量队列，将短时间内的重复请求合并，减少带宽与后端压力
@@ -517,8 +601,10 @@ TYPES --> CONTRACTS
 - 压缩传输：网关与服务端启用gzip/br压缩，降低带宽占用
 - 导航优化：使用最近邻+2-opt算法优化路径顺序，减少总行驶距离
 - 路网吸附：智能吸附站点到最近路网节点，提高路径精度
+- 设备查询优化：设备列表支持多维度筛选，减少前端过滤开销
+- 几何计算优化：管线长度自动计算，避免前端重复计算
 
-**更新** 新增了导航算法优化和路网吸附相关的性能考虑。
+**更新** 新增了设备查询优化和几何计算优化相关的性能考虑。
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -530,19 +616,23 @@ TYPES --> CONTRACTS
 - 服务器内部错误（500）：查看服务日志，定位异常堆栈；必要时开启链路追踪ID（X-Request-Id）
 - 导航参数错误：检查start和stops坐标格式，确认站点数量不超过20个
 - 管线几何错误：验证LineString坐标数组格式，确保至少包含两个坐标点
+- 设备权限错误：检查device:read和device:control权限是否正确授予
+- 设备编号冲突：创建设备时deviceNo必须唯一，避免重复编号
+- 设备状态无效：设备状态只能是ONLINE或OFFLINE，类型必须是预定义的10种之一
 
-**更新** 新增了导航和管线相关的故障排查指导。
+**更新** 新增了设备相关的故障排查指导。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:37-86](file://apps/web/src/utils/request.ts#L37-L86)
 - [apps/gateway-service/src/http.ts:27-39](file://apps/gateway-service/src/http.ts#L27-L39)
 - [apps/plot-service/src/http.ts:100-103](file://apps/plot-service/src/http.ts#L100-L103)
+- [apps/iot-service/src/http.ts:72-76](file://apps/iot-service/src/http.ts#L72-L76)
 - [apps/operation-service/src/navigation.ts:400-447](file://apps/operation-service/src/navigation.ts#L400-L447)
 
 ## 结论
-本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、片区管理、基础设施管线、导航规划和消息模板等基本功能；后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
+本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、设备管理、片区管理、基础设施管线、导航规划和消息模板等基本功能；后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
 
-**更新** 新增了片区管理、基础设施管线、导航规划和消息模板等核心功能，进一步完善了智慧农业平台的能力体系。
+**更新** 新增了设备管理API、完善的基础设施管线API和增强的认证授权逻辑，进一步完善了智慧农业平台的能力体系。
 
 [本节为总结性内容，不直接分析具体文件]
 
@@ -568,6 +658,29 @@ TYPES --> CONTRACTS
 
 **章节来源**
 - [apps/gateway-service/src/http.ts:27-33](file://apps/gateway-service/src/http.ts#L27-L33)
+
+### IoT设备管理接口
+- GET /api/v1/devices
+  - 查询参数：page, size, keyword, type, status, plotCode
+  - 响应：PageResult<Device>
+- GET /api/v1/devices/{id}
+  - 响应：Device
+- POST /api/v1/devices
+  - 请求体：{ deviceNo, name, type, status, plotCode? }
+  - 响应：Device
+- PUT /api/v1/devices/{id}
+  - 请求体：{ name?, type?, status?, plotCode? }
+  - 响应：Device
+- DELETE /api/v1/devices/{id}
+  - 响应：空数据
+- POST /api/v1/devices/{id}/commands
+  - 请求体：{ type, parameters? }
+  - 响应：{ commandId, deviceId, status: "QUEUED", command }
+
+**更新** 新增设备管理相关接口。
+
+**章节来源**
+- [apps/iot-service/src/http.ts:50-130](file://apps/iot-service/src/http.ts#L50-L130)
 
 ### 地块服务接口
 - GET /api/v1/plots/stats
@@ -624,13 +737,16 @@ TYPES --> CONTRACTS
 - POST /api/v1/plots/infra-lines
   - 请求体：{ lineName, lineType, geom, lineCode? }
   - 响应：InfraLine
+- PUT /api/v1/plots/infra-lines/{lineCode}
+  - 请求体：{ lineName?, lineType?, geom?, lengthM? }
+  - 响应：InfraLine
 - DELETE /api/v1/plots/infra-lines/{lineCode}
   - 响应：空数据
 
 **更新** 新增基础设施管线相关接口。
 
 **章节来源**
-- [apps/web/src/api/index.ts:95-104](file://apps/web/src/api/index.ts#L95-L104)
+- [apps/web/src/api/index.ts:95-118](file://apps/web/src/api/index.ts#L95-L118)
 
 ### 导航规划接口
 - POST /api/v1/operations/path-plan
@@ -678,3 +794,12 @@ TYPES --> CONTRACTS
 
 **章节来源**
 - [packages/contracts/src/messages/message-template.ts:16-81](file://packages/contracts/src/messages/message-template.ts#L16-L81)
+
+### 设备类型枚举
+- DEVICE_TYPES：WEATHER_STATION、SOIL_SENSOR、INTEGRATED_STATION、REMOTE_SENSE、INSECT_LAMP、FERTILIZER_VALVE、IRRIGATION_VALVE、IRRIGATION_PUMP、AGRICULTURAL_DRONE、AUTO_TRACTOR
+- DEVICE_STATUSES：ONLINE、OFFLINE
+
+**更新** 新增设备类型枚举定义。
+
+**章节来源**
+- [apps/iot-service/src/device.repository.ts:12-29](file://apps/iot-service/src/device.repository.ts#L12-L29)
