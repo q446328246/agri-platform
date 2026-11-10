@@ -97,26 +97,14 @@
         </el-tab-pane>
 
         <el-tab-pane label="阈值规则" name="rules">
-          <el-form :inline="true" :model="ruleForm" class="rule-form">
-            <el-form-item label="指标">
-              <el-select v-model="ruleForm.metric" style="width: 160px">
-                <el-option v-for="item in metricOptions" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="方向">
-              <el-select v-model="ruleForm.direction" style="width: 110px">
-                <el-option label="高于上限" value="above" /><el-option label="低于下限" value="below" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="阈值"><el-input-number v-model="ruleForm.threshold" :min="0" :max="1000" :step="1" /></el-form-item>
-            <el-form-item label="级别">
-              <el-select v-model="ruleForm.level" style="width: 120px">
-                <el-option label="提示" value="INFO" /><el-option label="预警" value="WARNING" /><el-option label="严重" value="CRITICAL" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="告警文案"><el-input v-model="ruleForm.message" style="width: 240px" /></el-form-item>
-            <el-form-item><el-button type="primary" @click="saveRule">保存规则</el-button></el-form-item>
-          </el-form>
+          <div class="table-toolbar">
+            <div>
+              <el-button v-if="canWrite" type="primary" @click="openRuleCreate">
+                <el-icon><Plus /></el-icon>新增规则
+              </el-button>
+            </div>
+            <div class="rule-hint">命中规则即生成灾情告警，改阈值不需要发版</div>
+          </div>
           <el-table v-loading="loading" :data="rules" border stripe>
             <el-table-column label="指标" width="160"><template #default="{ row }">{{ metricLabel(row.metric) }}</template></el-table-column>
             <el-table-column label="判定" width="180"><template #default="{ row }">{{ row.direction === 'above' ? '高于' : '低于' }} {{ row.threshold }}</template></el-table-column>
@@ -125,8 +113,11 @@
             <el-table-column label="启用" width="90">
               <template #default="{ row }"><el-switch :model-value="row.enabled" @change="(value: boolean) => toggleRule(row, value)" /></template>
             </el-table-column>
-            <el-table-column label="操作" width="110">
-              <template #default="{ row }"><el-button link type="danger" @click="removeRule(row)">删除</el-button></template>
+            <el-table-column label="操作" width="140">
+              <template #default="{ row }">
+                <el-button v-if="canWrite" link type="primary" @click="openRuleEdit(row)">编辑</el-button>
+                <el-button v-if="canWrite" link type="danger" @click="removeRule(row)">删除</el-button>
+              </template>
             </el-table-column>
           </el-table>
         </el-tab-pane>
@@ -151,6 +142,42 @@
         <el-button type="primary" @click="submitPest">提交并生成告警</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="ruleDialogVisible" :title="ruleEditing ? '编辑阈值规则' : '新增阈值规则'" width="520px">
+      <el-form :model="ruleForm" label-width="96px" @submit.prevent="saveRule">
+        <el-form-item label="监测指标">
+          <el-select v-model="ruleForm.metric" :disabled="ruleEditing" style="width: 100%">
+            <el-option v-for="item in metricOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+          <span v-if="ruleEditing" class="rule-hint">指标是规则的唯一键，需要换指标请新建一条</span>
+        </el-form-item>
+        <el-form-item label="判定方向">
+          <el-radio-group v-model="ruleForm.direction">
+            <el-radio value="above">高于上限</el-radio>
+            <el-radio value="below">低于下限</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="阈值">
+          <el-input-number v-model="ruleForm.threshold" :min="0" :max="1000" :step="1" />
+          <span class="rule-hint">{{ ruleUnit }}</span>
+        </el-form-item>
+        <el-form-item label="告警级别">
+          <el-select v-model="ruleForm.level" style="width: 160px">
+            <el-option label="提示" value="INFO" /><el-option label="预警" value="WARNING" /><el-option label="严重" value="CRITICAL" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="告警文案">
+          <el-input v-model="ruleForm.message" type="textarea" :rows="2" placeholder="留空则按「指标 越限告警」自动生成" />
+        </el-form-item>
+        <el-form-item label="启用">
+          <el-switch v-model="ruleForm.enabled" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="ruleDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="ruleSaving" @click="saveRule">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -158,6 +185,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { plotApi, telemetryApi } from '@/api'
+import { useUserStore } from '@/stores'
 import type { PestEvent, TelemetryAlert, TelemetryRule, TelemetryRuleInput } from '@/api'
 
 /**
@@ -180,6 +208,7 @@ const metricOptions = [
 const seedlingMetrics = ['canopyCoverage', 'soilMoisture', 'airTemperature', 'airHumidity']
 const metricLabel = (metric: string): string => metricOptions.find((item) => item.value === metric)?.label ?? metric
 
+const userStore = useUserStore()
 const loading = ref(false)
 const activeTab = ref('seedling')
 const query = reactive<{ plotCode: string; metric: string; level: string; pestType: string }>({ plotCode: '', metric: '', level: '', pestType: '' })
@@ -201,7 +230,12 @@ const seedlingCaption = computed(() => (latest.value.some((item) => item.metric 
 const pendingPests = computed(() => pests.value.filter((item) => !item.handled))
 const enabledRuleCount = computed(() => rules.value.filter((item) => item.enabled).length)
 
-const ruleForm = reactive<TelemetryRuleInput>({ metric: 'soilMoisture', direction: 'below', threshold: 30, level: 'WARNING', message: '' })
+const ruleForm = reactive<TelemetryRuleInput>({ metric: 'soilMoisture', direction: 'below', threshold: 30, level: 'WARNING', message: '', enabled: true })
+const ruleDialogVisible = ref(false)
+const ruleEditing = ref(false)
+const ruleSaving = ref(false)
+const canWrite = computed(() => userStore.hasPermission('telemetry:write'))
+const ruleUnit = computed(() => metricOptions.find((item) => item.value === ruleForm.metric)?.unit ?? '')
 const pestForm = reactive({ plotCode: '', deviceId: 'camera-001', pestType: '', level: 2 as 1 | 2 | 3, confidence: 0.9, imageFileId: '' })
 
 function formatTime(value?: string): string {
@@ -291,17 +325,50 @@ async function submitPest() {
   }
 }
 
+function openRuleCreate() {
+  const used = new Set(rules.value.map((item) => item.metric))
+  const next = metricOptions.find((item) => !used.has(item.value))
+  ruleEditing.value = false
+  // 后端按指标唯一建档，新建时默认落到还没配置过的指标，避免一进来就撞已有规则
+  if (next) {
+    ruleForm.metric = next.value
+  } else {
+    ElMessage.info('全部监测指标都已配置规则，可直接在列表里编辑')
+  }
+  ruleForm.direction = 'below'
+  ruleForm.threshold = 30
+  ruleForm.level = 'WARNING'
+  ruleForm.message = ''
+  ruleForm.enabled = true
+  ruleDialogVisible.value = true
+}
+
+function openRuleEdit(row: TelemetryRule) {
+  ruleEditing.value = true
+  ruleForm.metric = row.metric
+  ruleForm.direction = row.direction
+  ruleForm.threshold = row.threshold
+  ruleForm.level = row.level
+  ruleForm.message = row.message
+  ruleForm.enabled = row.enabled
+  ruleDialogVisible.value = true
+}
+
 async function saveRule() {
-  if (!ruleForm.message.trim()) {
-    ElMessage.warning('请填写告警文案')
+  if (!ruleEditing.value && rules.value.some((item) => item.metric === ruleForm.metric)) {
+    ElMessage.warning('该指标已有规则，请在列表里点「编辑」，新建会覆盖原规则')
     return
   }
+  ruleSaving.value = true
   try {
-    await telemetryApi.saveRule({ ...ruleForm })
+    await telemetryApi.saveRule({ ...ruleForm, message: ruleForm.message.trim() })
     ElMessage.success('阈值规则已保存')
+    ruleDialogVisible.value = false
     await loadOverview()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '规则保存失败')
+  } finally {
+    ruleSaving.value = false
   }
 }
 
@@ -343,6 +410,6 @@ onMounted(async () => {
 .summary-card--alert strong { color: #f56c6c; }
 .toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .agro-filter { margin-bottom: 4px; }
-.rule-form { margin-bottom: 8px; }
+.rule-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); }
 :deep(.el-tabs__header) { margin-bottom: 16px; }
 </style>

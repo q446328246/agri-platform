@@ -26,18 +26,20 @@
         <el-form-item><el-button type="primary" @click="search">查询</el-button><el-button @click="resetQuery">重置</el-button></el-form-item>
       </el-form>
 
-      <el-form :inline="true" :model="form" class="trace-create-form">
-        <el-form-item label="地块编码"><el-input v-model="form.plotCode" /></el-form-item>
-        <el-form-item label="事件">
-          <el-select v-model="form.event" style="width: 140px">
-            <el-option label="农事作业" value="FARM_OPERATION" />
-            <el-option label="作业完成" value="OPERATION_COMPLETED" />
-            <el-option label="处方生成" value="PRESCRIPTION_ISSUED" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="详情"><el-input v-model="form.detail" /></el-form-item>
-        <el-form-item><el-button type="primary" @click="submit">新增记录</el-button></el-form-item>
-      </el-form>
+      <div class="table-toolbar">
+        <div>
+          <el-button v-if="canWrite" type="primary" @click="openCreate">
+            <el-icon><Plus /></el-icon>新增记录
+          </el-button>
+        </div>
+        <div>
+          <el-tooltip content="刷新">
+            <el-button circle :loading="loading" @click="load">
+              <el-icon><Refresh /></el-icon>
+            </el-button>
+          </el-tooltip>
+        </div>
+      </div>
 
       <el-table v-loading="loading" :data="records" border stripe>
         <el-table-column prop="traceCode" label="追溯码" min-width="210" />
@@ -63,20 +65,56 @@
         />
       </div>
     </div>
+
+    <el-dialog v-model="createVisible" title="新增溯源记录" width="560px" @closed="resetForm">
+      <el-form ref="formRef" :model="form" :rules="formRules" label-width="88px" @submit.prevent="submit">
+        <el-form-item label="地块编码" prop="plotCode">
+          <el-input v-model="form.plotCode" placeholder="选填，留空表示不关联地块" clearable />
+        </el-form-item>
+        <el-form-item label="事件" prop="event">
+          <el-select v-model="form.event" style="width: 180px">
+            <el-option label="农事作业" value="FARM_OPERATION" />
+            <el-option label="作业完成" value="OPERATION_COMPLETED" />
+            <el-option label="处方生成" value="PRESCRIPTION_ISSUED" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="详情" prop="detail">
+          <el-input v-model="form.detail" type="textarea" :rows="3" placeholder="写明作业内容与结果，追溯页按关键词检索此栏" />
+        </el-form-item>
+        <el-form-item label="操作人" prop="operator">
+          <el-input v-model="form.operator" style="width: 200px" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="submit">新增</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { traceApi } from '@/api'
+import { useUserStore } from '@/stores'
 import { formatDateTime, getTraceEventText, getTraceEventType } from '@/utils'
+const userStore = useUserStore()
 const loading = ref(false)
 const records = ref<any[]>([])
 const total = ref(0)
 const query = reactive<{ plotCode: string; event: string; keyword: string; range: [string, string] | null }>({ plotCode: '', event: '', keyword: '', range: null })
 const page = reactive({ page: 1, size: 20 })
-const form = reactive({ plotCode: '', event: 'FARM_OPERATION', detail: '', operator: 'admin' })
+const form = reactive({ plotCode: '', event: 'FARM_OPERATION', detail: '', operator: '' })
+const createVisible = ref(false)
+const creating = ref(false)
+const formRef = ref<FormInstance>()
+const canWrite = computed(() => userStore.hasPermission('trace:write'))
+const formRules: FormRules = {
+  detail: [{ required: true, message: '请填写记录详情', trigger: 'blur' }],
+  event: [{ required: true, message: '请选择事件类型', trigger: 'change' }],
+  operator: [{ required: true, message: '请填写操作人', trigger: 'blur' }]
+}
 async function load() {
   loading.value = true
   try {
@@ -95,10 +133,29 @@ async function load() {
 }
 function search() { page.page = 1; void load() }
 function resetQuery() { query.plotCode = ''; query.event = ''; query.keyword = ''; query.range = null; search() }
-async function submit() { if (!form.detail) { ElMessage.warning('请输入记录详情'); return } await traceApi.createRecord(form); ElMessage.success('追溯记录已新增'); form.detail = ''; await load() }
+function openCreate() {
+  form.plotCode = query.plotCode
+  // 操作人默认落到当前登录账号，代他人补录时可改
+  form.operator = userStore.userInfo?.name || userStore.userInfo?.username || ''
+  createVisible.value = true
+}
+function resetForm() {
+  formRef.value?.clearValidate()
+  form.detail = ''
+}
+async function submit() {
+  if (!formRef.value) return
+  const valid = await formRef.value.validate().catch(() => false)
+  if (!valid) return
+  creating.value = true
+  try {
+    await traceApi.createRecord({ ...form, plotCode: form.plotCode.trim() })
+    ElMessage.success('追溯记录已新增')
+    createVisible.value = false
+    await load()
+  } finally {
+    creating.value = false
+  }
+}
 onMounted(() => void load())
 </script>
-
-<style scoped>
-.trace-create-form { border-top: 1px dashed var(--el-border-color); padding-top: 16px; margin-bottom: 8px; }
-</style>
