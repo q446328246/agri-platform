@@ -60,6 +60,8 @@ function dedupe(points: [number, number][]): [number, number][] {
  * 环面积（亩），入参为 Leaflet 序 [纬度, 经度]。
  * 先以环重心为原点投影到等距圆柱平面再做鞋带公式：逐点乘 cos(lat) 会让 107/30 量级的坐标项
  * 互相抵消，纬度稍有跨度就在真实面积上叠出几十个百分点的误差；平移到重心后各项都是米级小量。
+ * 平台唯一的面积口径：顶点去重（dedupe）、取最大环（primaryRing）、本函数与 666.6667 的换算
+ * 被 infra/postgres/migrations/015_plot_area_from_boundary.sql 逐位复刻，改这里要同步改那个迁移。
  */
 function ringAreaMu(ring: [number, number][]): number {
   if (ring.length < 3) return 0

@@ -83,6 +83,79 @@ docker compose -f infra/docker-compose.yml --profile app up -d --build
 - 演示数据：迁移 `010_demo_data.sql` 会灌入一套达川丘区（地图中心 `30.982425, 107.421325`）的完整数据，含 12 块地块与 3 个片区、3024 条遥测读数、告警/虫情/处方/指令/消息/投入产出/溯源记录，设备、摄像头与农事任务由 iot/video/operation 服务的内存种子提供，各业务页面登录即有内容。演示账号：`agronomist`、`operator01`、`viewer01`（口令均为 `demo123`，`temp01` 为已停用账号）；需重置时删除主键带 `demo` 前缀的行后重跑迁移即可。
 - 构建需要能访问 Docker Hub 与 npm 源；若镜像拉取超时，先配置镜像加速或代理。
 
+### 提交前校验
+
+```bash
+# Windows 必做：把临时目录指进工作区，否则 vite/esbuild 报 "Access is denied"
+export TEMP="$PWD/.tmp" TMP="$PWD/.tmp"
+
+npx tsc -b                        # 全量类型检查与增量编译
+npx vitest run                   # 全量单测
+pnpm --filter @agri/web build    # 前端生产包（内部执行 vue-tsc -b && vite build）
+```
+
+- 只跑单个服务的测试：在**仓库根**执行 `npx vitest run apps/<service>`。`pnpm --filter @agri/<service> test` 会报
+  `No test files found`——vitest 的 `include` 是 `apps/**/test/**/*.spec.ts` 这类仓库根相对路径。
+- 前端单独校验：在 `apps/web` 目录内执行 `npx vue-tsc --noEmit -p tsconfig.json` 与 `npx vite build`；
+  `vite build` 从仓库根跑会报 `Could not resolve entry module index.html`。
+- 前端已去掉 `eslint` 脚本，代码风格靠上面的类型检查与构建把关。
+
+### 镜像重建与增量上线
+
+`app` 与 `edge` 都在 `profiles: ["app"]` 下，任何 compose 子命令都要带 `--profile app`；`postgres`/`minio` 无 profile，常驻。
+
+```bash
+# 前后端都改了：两个都要重建，只重建其一会出现「前端调用 404」
+docker compose -f infra/docker-compose.yml --profile app build app edge
+docker compose -f infra/docker-compose.yml --profile app up -d
+
+# 只改前端：只重建 edge，不动 app、不动数据库
+docker compose -f infra/docker-compose.yml --profile app build edge
+docker compose -f infra/docker-compose.yml --profile app up -d --force-recreate --no-deps edge
+```
+
+### 上线后验证
+
+```bash
+docker ps --format '{{.Names}}\t{{.Status}}'
+docker compose -f infra/docker-compose.yml --profile app logs --tail=50 app edge
+
+# 自签证书：从容器里取证书链，再用 curl 打网关
+docker cp infra-edge-1:/etc/nginx/tls/fullchain.pem .tmp/fullchain.pem
+TOKEN=$(curl -s --cacert .tmp/fullchain.pem -X POST https://localhost/api/v1/auth/login \
+  -H 'content-type: application/json' -d '{"username":"admin","password":"admin123"}' \
+  | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).data.token))")
+curl -s --cacert .tmp/fullchain.pem -H "Authorization: Bearer $TOKEN" \
+  https://localhost/api/v1/plots/bounds | head -c 300
+
+# 确认前端产物已含新代码（文件名带哈希，每次构建都变）
+docker exec infra-edge-1 sh -lc "grep -rlF '新增阈值规则' /usr/share/nginx/html/assets | head -1"
+```
+
+页面级回归脚本默认打 `https://localhost`（可用 `BASE_URL` 覆盖）：`pnpm smoke:demo` 逐页校验演示数据、
+`pnpm smoke:filters` 校验查询条筛选、`pnpm smoke:weather` 校验气象链路、`pnpm smoke:zones` 校验片区与导航。
+
+### 本机端到端验证（不写演示库）
+
+改动涉及写接口时，用一次性库把 15 个服务拉起来验，验完删库，演示库 `agri` 不受污染。
+
+```bash
+set -a && . ./.env && set +a                       # DB_URL 等本地配置只存在于 .env
+export DB_URL=$(node -e "const u=new URL(process.env.DB_URL); u.pathname='/agri_verify'; process.stdout.write(u.toString())")
+export ADMIN_URL=$(node -e "const u=new URL(process.env.DB_URL); u.pathname='/postgres'; process.stdout.write(u.toString())")
+# 连 ADMIN_URL 执行 create database agri_verify，然后：
+pnpm run build                # start-services.mjs 跑的是各服务 dist/main.js
+node scripts/migrate-postgres.mjs
+node scripts/start-services.mjs
+```
+
+- 端口用 `AGRI_<NAME>_PORT` 覆盖（如 `AGRI_GATEWAY_PORT=18081`），但 `start-services.mjs` 与
+  `health-check.mjs` 读的是 `*_SERVICE_URL`，两边要一起给，否则服务间调用与网关反代仍指向默认端口。
+- 本机代理常占用 3002/3003/3008/3010/8080 等端口，绑定报 `EACCES` 就把整段端口往后平移（如 13101-13114）。
+- 前端另起 vite：`apps/web` 下 `npx vite --config <临时配置>`，把 `/api` 反代到本地网关；验完删除临时配置，
+  `vite` 只监听 IPv6 的 `localhost`，用 `127.0.0.1` 访问会被拒。
+- 收尾：`drop database agri_verify`（先 `pg_terminate_backend` 掉连接），删除临时 vite 配置与验证脚本。
+
 ## 二、目录结构
 
 ```
@@ -144,8 +217,14 @@ agri-platform-nodejs-scaffold/
   `511723-000001-01-00001-0101-Z`。业务代码不得自行拼接编码，统一走 `@agri/plot-core`。
 - **契约包与能力包分离**：`@agri/contracts` 只依赖 `zod`，不依赖任何能力包，前端可低成本引用；
   能力包之间禁止循环引用。
-- **空间运算下沉数据库**：`@agri/plot-core` 只做编码级与索引级计算，叠加、缓冲区、面积一律
+- **空间运算下沉数据库**：`@agri/plot-core` 只做编码级与索引级计算，叠加、缓冲区一律
   落在 PostGIS 以 SQL 完成，坐标统一 CGCS2000（EPSG:4490），仅在出参方向换算为其他坐标系。
+- **地块面积只有一个口径**：`plot_records.area_mu` 恒等于按边界几何重算的值，公式是
+  `apps/web/src/utils/geo.ts` 的 `ringAreaMu`（顶点去重 → 取最大环 → 环重心平移到原点做
+  等距圆柱鞋带 → 平方米除以 666.6667 换算亩，留 2 位），`015_plot_area_from_boundary.sql`
+  用 SQL 逐位复刻了同一套算法，两边必须一起改。地图绘制时的实时预览与保存后落库因此是同一个数；
+  010 示范数据原先手填的面积与边界差了一半以上，就是靠迁移 015 统一掉的。
+  没有边界的地块（接口直接建档）仍按申报面积记账。
 - **事件不丢也不重**：业务数据与待投递事件写入同一事务（本地消息表），事务提交后由中继投递；
   消费侧用 `eventId` 幂等去重，重试按指数退避，超出次数转死信。
 - **跨进程事件靠事件日志**：`event_log` 按主题递增位点，`event_log_offsets` 记录消费者组位点；

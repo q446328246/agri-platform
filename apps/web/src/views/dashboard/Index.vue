@@ -166,7 +166,7 @@ import { iotApi, messageApi, plotApi, weatherApi, zoneApi } from '@/api'
 import type { InfraLine, InfraLineType, ZoneSummary } from '@/api'
 import type { MapShapeActive, MapShapeKind, MapShapeSaved, Plot } from '@/types'
 import { getPlotTypeText } from '@/utils'
-import { parsePlotBoundaries, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
+import { parsePlotBoundaries, polygonAreaMu, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 import { LINE_PANEL_BRIDGE, catColor, categorize, lineCategories, lineColorOf, lineTypeLabel } from '@/utils/infraLine'
 import type { LineCat, LinePanelBridge } from '@/utils/infraLine'
 import MapShapeEditor from '@/components/MapShapeEditor.vue'
@@ -806,12 +806,16 @@ function renderFields(list: PlotBoundary[], fit = true) {
 }
 
 function demoBoundaries(): PlotBoundary[] {
-  const rect = (name: string, parcelCode: string, areaMu: number, crop: string, coords: [number, number][]): PlotBoundary => ({
-    name, parcelCode, rings: [coords], center: [0, 0], areaMu, crop,
+  // 示范边界只在没有服务端地块数据时兜底展示，面积一律由坐标环现算，
+  // 不能写死：写死的数字和平台「面积 = 边界」的口径（utils/geo.ts + 迁移 015）对不上。
+  const rect = (name: string, parcelCode: string, crop: string, coords: [number, number][]): PlotBoundary => ({
+    name, parcelCode, rings: [coords], center: [0, 0],
+    areaMu: Number(polygonAreaMu(coords.map(([lat, lng]) => [lng, lat] as [number, number])).toFixed(2)),
+    crop,
   })
   return [
-    rect('西北片区 · 大豆区', 'demo-soybean', 4860, '大豆', [[30.9780, 107.4140], [30.9825, 107.4128], [30.9862, 107.4185], [30.9840, 107.4255], [30.9790, 107.4240], [30.9780, 107.4140]]),
-    rect('东南片区 · 玉米区', 'demo-corn', 2830, '玉米', [[30.9868, 107.4268], [30.9910, 107.4252], [30.9932, 107.4305], [30.9898, 107.4352], [30.9860, 107.4318], [30.9868, 107.4268]]),
+    rect('西北片区 · 大豆区', 'demo-soybean', '大豆', [[30.9780, 107.4140], [30.9825, 107.4128], [30.9862, 107.4185], [30.9840, 107.4255], [30.9790, 107.4240], [30.9780, 107.4140]]),
+    rect('东南片区 · 玉米区', 'demo-corn', '玉米', [[30.9868, 107.4268], [30.9910, 107.4252], [30.9932, 107.4305], [30.9898, 107.4352], [30.9860, 107.4318], [30.9868, 107.4268]]),
   ]
 }
 

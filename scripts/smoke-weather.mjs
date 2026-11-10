@@ -66,7 +66,14 @@ async function main() {
   const hourly = await call("/weather/forecast/hourly?hours=24");
   if (hourly.status !== 200) fail("逐小时预报", `status=${hourly.status}`);
   const hours = hourly.data?.hourly ?? [];
-  if (hours.length !== 24) fail("逐小时条数", `期望 24, 实际${hours.length}`);
+  // 条数只卡上限与连续性，不强求 === 24：库里剩余的预报时数不足时服务按实际返回，
+  // 接了真实和风数据后当天窗口尾部本来就可能只有十几个时次，卡死 24 属于误报。
+  if (hours.length === 0) fail("逐小时条数", "返回 0 条");
+  if (hours.length > 24) fail("逐小时条数", `超出请求的 24 条, 实际${hours.length}`);
+  for (let i = 1; i < hours.length; i += 1) {
+    const step = (Date.parse(hours[i].hourAt) - Date.parse(hours[i - 1].hourAt)) / 3_600_000;
+    if (step !== 1) fail("逐小时连续", `第 ${i} 条相对上一条步进 ${step} 小时`);
+  }
   if (!hours[0]?.hourAt || hours[0]?.temperature === undefined) fail("逐小时字段", JSON.stringify(hours[0]));
   pass("逐小时预报", `${hours.length} 时次`);
 
