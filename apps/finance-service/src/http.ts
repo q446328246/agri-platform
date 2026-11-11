@@ -3,7 +3,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { ApiResponse } from "@agri/contracts";
 import { authorizeRequest } from "@agri/shared";
-import { InMemoryFinanceRepository } from "./repository.js";
+import { aggregateReport, InMemoryFinanceRepository } from "./repository.js";
 import type { FinanceEntry, FinanceRepository, FinanceSummary } from "./repository.js";
 function send<T>(res: ServerResponse, status: number, data: T | null, traceId: string, message = ""): void { const body: ApiResponse<T> = { code: status >= 400 ? `FINANCE-${status}` : "OK", message, data, traceId, timestamp: Date.now() }; res.writeHead(status, { "content-type": "application/json; charset=utf-8" }); res.end(JSON.stringify(body)); }
 function trace(req: IncomingMessage): string { return req.headers["x-request-id"]?.toString() || randomUUID(); }
@@ -44,6 +44,13 @@ export function createFinanceHttpServer(repository: FinanceRepository = new InMe
     const output = rows.filter((row) => row.kind === "OUTPUT").reduce((sum, row) => sum + row.amount, 0);
     const summary: FinanceSummary = { plotCode: plotCode ?? null, input, output, profit: output - input, currency: "CNY" };
     send(res, 200, summary, traceId);
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/v1/finance/report") {
+    const plotCode = url.searchParams.get("plotCode") ?? undefined;
+    // 无附加筛选走真实库 GROUP BY；带 kind/category/season/keyword/from/to 时按过滤后的行现算，与列表联动
+    if (!hasExtraFilters(url.searchParams)) { send(res, 200, await repository.report(plotCode), traceId); return; }
+    send(res, 200, aggregateReport(filterEntries(await repository.list(plotCode), url.searchParams)), traceId);
     return;
   }
   send(res, 404, null, traceId, "接口不存在");

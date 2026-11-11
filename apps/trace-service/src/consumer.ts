@@ -48,6 +48,7 @@ export class TraceEventConsumer {
     const record: TraceRecord = {
       id: `TRACE-${event.eventId}`,
       traceCode: `TR-PRES-${event.eventId}`,
+      batchCode: "",
       plotCode: payload.parcelId,
       event: PRESCRIPTION_EVENT,
       detail,
