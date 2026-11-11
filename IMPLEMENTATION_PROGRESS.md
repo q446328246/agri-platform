@@ -359,7 +359,13 @@
 - **种植季/茬口档案（#78）**：迁移 `026_crop_seasons.sql`（`crop_seasons` 表，**无预置种子**，如实建表）；`season.repository.ts` SQL/内存双模 + `compareRotation`（年→季序→栽期→创建时间）轮作排序 + `isValidFarmDate` 日期校验；HTTP `GET/POST/PUT/DELETE /plots/seasons`（建档校验地块存在、作物非空、年份 1900–2999、季序≥1、收获≥栽插、状态枚举、产量非负；季码 `SEASON-<ulid>` 重码 409）；前端 `plot/Season.vue` 轮作时间轴 + 连作预警（决策支持，非自动判定）、路由与看板菜单接入。`season.spec.ts` 5 + `plot-season.spec.ts` 5。
 - **地块变更历史（#79）**：迁移 `027_plot_change_logs.sql`（`plot_change_logs` 追加式，**无历史回填**）；`plot-change-log.repository.ts` SQL/内存双模（`append` 随业务事务、`listByPlot` 按时间倒序）；HTTP 在建档/修改/删除处按字段中文标签留痕（`actor` 取 `x-user-id`，缺省 `system`；仅当字段实际变化才记 UPDATE），新增 `GET /plots/:code/history`；前端 `plot/Detail.vue` 变更历史时间轴（按 `parcelCode` 取数，历史拉取失败不阻断档案展示）。`plot-change-log.spec.ts` 3 + `plot-detail-history.spec.ts` 3。**地块合并/拆分**属破坏性几何改写（重划边界、可能丢面积与历史归属），未擅自实现，列为待用户确认项。
 - **全量验证**：根 `npx tsc -b` 通过；`npx vitest run` **483 passed / 11 skipped**（DB 门控用例自动跳过）；`pnpm --filter @agri/web build` 通过；一次性临时库 `agri_verify_tmp` 对 `025`–`027` 与追溯链条做 SQL 往返（追加/倒序/actor 映射/租户隔离）后即销毁，演示库 `agri` 全程未写、`trace_records` 基线 22 保持不变。
-- **同步修正的文档不实之处**：根 `README.md` 原称「口令以 sha256 入库（待换 bcrypt/argon2）」与代码实际的 scrypt 随机盐不符，已改述；原「业务数据与待投递事件写入同一事务」对 `plot-service` 过头（其 `OutboxStore` 仍是内存实现、仅单进程演示中继，且 `PlotCreated` 无消费方），已限定为决策/遥测/农事三服务的 `*_outbox` 落库事务。
+- **同步修正的文档不实之处**：根 `README.md` 原称「口令以 sha256 入库（待换 bcrypt/argon2）」与代码实际的 scrypt 随机盐不符，已改述；原「业务数据与待投递事件写入同一事务」对 `plot-service` 过头（其 `OutboxStore` 曾是内存实现、仅单进程演示中继），已限定为决策/遥测/农事三服务；`#80` 补齐 `plot_outbox` 后 README 已把地块并入落库事务服务口径。
+
+### 2026-11-11：地块建档事件跨进程可靠（plot_outbox）
+
+- **`plot_outbox` 落库与 HTTP 模式中继（#80）**：迁移 `028_plot_outbox.sql` 建 `plot_outbox`（与 `decision_outbox`/`telemetry_outbox` 同构，含 `idx_plot_outbox_pending` 部分索引）；`outbox.repository.ts` 新增 `SqlPlotOutboxStore`（`enqueue` 强制事务、时间列 `toIsoTimestamp` 映射、`listPending`/`markPublished`/`markFailed`）。`main.ts` 按 `PLOT_REPOSITORY_MODE` 选择事件链路：SQL 模式用 `EventLogPublisher(new PgEventLogStore(client))` + `SqlPlotOutboxStore`，`registerPlot` 把地块与 `PlotCreated` 同事务落 `plot_outbox`，HTTP 启动后 `outbox.start()` 周期性中继到共享 `event_log`，停机 `outbox.stop()`；内存模式保留原单进程演示路径（`.all()`/`.published` 自省仅在内存分支）。`SqlPlotOutboxStore` 导出进 `index.ts`。
+- **诚实边界**：`plot_outbox` 只补「建档事件可靠落库并投递到 `event_log`」这一层；`PlotCreated` 目前**仍无下游服务订阅**，`plot-service` 内存消费者只校验面积、不构成跨进程消费链路。即事件已可靠待用，尚未接出。
+- **验证**：根 `npx tsc -b` 通过；`apps/plot-service/test/sql-plot-outbox.spec.ts` 4 用例（ISO 映射、脱离事务拒绝、事务内 jsonb 落库、markPublished/markFailed）全绿；一次性临时库 `agri_verify_tmp` 应用全部迁移（含 028）后跑真实 `registerPlot → relayOnce → 读 event_log`：地块与待投递记录同事务落库、中继后 `plot_outbox` 待投清零、`event_log` 恰一条 `plot.plot.created`（`producer=plot`、`trace` 透传）、二次中继幂等不新增，随后销毁；演示库 `agri` 全程未写（`plot_outbox` 在 `agri` 中不存在，迁移仅在部署时应用）。全量 `vitest` 中 6 个前端 view-harness 用例是并行负载下的 5s 超时抖动（隔离复跑 12/12、2.7s 全绿），非回归；本轮未改前端代码，`pnpm --filter @agri/web build` 通过。
 
 ## 下一步（中断后从这里继续）
 
@@ -388,7 +394,7 @@
    - 溯源下游环节（加工 / 物流 / 质检）：无外部系统可对接，`#77` 链条时间轴已如实标注为待接入，不编造节点；
    - 双人复核、正式备份/恢复演练、性能与现场验收：属交付流程/现场验收项，非代码缺口；
    - **地块合并 / 拆分**（`#79` 相关）：破坏性几何改写，需明确边界重划与历史归属口径，待用户确认后再做；
-   - **`plot-service` 事件跨进程可靠性**：建档事件目前只在内存消息表、单进程演示中继，`PlotCreated` 无消费方；若将来要驱动下游，需要补 `plot_outbox` 落库 + HTTP 模式中继（详见 README 已限定的表述）。
+   - **`PlotCreated` 下游消费**（`#80` 之后）：建档事件已可靠落 `plot_outbox` 并中继进 `event_log`，跨进程不再丢事件；但仍无服务订阅 `PlotCreated`，若要驱动下游需新增消费方（当前 `plot-service` 内存消费者只校验面积，不算消费链路）。
 
 ## 验证记录
 

@@ -11,13 +11,16 @@ import "reflect-metadata";
 import type { DomainEvent, PlotCreatedPayload } from "@agri/contracts";
 import { loadConfig } from "@agri/config";
 import { PgClientAdapter, PrismaService } from "@agri/db";
+import type { EventPublisher, OutboxStore } from "@agri/mq";
 import {
   EventDispatcher,
+  EventLogPublisher,
   IdempotencyGuard,
   InMemoryEventPublisher,
   InMemoryIdempotencyStore,
   InMemoryOutboxStore,
   OutboxService,
+  PgEventLogStore,
   setDefaultPublisher,
 } from "@agri/mq";
 import { configureDecorators, LoggerService, MetricsService } from "@agri/observability";
@@ -30,6 +33,7 @@ import { InMemoryCropSeasonRepository, SqlCropSeasonRepository } from "./season.
 import { InMemoryPlotChangeLogRepository, SqlPlotChangeLogRepository } from "./plot-change-log.repository.js";
 import { InMemoryZoneRepository, SqlZoneRepository } from "./zone.repository.js";
 import { InMemoryPlotRepository, SqlPlotRepository } from "./plot.repository.js";
+import { SqlPlotOutboxStore } from "./outbox.repository.js";
 import { PlotService } from "./plot.service.js";
 import { createExamplePrismaFactory } from "./prisma.factory.js";
 import { createPlotHttpServer } from "./http.js";
@@ -64,10 +68,34 @@ async function bootstrap(): Promise<void> {
   const metrics = new MetricsService();
   configureDecorators({ logger, metrics });
 
+  // 业务依赖
+  // SQL 模式下必须注入真实的 pg 适配器，示例客户端只在内存演示时使用
+  const repositoryMode = process.env.PLOT_REPOSITORY_MODE === "sql" ? "sql" : "memory";
+  const prisma = new PrismaService(
+    {
+      url: appConfig.db.url,
+      shardMode: appConfig.db.shardMode,
+      poolSize: appConfig.db.poolSize,
+      slowQueryMs: appConfig.db.slowQueryMs,
+    },
+    repositoryMode === "sql" ? () => PgClientAdapter.fromUrl(appConfig.db.url) : createExamplePrismaFactory(),
+  );
+  await prisma.onModuleInit();
+
   // 基础设施与横切能力
-  const publisher = new InMemoryEventPublisher();
+  // SQL 模式：建档事件与地块同事务落 plot_outbox，由中继投递到共享事件日志，跨进程可靠
+  // 内存模式：进程内消息表与发布器，仅供不启动中间件的单进程演示
+  const publisher: EventPublisher = repositoryMode === "sql"
+    ? new EventLogPublisher(new PgEventLogStore(prisma.clientInstance), {
+        tenantId: "tenant-demo",
+        traceId: "plot-relay",
+        producer: "plot",
+      })
+    : new InMemoryEventPublisher();
   setDefaultPublisher(publisher);
-  const outboxStore = new InMemoryOutboxStore();
+  const outboxStore: OutboxStore = repositoryMode === "sql"
+    ? new SqlPlotOutboxStore(prisma.clientInstance)
+    : new InMemoryOutboxStore();
   const outbox = new OutboxService(outboxStore, publisher, {
     tenantId: "tenant-demo",
     traceId: "boot",
@@ -82,20 +110,6 @@ async function bootstrap(): Promise<void> {
   const consumer = new PlotEventConsumer();
   consumer.bind(dispatcher);
   await dispatcher.start();
-
-  // 业务依赖
-  // SQL 模式下必须注入真实的 pg 适配器，示例客户端只在内存演示时使用
-  const repositoryMode = process.env.PLOT_REPOSITORY_MODE === "sql" ? "sql" : "memory";
-  const prisma = new PrismaService(
-    {
-      url: appConfig.db.url,
-      shardMode: appConfig.db.shardMode,
-      poolSize: appConfig.db.poolSize,
-      slowQueryMs: appConfig.db.slowQueryMs,
-    },
-    repositoryMode === "sql" ? () => PgClientAdapter.fromUrl(appConfig.db.url) : createExamplePrismaFactory(),
-  );
-  await prisma.onModuleInit();
 
   const repository = repositoryMode === "sql"
     ? new SqlPlotRepository(prisma.clientInstance)
@@ -119,14 +133,29 @@ async function bootstrap(): Promise<void> {
   if (process.env.SERVICE_MODE === "http") {
     const server = createPlotHttpServer(plotService, infraLines, zones, seasons, changeLogs);
     const port = Number(process.env.PORT ?? 3002);
+    // SQL 模式周期性中继把 plot_outbox 待投递事件写入共享事件日志，供其他服务消费
+    if (repositoryMode === "sql") {
+      outbox.start();
+    }
     server.listen(port, "127.0.0.1", () => logger.info("地块服务 HTTP 已启动", { port }));
     const shutdown = async (): Promise<void> => {
       server.close();
+      if (repositoryMode === "sql") {
+        outbox.stop();
+      }
       await dispatcher.stop();
       await prisma.onModuleDestroy();
     };
     process.once("SIGINT", () => void shutdown());
     process.once("SIGTERM", () => void shutdown());
+    return;
+  }
+
+  // SQL 模式已接入 HTTP 持久化链路；未启动 HTTP 时不再向真实库写入演示事件
+  if (repositoryMode === "sql") {
+    await dispatcher.stop();
+    await prisma.onModuleDestroy();
+    logger.info("地块服务 SQL 模式已就绪（未启动 HTTP，跳过内存演示链路）");
     return;
   }
 
@@ -153,7 +182,8 @@ async function bootstrap(): Promise<void> {
   logger.info("本地消息表中继完成", { relayed });
 
   // 3. 消费：同一事件投递两次，第二次应被幂等丢弃
-  const record = outboxStore.all()[0];
+  // 走到这里必是内存演示模式（SQL 模式已提前返回），可安全取内存消息表的进程内视图
+  const record = (outboxStore as InMemoryOutboxStore).all()[0];
   if (!record) {
     throw new Error("中继后未找到待投递记录");
   }
@@ -185,7 +215,7 @@ async function bootstrap(): Promise<void> {
         areaMu: plot.areaMu,
         gridCode,
         handledEventCount: consumer.handledEventIds.length,
-        deliveredEventCount: publisher.published.length,
+        deliveredEventCount: (publisher as InMemoryEventPublisher).published.length,
         clientCoord,
       },
       null,

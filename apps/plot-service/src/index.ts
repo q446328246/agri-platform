@@ -8,6 +8,7 @@ export { PlotCodeService } from "./plot-code.service.js";
 export { PlotEventConsumer } from "./plot.consumer.js";
 export { InMemoryPlotRepository, SqlPlotRepository } from "./plot.repository.js";
 export type { PlotRecord, PlotRepository } from "./plot.repository.js";
+export { SqlPlotOutboxStore } from "./outbox.repository.js";
 export { CROP_SEASON_STATUSES, InMemoryCropSeasonRepository, SqlCropSeasonRepository, compareRotation, isValidFarmDate } from "./season.repository.js";
 export type { CropSeason, CropSeasonInput, CropSeasonPatch, CropSeasonRepository, CropSeasonStatus } from "./season.repository.js";
 export { PLOT_CHANGE_ACTIONS, InMemoryPlotChangeLogRepository, SqlPlotChangeLogRepository } from "./plot-change-log.repository.js";
