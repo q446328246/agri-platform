@@ -10,7 +10,7 @@ import { demoAlerts, demoForecastDays, demoForecastHours } from "./demo.js";
 import { InMemoryForecastRepository } from "./forecast.repository.js";
 import type { ForecastRepository, WeatherForecastDay, WeatherHourlyPoint } from "./forecast.repository.js";
 import { WEATHER_METRICS, buildAdvice } from "./weather.js";
-import { farmToday } from "./farm-time.js";
+import { farmDayEnd, farmDayStart, farmToday } from "./farm-time.js";
 
 const API_PREFIX = "/api/v1/weather";
 const CITY = "达州市";
@@ -97,10 +97,6 @@ function paramNumber(query: URLSearchParams, name: string): number | undefined {
   return raw === "" || !Number.isFinite(Number(raw)) ? undefined : Number(raw);
 }
 
-/** 纯日期补齐到当天末尾，作为区间右端 */
-function endOfDay(value: string): string {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:59.999Z` : value;
-}
 
 export function createWeatherHttpServer(dependencies: WeatherDependencies = {}): Server {
   const forecastSeed = { days: demoForecastDays(), hours: demoForecastHours() };
@@ -299,8 +295,8 @@ export function createWeatherHttpServer(dependencies: WeatherDependencies = {}):
         const parts = [`metric=${encodeURIComponent(metric)}`, `limit=${limit}`];
         if (deviceId) parts.push(`deviceId=${encodeURIComponent(deviceId)}`);
         if (plotCode) parts.push(`plotCode=${encodeURIComponent(plotCode)}`);
-        if (from) parts.push(`from=${encodeURIComponent(from)}`);
-        if (to) parts.push(`to=${encodeURIComponent(endOfDay(to))}`);
+        if (from) parts.push(`from=${encodeURIComponent(farmDayStart(from))}`);
+        if (to) parts.push(`to=${encodeURIComponent(farmDayEnd(to))}`);
         const rows = (await readTelemetry(`/api/v1/telemetry/history?${parts.join("&")}`, identityHeaders(req))) ?? [];
         const meta = WEATHER_METRICS.find((item) => item.key === metric);
         const points = rows

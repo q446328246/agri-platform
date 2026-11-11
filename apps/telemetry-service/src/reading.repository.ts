@@ -10,6 +10,8 @@ export interface Reading {
   value: number;
   unit: string;
   recordedAt: string;
+  /** 土壤分层深度（厘米）；非分层指标缺省 */
+  depthCm?: number;
 }
 
 /** 遥测告警 */
@@ -33,6 +35,7 @@ export interface CreateReadingInput {
   value: number;
   unit: string;
   recordedAt: string;
+  depthCm?: number;
 }
 
 /** 历史查询条件 */
@@ -42,6 +45,8 @@ export interface HistoryQuery {
   from?: string;
   to?: string;
   limit?: number;
+  plotCode?: string;
+  depthCm?: number;
 }
 
 /** 历史读数点：图表直接可用 */
@@ -67,7 +72,7 @@ export interface AlertRepository {
 }
 
 function toReading(row: Record<string, unknown>): Reading {
-  return {
+  const reading: Reading = {
     id: String(row.id),
     deviceId: String(row.device_id),
     plotCode: String(row.plot_code),
@@ -76,6 +81,8 @@ function toReading(row: Record<string, unknown>): Reading {
     unit: String(row.unit),
     recordedAt: toIsoTimestamp(row.recorded_at),
   };
+  if (row.depth_cm !== null && row.depth_cm !== undefined) reading.depthCm = Number(row.depth_cm);
+  return reading;
 }
 
 function toAlert(row: Record<string, unknown>): TelemetryAlert {
@@ -104,8 +111,8 @@ export class SqlReadingRepository implements ReadingRepository {
   async create(tx: unknown, input: CreateReadingInput): Promise<Reading> {
     const id = ulid();
     await this.executor(tx).$executeRawUnsafe(
-      `INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      `INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       id,
       input.deviceId,
       input.plotCode,
@@ -113,19 +120,20 @@ export class SqlReadingRepository implements ReadingRepository {
       input.value,
       input.unit,
       input.recordedAt,
+      input.depthCm ?? null,
     );
     return { id, ...input };
   }
 
-  /** 每个设备每个指标的最近一次读数；不传设备则返回全部设备 */
+  /** 每个设备每个指标（含深度分层）的最近一次读数；不传设备则返回全部设备 */
   async latest(deviceId?: string): Promise<Reading[]> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `WITH ranked AS (
-         SELECT id, device_id, plot_code, metric, value, unit, recorded_at,
-                ROW_NUMBER() OVER (PARTITION BY device_id, metric ORDER BY recorded_at DESC) AS rn
+         SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm,
+                ROW_NUMBER() OVER (PARTITION BY device_id, metric, depth_cm ORDER BY recorded_at DESC) AS rn
          FROM telemetry_readings
        )
-       SELECT id, device_id, plot_code, metric, value, unit, recorded_at FROM ranked WHERE rn = 1` +
+       SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm FROM ranked WHERE rn = 1` +
         (deviceId ? ` AND device_id = $1 ORDER BY metric` : ` ORDER BY device_id, metric`),
       ...(deviceId ? [deviceId] : []),
     );
@@ -136,14 +144,16 @@ export class SqlReadingRepository implements ReadingRepository {
     const conditions: string[] = [];
     const values: unknown[] = [];
     if (query.deviceId) { values.push(query.deviceId); conditions.push(`device_id = $${values.length}`); }
+    if (query.plotCode) { values.push(query.plotCode); conditions.push(`plot_code = $${values.length}`); }
     if (query.metric) { values.push(query.metric); conditions.push(`metric = $${values.length}`); }
+    if (query.depthCm !== undefined) { values.push(query.depthCm); conditions.push(`depth_cm = $${values.length}`); }
     if (query.from) { values.push(query.from); conditions.push(`recorded_at >= $${values.length}`); }
     if (query.to) { values.push(query.to); conditions.push(`recorded_at <= $${values.length}`); }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const limit = Math.min(2000, Math.max(1, query.limit ?? 200));
     values.push(limit);
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT id, device_id, plot_code, metric, value, unit, recorded_at FROM telemetry_readings ${where}
+      `SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm FROM telemetry_readings ${where}
        ORDER BY recorded_at DESC LIMIT $${values.length}`,
       ...values,
     );
@@ -218,7 +228,7 @@ export class InMemoryReadingRepository implements ReadingRepository {
   async latest(deviceId?: string): Promise<Reading[]> {
     const rows = deviceId ? this.rows.filter((row) => row.deviceId === deviceId) : this.rows;
     const byKey = new Map<string, Reading>();
-    for (const row of [...rows].sort((a, b) => a.recordedAt.localeCompare(b.recordedAt))) byKey.set(`${row.deviceId}::${row.metric}`, row);
+    for (const row of [...rows].sort((a, b) => a.recordedAt.localeCompare(b.recordedAt))) byKey.set(`${row.deviceId}::${row.metric}::${row.depthCm ?? ""}`, row);
     return [...byKey.values()];
   }
 
@@ -226,7 +236,9 @@ export class InMemoryReadingRepository implements ReadingRepository {
     const limit = Math.min(2000, Math.max(1, query.limit ?? 200));
     return this.rows
       .filter((row) => (query.deviceId ? row.deviceId === query.deviceId : true))
+      .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
       .filter((row) => (query.metric ? row.metric === query.metric : true))
+      .filter((row) => (query.depthCm !== undefined ? row.depthCm === query.depthCm : true))
       .filter((row) => (query.from ? row.recordedAt >= query.from : true))
       .filter((row) => (query.to ? row.recordedAt <= query.to : true))
       .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))

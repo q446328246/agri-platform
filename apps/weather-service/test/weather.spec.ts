@@ -163,7 +163,9 @@ describe("天气服务 HTTP 接口", () => {
       expect(history.body.data.points.map((point: { value: number }) => point.value)).toEqual([26, 31]);
       expect(history.body.data.stats).toEqual({ min: 26, max: 31, avg: 28.5, count: 2 });
       expect(asked[0]).toContain("metric=airTemperature");
-      expect(asked[0]).toContain("to=2026-11-05T23");
+      // 纯日期按农场东八区日历日转换：from=11-01 起点=10-31T16Z，to=11-05 末尾=11-05T15:59:59.999Z
+      expect(asked[0]).toContain(`from=${encodeURIComponent("2026-10-31T16:00:00.000Z")}`);
+      expect(asked[0]).toContain(`to=${encodeURIComponent("2026-11-05T15:59:59.999Z")}`);
 
       const bad = await get(base, "/api/v1/weather/history?metric=stockPrice");
       expect(bad.status).toBe(400);
@@ -173,6 +175,31 @@ describe("天气服务 HTTP 接口", () => {
       fetchReading: async (url: string) => {
         asked.push(url);
         return { data: readings };
+      },
+    });
+  });
+
+  it("历史区间按农场东八区日历日界定，边界外读数不纳入", async () => {
+    // 农场 11-01 06:00 = 10-31T22Z（应纳入）；农场 10-31 23:00 = 10-31T15Z（应排除）
+    // 农场 11-05 23:00 = 11-05T15Z（应纳入）；农场 11-06 00:00 = 11-05T16Z（应排除）
+    const readings = [
+      { deviceId: "w", plotCode: "", metric: "airTemperature", value: 99, unit: "°C", recordedAt: "2026-10-31T15:00:00.000Z" },
+      { deviceId: "w", plotCode: "", metric: "airTemperature", value: 10, unit: "°C", recordedAt: "2026-10-31T22:00:00.000Z" },
+      { deviceId: "w", plotCode: "", metric: "airTemperature", value: 20, unit: "°C", recordedAt: "2026-11-05T15:00:00.000Z" },
+      { deviceId: "w", plotCode: "", metric: "airTemperature", value: 88, unit: "°C", recordedAt: "2026-11-05T16:00:00.000Z" },
+    ];
+    await withServer(async (base) => {
+      const history = await get(base, "/api/v1/weather/history?metric=airTemperature&from=2026-11-01&to=2026-11-05");
+      expect(history.status).toBe(200);
+      expect(history.body.data.points.map((point: { value: number }) => point.value)).toEqual([10, 20]);
+      expect(history.body.data.stats.count).toBe(2);
+    }, {
+      telemetryUrl: "http://telemetry.stub",
+      fetchReading: async (url: string) => {
+        const params = new URL(url, "http://stub").searchParams;
+        const from = params.get("from") ?? "";
+        const to = params.get("to") ?? "";
+        return { data: readings.filter((row) => (!from || row.recordedAt >= from) && (!to || row.recordedAt <= to)) };
       },
     });
   });

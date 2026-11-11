@@ -9,6 +9,8 @@ import type { TelemetryDependencies } from "./http.js";
 import { SqlAlertRepository, SqlReadingRepository } from "./reading.repository.js";
 import { TelemetryOutboxStore } from "./outbox.repository.js";
 import { SqlPestEventRepository } from "./pest.repository.js";
+import { SqlGrowthStageRepository } from "./growth.repository.js";
+import { SqlDisasterRepository } from "./disaster.repository.js";
 import { DEFAULT_TELEMETRY_RULES, SqlRuleRepository } from "./rule.repository.js";
 
 /** 日志级别白名单，缺省 info */
@@ -41,6 +43,8 @@ async function bootstrap(): Promise<void> {
         alerts: new SqlAlertRepository(client),
         rules,
         pests: new SqlPestEventRepository(client),
+        growth: new SqlGrowthStageRepository(client),
+        disasters: new SqlDisasterRepository(client),
         outbox,
         publisher,
         tenantId,

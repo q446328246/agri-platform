@@ -21,3 +21,15 @@ export function farmToday(): string {
 export function farmDateOffset(days: number, from: Date = new Date()): string {
   return farmDate(new Date(from.getTime() + days * DAY_MS));
 }
+
+const PURE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** 纯日期 → 该农场日（东八区）起点的 UTC 时刻；已是完整时间串则原样透传 */
+export function farmDayStart(value: string): string {
+  return PURE_DATE.test(value) ? new Date(`${value}T00:00:00+08:00`).toISOString() : value;
+}
+
+/** 纯日期 → 该农场日（东八区）末尾的 UTC 时刻；已是完整时间串则原样透传 */
+export function farmDayEnd(value: string): string {
+  return PURE_DATE.test(value) ? new Date(`${value}T23:59:59.999+08:00`).toISOString() : value;
+}
