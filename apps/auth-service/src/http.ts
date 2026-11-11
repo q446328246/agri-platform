@@ -47,7 +47,8 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
 function publicUser(record: UserRecord): PublicUser { const { passwordHash: _passwordHash, ...safe } = record; return safe; }
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function stringList(value: unknown): string[] { return Array.isArray(value) ? value.map((item) => String(item).trim()).filter((item) => item.length > 0) : []; }
-function tenantOf(request: IncomingMessage, body?: Record<string, unknown>): string { return text(body?.tenantId) || request.headers["x-tenant-id"]?.toString() || "tenant-demo"; }
+/** 管理接口只认网关注入的租户；未传头的本地开发请求限定在演示租户。 */
+function tenantOf(request: IncomingMessage): string { return request.headers["x-tenant-id"]?.toString() || "tenant-demo"; }
 function parseStatus(value: unknown): UserStatus | null { const status = text(value); if (status === "ACTIVE" || status === "DISABLED") return status; return null; }
 
 /** 内部接口凭证：网关与管理脚本使用，不经公网暴露 */
@@ -112,7 +113,7 @@ function buildNewUser(request: IncomingMessage, body: Record<string, unknown>): 
   return {
     record: {
       id: `user-${randomUUID().slice(0, 8)}`,
-      tenantId: tenantOf(request, body),
+      tenantId: tenantOf(request),
       username,
       passwordHash: hashPassword(password),
       name,
@@ -166,7 +167,8 @@ export function createAuthHttpServer(options: AuthHttpOptions = {}): Server {
       const body = await readJson(request);
       const username = text(body.username);
       const password = text(body.password);
-      const user = await users.findByUsername(tenantOf(request, body), username);
+      // 登录尚未建立可信身份，允许通过请求体选择登录租户。
+      const user = await users.findByUsername(text(body.tenantId) || tenantOf(request), username);
       if (!user || !verifyPassword(password, user.passwordHash)) { send(response, 401, null, traceId, "用户名或密码错误"); return; }
       if (user.status === "DISABLED") { send(response, 403, null, traceId, "账号已停用，请联系管理员"); return; }
       // 旧 sha256 散列在登录成功时就地升级，历史账号无需批量改密
@@ -200,7 +202,7 @@ export function createAuthHttpServer(options: AuthHttpOptions = {}): Server {
       const page = await users.page({
         page: Math.max(1, Number(url.searchParams.get("page") || 1)),
         size: Math.min(200, Math.max(1, Number(url.searchParams.get("size") || 20))),
-        ...(request.headers["x-tenant-id"] ? { tenantId: request.headers["x-tenant-id"].toString() } : {}),
+        tenantId: tenantOf(request),
         ...(status ? { status } : {}),
         ...(text(url.searchParams.get("keyword")) ? { keyword: text(url.searchParams.get("keyword")) } : {}),
       });
@@ -209,7 +211,9 @@ export function createAuthHttpServer(options: AuthHttpOptions = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/v1/auth/users") {
-      const built = buildNewUser(request, await readJson(request));
+      const body = await readJson(request);
+      if (body.tenantId !== undefined && text(body.tenantId) !== tenantOf(request)) { send(response, 403, null, traceId, "不能跨租户创建用户"); return; }
+      const built = buildNewUser(request, body);
       if (built.error !== undefined) { send(response, 400, null, traceId, built.error); return; }
       if (await users.findByUsername(built.record.tenantId, built.record.username)) { send(response, 409, null, traceId, "用户名已存在"); return; }
       send(response, 201, publicUser(await users.create(built.record)), traceId);
@@ -219,7 +223,7 @@ export function createAuthHttpServer(options: AuthHttpOptions = {}): Server {
     if (userRoute) {
       const id = decodeURIComponent(userRoute[1] ?? "");
       const user = await users.findById(id);
-      if (!user) { send(response, 404, null, traceId, "用户不存在"); return; }
+      if (!user || user.tenantId !== tenantOf(request)) { send(response, 404, null, traceId, "用户不存在"); return; }
       if (request.method === "PUT") {
         const applied = applyUpdate(user, await readJson(request));
         if (applied.error !== undefined) { send(response, 400, null, traceId, applied.error); return; }
@@ -240,7 +244,7 @@ export function createAuthHttpServer(options: AuthHttpOptions = {}): Server {
     if (request.method === "POST" && passwordRoute) {
       const id = decodeURIComponent(passwordRoute[1] ?? "");
       const user = await users.findById(id);
-      if (!user) { send(response, 404, null, traceId, "用户不存在"); return; }
+      if (!user || user.tenantId !== tenantOf(request)) { send(response, 404, null, traceId, "用户不存在"); return; }
       const password = text((await readJson(request)).password);
       if (password.length < 6) { send(response, 400, null, traceId, "密码至少 6 位"); return; }
       await users.updatePassword(user.id, hashPassword(password), new Date().toISOString());

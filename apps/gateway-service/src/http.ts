@@ -65,9 +65,10 @@ export function createGatewayHttpServer(options: GatewayOptions = {}): Server {
 
     const method = request.method ?? "GET";
     const authorization = request.headers.authorization?.toString();
+    const deviceToken = request.headers["x-device-token"]?.toString();
     let session: { userId: string; tenantId: string; permissions: string[] } | null = null;
     if (authorizer) {
-      const outcome = await authorizer.authorize({ method, pathname: url.pathname, authorization });
+      const outcome = await authorizer.authorize({ method, pathname: url.pathname, authorization, deviceToken });
       if (!outcome.allowed) { reply(response, outcome.status, `GATEWAY-${outcome.status}`, outcome.message); return; }
       session = outcome.session;
     }
@@ -82,6 +83,8 @@ export function createGatewayHttpServer(options: GatewayOptions = {}): Server {
         "authorization": authorization || "",
         "x-request-id": request.headers["x-request-id"]?.toString() || "",
         "x-confirm-action": request.headers["x-confirm-action"]?.toString() || "",
+        // 回调凭证原样下发，由下游服务按同一密钥二次校验；网关已拒绝无效凭证
+        "x-device-token": deviceToken || "",
         // 身份头只接受网关解析结果；未鉴权（测试模式）时才透传客户端提供的租户
         "x-tenant-id": session ? session.tenantId : request.headers["x-tenant-id"]?.toString() || "",
         "x-user-id": session ? session.userId : request.headers["x-user-id"]?.toString() || "",

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 
 import { hasPermission, parsePermissionHeader } from "@agri/contracts";
@@ -18,8 +19,10 @@ export interface AuthzPolicy {
   read: string;
   /** 其它方法所需权限 */
   write: string;
-  /** 无需身份即可访问的路径（登录、设备上报等） */
+  /** 无需身份即可访问的路径（登录等） */
   publicPaths?: string[];
+  /** 设备/算法回调路径：携带有效 x-device-token 放行，否则按用户身份与写权限判定 */
+  callbackPaths?: string[];
   /** 仅需登录、不校验具体权限的路径（个人信息、退出登录） */
   sessionPaths?: string[];
   /** 按路径前缀覆盖所需权限，优先于读写默认值 */
@@ -35,6 +38,24 @@ export interface AuthzDenial {
 /** 守卫是否启用 */
 export function authzGuardEnabled(): boolean {
   return process.env.AUTH_GUARD_MODE === "enforce";
+}
+
+/** 定长时间比较，避免凭证逐字节试探；任一为空一律不相等 */
+export function constantTimeEquals(a: string, b: string): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/** 设备/算法回调共享凭证，未配置时回调只能走用户身份 */
+export function configuredDeviceToken(): string {
+  return (process.env.DEVICE_CALLBACK_TOKEN ?? "").trim();
+}
+
+/** 请求头里的设备回调凭证是否有效 */
+export function isDeviceCallbackAuthorized(headerValue: string | undefined): boolean {
+  return constantTimeEquals(headerValue ?? "", configuredDeviceToken());
 }
 
 /**
@@ -67,6 +88,8 @@ export function authorizeRequest(request: IncomingMessage, policy: AuthzPolicy):
   if (!authzGuardEnabled()) return null;
   const pathname = normalize(new URL(request.url ?? "/", "http://localhost").pathname);
   if (matches(pathname, policy.publicPaths)) return null;
+  // 回调路径：有效设备凭证直接放行；没有凭证则继续按用户身份判定（人工核查上报）
+  if (matches(pathname, policy.callbackPaths) && isDeviceCallbackAuthorized(request.headers["x-device-token"]?.toString())) return null;
 
   const userId = request.headers["x-user-id"]?.toString() ?? "";
   if (!userId) return { status: 401, message: "未登录或登录已失效" };

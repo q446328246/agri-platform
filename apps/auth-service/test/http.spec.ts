@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Server } from "node:http";
 import { createHash } from "node:crypto";
 import { createAuthHttpServer } from "../src/http.js";
 import { InMemorySessionRepository } from "../src/session.repository.js";
 import { InMemoryUserRepository, seedUsers, verifyPassword } from "../src/user.repository.js";
+import type { UserRecord } from "../src/user.repository.js";
 
 const servers: Server[] = [];
 
@@ -19,12 +20,24 @@ async function post(base: string, path: string, body: unknown, headers: Record<s
   return fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 }
 
-async function put(base: string, path: string, body: unknown): Promise<Response> {
-  return fetch(`${base}${path}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+async function put(base: string, path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
+  return fetch(`${base}${path}`, { method: "PUT", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 }
+
+beforeEach(() => {
+  // 账号 HTTP 单测不访问外部平台服务，角色解析使用固定的空响应。
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input).endsWith("/api/v1/internal/platform/role-permissions")) {
+      return Promise.resolve(new Response(JSON.stringify({ data: { items: [] } }), { status: 200 }));
+    }
+    return realFetch(input, init);
+  });
+});
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))));
+  vi.restoreAllMocks();
 });
 
 describe("auth HTTP API 用户管理", () => {
@@ -84,6 +97,111 @@ describe("auth HTTP API 用户管理", () => {
     const listed = await fetch(`${base}/api/v1/auth/users`);
     const raw = await listed.text();
     expect(raw.includes("\"password\"")).toBe(false);
+  });
+});
+
+function tenantUser(tenantId: string): UserRecord {
+  return { ...seedUsers()[0]!, id: `user-${tenantId}`, tenantId, username: "tenantuser", name: tenantId };
+}
+
+async function addSession(sessions: InMemorySessionRepository, user: UserRecord): Promise<string> {
+  const token = `token-${user.id}`;
+  await sessions.create({ token, userId: user.id, tenantId: user.tenantId, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  return token;
+}
+
+describe("auth 用户管理租户隔离", () => {
+  it.each(["tenant-a", undefined])("建号只使用可信租户 %s，明确拒绝跨租户请求体", async (headerTenant) => {
+    const users = new InMemoryUserRepository();
+    const base = await start(createAuthHttpServer({ users }));
+    const headers: Record<string, string> = headerTenant ? { "x-tenant-id": headerTenant } : {};
+    const tenantId = headerTenant ?? "tenant-demo";
+    const body = { username: "tenantuser", name: "租户用户", tenantId: "tenant-b" };
+    const denied = await post(base, "/api/v1/auth/users", body, headers);
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toMatchObject({ code: "AUTH-403", data: null });
+    expect((await users.page({ page: 1, size: 20 })).total).toBe(0);
+
+    for (const input of [{ ...body, tenantId }, { username: "otheruser", name: "未指定租户" }]) {
+      const created = await post(base, "/api/v1/auth/users", input, headers);
+      expect(created.status).toBe(201);
+      expect(await created.json()).toMatchObject({ data: { tenantId, username: input.username } });
+      expect(await users.findByUsername(tenantId, input.username)).not.toBeNull();
+    }
+    expect(await users.findByUsername("tenant-b", "tenantuser")).toBeNull();
+  });
+
+  it.each(["tenant-a", "tenant-b", undefined, "tenant-missing"])("列表限定租户 %s，查询参数不能覆盖范围", async (headerTenant) => {
+    const users = new InMemoryUserRepository(["tenant-a", "tenant-b", "tenant-demo"].map(tenantUser));
+    const base = await start(createAuthHttpServer({ users }));
+    const headers: Record<string, string> = headerTenant ? { "x-tenant-id": headerTenant } : {};
+    const tenantId = headerTenant ?? "tenant-demo";
+    const listed = await fetch(`${base}/api/v1/auth/users?tenantId=tenant-b&keyword=tenantuser`, { headers });
+    expect(listed.status).toBe(200);
+    const page = (await listed.json() as { data: { total: number; items: UserRecord[] } }).data;
+    expect(page.total).toBe(tenantId === "tenant-missing" ? 0 : 1);
+    expect(page.items.map((user) => user.tenantId)).toEqual(tenantId === "tenant-missing" ? [] : [tenantId]);
+    expect(page.items.every((user) => !("passwordHash" in user))).toBe(true);
+  });
+
+  it.each([
+    ["PUT", "", "tenant-a"], ["DELETE", "", "tenant-a"], ["POST", "/password", "tenant-a"],
+    ["PUT", "", undefined], ["DELETE", "", undefined], ["POST", "/password", undefined],
+  ] as const)("%s 用户%s 在租户 %s 下返回404且不改数据或回收会话", async (method, suffix, headerTenant) => {
+    const target = tenantUser("tenant-b");
+    const own = tenantUser(headerTenant ?? "tenant-demo");
+    const users = new InMemoryUserRepository([target, own]);
+    const sessions = new InMemorySessionRepository();
+    const targetToken = await addSession(sessions, target);
+    const ownToken = await addSession(sessions, own);
+    const targetSession = await sessions.find(targetToken);
+    const mutations = [vi.spyOn(users, "update"), vi.spyOn(users, "remove"), vi.spyOn(users, "updatePassword"), vi.spyOn(sessions, "removeByUser")];
+    const base = await start(createAuthHttpServer({ users, sessions }));
+    const headers: Record<string, string> = { "content-type": "application/json", ...(headerTenant ? { "x-tenant-id": headerTenant } : {}) };
+    const denied = await fetch(`${base}/api/v1/auth/users/${target.id}${suffix}`, {
+      method, headers,
+      body: JSON.stringify({ tenantId: target.tenantId, name: "被篡改", status: "DISABLED", password: "changed123" }),
+    });
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toMatchObject({ code: "AUTH-404", message: "用户不存在", data: null });
+    expect(await users.findById(target.id)).toEqual(target);
+    expect(await sessions.find(targetToken)).toEqual(targetSession);
+    expect(await sessions.find(ownToken)).not.toBeNull();
+    for (const mutation of mutations) expect(mutation).not.toHaveBeenCalled();
+  });
+
+  it("同租户可更新、改密和删除，且仅回收目标用户会话", async () => {
+    const target = tenantUser("tenant-b");
+    const other = tenantUser("tenant-a");
+    const users = new InMemoryUserRepository([target, other]);
+    const sessions = new InMemorySessionRepository();
+    const targetToken = await addSession(sessions, target);
+    const otherToken = await addSession(sessions, other);
+    const base = await start(createAuthHttpServer({ users, sessions }));
+    const headers = { "x-tenant-id": target.tenantId };
+
+    const updated = await put(base, `/api/v1/auth/users/${target.id}`, { name: "已更新", tenantId: other.tenantId }, headers);
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toMatchObject({ data: { name: "已更新", tenantId: target.tenantId } });
+    expect(await sessions.find(targetToken)).not.toBeNull();
+    expect((await post(base, `/api/v1/auth/users/${target.id}/password`, { password: "changed123" }, headers)).status).toBe(200);
+    expect(verifyPassword("changed123", (await users.findById(target.id))!.passwordHash)).toBe(true);
+    expect(await sessions.find(targetToken)).toBeNull();
+    await addSession(sessions, target);
+    expect((await fetch(`${base}/api/v1/auth/users/${target.id}`, { method: "DELETE", headers })).status).toBe(200);
+    expect(await users.findById(target.id)).toBeNull();
+    expect(await sessions.find(targetToken)).toBeNull();
+    expect(await users.findById(other.id)).toEqual(other);
+    expect(await sessions.find(otherToken)).not.toBeNull();
+  });
+
+  it("登录仍允许通过请求体选择租户", async () => {
+    const user = tenantUser("tenant-b");
+    const users = new InMemoryUserRepository([user]);
+    const base = await start(createAuthHttpServer({ users }));
+    const login = await post(base, "/api/v1/auth/login", { tenantId: user.tenantId, username: user.username, password: "admin123" }, { "x-tenant-id": "tenant-a" });
+    expect(login.status).toBe(200);
+    expect(await login.json()).toMatchObject({ data: { user: { id: user.id, tenantId: user.tenantId } } });
   });
 });
 

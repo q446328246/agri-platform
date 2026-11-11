@@ -102,4 +102,28 @@ describe("gateway 鉴权", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ userId: "user-agro", tenantId: "tenant-demo", permissions: "plot:read,telemetry:read" });
   });
+
+  it("设备回调凭证传入鉴权器并原样下发，供下游二次校验", async () => {
+    const seen: Array<{ deviceToken?: string | undefined }> = [];
+    const upstream = await start(createServer((request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ deviceToken: request.headers["x-device-token"] ?? null, userId: request.headers["x-user-id"] ?? null }));
+    }));
+    const gateway = await start(createGatewayHttpServer({
+      routes: [{ prefix: "/api/v1/telemetry", target: upstream }],
+      authorizer: {
+        authorize: async (input) => {
+          seen.push({ deviceToken: input.deviceToken });
+          return input.deviceToken === "device-secret" ? { allowed: true, session: null } : { allowed: false, status: 401, message: "设备回调凭证无效" };
+        },
+      },
+    }));
+    const ok = await fetch(`${gateway}/api/v1/telemetry/report`, { method: "POST", headers: { "content-type": "application/json", "x-device-token": "device-secret" }, body: JSON.stringify({ deviceId: "dev-1", metric: "soilMoisture", value: 20 }) });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ deviceToken: "device-secret", userId: "" });
+    expect(seen).toEqual([{ deviceToken: "device-secret" }]);
+
+    const denied = await fetch(`${gateway}/api/v1/telemetry/report`, { method: "POST", headers: { "content-type": "application/json", "x-device-token": "wrong" }, body: "{}" });
+    expect(denied.status).toBe(401);
+  });
 });

@@ -84,7 +84,12 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
       send(response, 200, { items }, traceId);
       return;
     }
-    if (request.method === "GET" && url.pathname === "/api/v1/platform/tenant") { const id = request.headers["x-tenant-id"]?.toString() || "tenant-demo"; send(response, 200, tenants.find((tenant) => tenant.id === id) ?? tenants[0], traceId); return; }
+    if (request.method === "GET" && url.pathname === "/api/v1/platform/tenant") {
+      const tenant = tenants.find((item) => item.id === tenantOf(request));
+      if (!tenant) { send(response, 404, null, traceId, "租户不存在"); return; }
+      send(response, 200, tenant, traceId);
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/v1/platform/permissions") { send(response, 200, permissionCatalog, traceId); return; }
     if (request.method === "GET" && url.pathname === "/api/v1/platform/roles") {
       const keyword = text(url.searchParams.get("keyword"));
@@ -112,7 +117,7 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
     if (roleRoute) {
       const id = decodeURIComponent(roleRoute[1] ?? "");
       const role = await roles.findById(id);
-      if (!role) { send(response, 404, null, traceId, "角色不存在"); return; }
+      if (!role || role.tenantId !== tenantOf(request)) { send(response, 404, null, traceId, "角色不存在"); return; }
       if (request.method === "PUT") {
         const body = await readJson(request);
         const name = text(body.name);

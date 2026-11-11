@@ -1,4 +1,5 @@
 import { hasPermission, mergePermissions } from "@agri/contracts";
+import { constantTimeEquals } from "@agri/shared";
 
 /**
  * 网关鉴权。
@@ -30,13 +31,15 @@ export interface AuthorizeInput {
   method: string;
   pathname: string;
   authorization?: string | undefined;
+  /** 设备/算法回调携带的 x-device-token */
+  deviceToken?: string | undefined;
 }
 
 export interface GatewayAuthorizer {
   authorize(input: AuthorizeInput): Promise<AuthzOutcome>;
 }
 
-type RouteRule = { kind: "public" } | { kind: "session" } | { kind: "permission"; code: string };
+type RouteRule = { kind: "public" } | { kind: "session" } | { kind: "permission"; code: string } | { kind: "callback"; write: string };
 
 /** 路径前缀到读写权限的映射，未列出的前缀至少要求登录 */
 const ROUTE_PERMISSIONS: Array<{ prefix: string; read: string; write: string }> = [
@@ -72,17 +75,17 @@ function matchesPrefix(pathname: string, prefix: string): boolean {
 
 /**
  * 解析单个请求需要的身份与权限。
- * 公开路径只有登录与设备上报；账号、角色、审计各自独立，其余按前缀读写映射。
+ * 公开路径只有登录；设备上报与算法回调走回调凭证（也允许有写权限的用户人工上报）；
+ * 账号、角色、审计各自独立，其余按前缀读写映射。
  */
 export function resolveRouteRule(method: string, pathname: string): RouteRule {
   const path = normalize(pathname);
   if (path === "/health") return { kind: "public" };
   if (method === "POST" && path === "/api/v1/auth/login") return { kind: "public" };
-  // 设备直连上报不走用户身份，由设备侧接入方案单独鉴权
-  if (method === "POST" && path === "/api/v1/telemetry/report") return { kind: "public" };
-  // 虫情识别与视频 AI 识别由算法侧回调，同样不带用户身份
-  if (method === "POST" && path === "/api/v1/telemetry/pest-events") return { kind: "public" };
-  if (method === "POST" && path === "/api/v1/video/ai-events") return { kind: "public" };
+  // 设备直连上报与算法回调不带用户令牌，改由 DEVICE_CALLBACK_TOKEN 共享凭证鉴权
+  if (method === "POST" && path === "/api/v1/telemetry/report") return { kind: "callback", write: "telemetry:write" };
+  if (method === "POST" && path === "/api/v1/telemetry/pest-events") return { kind: "callback", write: "telemetry:write" };
+  if (method === "POST" && path === "/api/v1/video/ai-events") return { kind: "callback", write: "device:control" };
   if (matchesPrefix(path, "/api/v1/auth/userinfo") || matchesPrefix(path, "/api/v1/auth/logout")) return { kind: "session" };
   if (matchesPrefix(path, "/api/v1/auth/users") || matchesPrefix(path, "/api/v1/auth/internal")) return { kind: "permission", code: "system:user" };
   if (matchesPrefix(path, "/api/v1/platform/roles")) return { kind: "permission", code: "system:role" };
@@ -134,6 +137,8 @@ export interface GatewayAuthorizerOptions {
   platformServiceUrl: string;
   /** 内部接口凭证，与 auth/platform 的 INTERNAL_TOKEN 一致 */
   internalToken?: string;
+  /** 设备/算法回调共享凭证，与 telemetry/video 的 DEVICE_CALLBACK_TOKEN 一致；未配置时回调只认用户身份 */
+  deviceCallbackToken?: string;
   /** 会话缓存时长，默认 5 秒 */
   sessionTtlMs?: number;
   /** 角色权限缓存时长，默认 10 秒 */
@@ -158,29 +163,31 @@ export function permissionDenied(code: string): AuthzOutcome {
 export function createGatewayAuthorizer(options: GatewayAuthorizerOptions): GatewayAuthorizer {
   const request = options.fetchImpl ?? fetch;
   const internalToken = options.internalToken ?? process.env.INTERNAL_TOKEN ?? "agri-internal";
+  const deviceCallbackToken = (options.deviceCallbackToken ?? process.env.DEVICE_CALLBACK_TOKEN ?? "").trim();
   const sessionTtlMs = options.sessionTtlMs ?? 5000;
   const roleTtlMs = options.roleTtlMs ?? 10000;
   const sessionCache = cacheMap<AuthzSession>();
   const roleCache = cacheMap<string[]>();
 
-  async function internal<T>(url: string, payload: unknown): Promise<{ status: number; data: T | null }> {
+  async function internal<T>(url: string, payload: unknown, tenantId?: string): Promise<{ status: number; data: T | null }> {
     const response = await request(url, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-internal-token": internalToken },
+      headers: { "content-type": "application/json", "x-internal-token": internalToken, ...(tenantId !== undefined ? { "x-tenant-id": tenantId } : {}) },
       body: JSON.stringify(payload),
     });
     const body = (await response.json()) as { data?: T };
     return { status: response.status, data: body.data ?? null };
   }
 
-  async function resolveRolePermissions(roles: string[]): Promise<string[]> {
+  async function resolveRolePermissions(tenantId: string, roles: string[]): Promise<string[]> {
     if (roles.length === 0) return [];
-    const key = [...roles].sort().join(",");
+    const key = JSON.stringify([tenantId, [...roles].sort()]);
     const cached = roleCache.get(key);
     if (cached) return cached;
     const result = await internal<{ items: Array<{ code: string; permissions: string[] }> }>(
       `${options.platformServiceUrl}/api/v1/internal/platform/role-permissions`,
       { codes: roles },
+      tenantId,
     );
     if (result.status !== 200 || !result.data) throw new Error("角色权限解析失败");
     const permissions = mergePermissions(...result.data.items.map((item) => item.permissions));
@@ -195,7 +202,7 @@ export function createGatewayAuthorizer(options: GatewayAuthorizerOptions): Gate
     if (result.status === 401 || result.status === 403) return null;
     if (result.status !== 200 || !result.data) throw new Error("会话解析失败");
     const context = result.data;
-    const rolePermissions = await resolveRolePermissions(context.roles ?? []);
+    const rolePermissions = await resolveRolePermissions(context.tenantId, context.roles ?? []);
     const session: AuthzSession = {
       userId: context.userId,
       tenantId: context.tenantId,
@@ -212,13 +219,20 @@ export function createGatewayAuthorizer(options: GatewayAuthorizerOptions): Gate
     async authorize(input) {
       const rule = resolveRouteRule(input.method, input.pathname);
       if (rule.kind === "public") return { allowed: true, session: null };
+      // 回调优先认设备凭证；凭证错误直接拒绝，不再回退用户身份，避免拿用户令牌试探设备通道
+      if (rule.kind === "callback" && input.deviceToken) {
+        return constantTimeEquals(input.deviceToken, deviceCallbackToken)
+          ? { allowed: true, session: null }
+          : { allowed: false, status: 401, message: "设备回调凭证无效" };
+      }
       const token = bearerToken(input.authorization);
       if (!token) return { allowed: false, status: 401, message: "未登录或登录已失效" };
       try {
         const session = await resolveSession(token);
         if (!session) return { allowed: false, status: 401, message: "未登录或登录已失效" };
         if (rule.kind === "session") return { allowed: true, session };
-        return hasPermission(session.permissions, rule.code) ? { allowed: true, session } : permissionDenied(rule.code);
+        const required = rule.kind === "callback" ? rule.write : rule.code;
+        return hasPermission(session.permissions, required) ? { allowed: true, session } : permissionDenied(required);
       } catch {
         return { allowed: false, status: 502, message: "认证或角色服务不可用" };
       }

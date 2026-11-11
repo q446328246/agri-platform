@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Server } from "node:http";
 import { createPlatformHttpServer } from "../src/http.js";
+import { InMemoryAuditRepository, InMemoryRoleRepository, seedRoles } from "../src/role.repository.js";
 
 const servers: Server[] = [];
 
@@ -80,6 +81,64 @@ describe("platform HTTP API 角色与权限", () => {
 
     const missing = await fetch(`${base}/api/v1/platform/roles/role-404`, { method: "DELETE" });
     expect(missing.status).toBe(404);
+  });
+});
+
+describe("platform 租户隔离", () => {
+  it.each(["tenant-demo", undefined, "tenant-missing"])("租户资料 %s 只返回当前租户，未知租户404", async (tenantId) => {
+    const base = await start(createPlatformHttpServer());
+    const headers: Record<string, string> = tenantId ? { "x-tenant-id": tenantId } : {};
+    const response = await fetch(`${base}/api/v1/platform/tenant`, { headers });
+    expect(response.status).toBe(tenantId === "tenant-missing" ? 404 : 200);
+    expect(await response.json()).toMatchObject(tenantId === "tenant-missing"
+      ? { code: "PLATFORM-404", data: null }
+      : { data: { id: "tenant-demo" } });
+  });
+
+  it.each([
+    ["PUT", "tenant-a"], ["DELETE", "tenant-a"], ["PUT", undefined], ["DELETE", undefined],
+  ] as const)("%s 跨租户角色在 %s 下返回404，不修改角色或生成审计", async (method, tenantId) => {
+    const role = { ...seedRoles()[1]!, id: "role-tenant-b", tenantId: "tenant-b" };
+    const roles = new InMemoryRoleRepository([role]);
+    const audits = new InMemoryAuditRepository();
+    const base = await start(createPlatformHttpServer({ roles, audits }));
+    const headers: Record<string, string> = { "content-type": "application/json", ...(tenantId ? { "x-tenant-id": tenantId } : {}) };
+    const denied = await fetch(`${base}/api/v1/platform/roles/${role.id}`, {
+      method, headers, body: JSON.stringify({ tenantId: role.tenantId, name: "被篡改", permissions: ["plot:write"] }),
+    });
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toMatchObject({ code: "PLATFORM-404", message: "角色不存在", data: null });
+    expect(await roles.findById(role.id)).toEqual(role);
+    expect(audits.all()).toEqual([]);
+  });
+
+  it("同租户角色可以更新和删除，审计归属该租户", async () => {
+    const roles = new InMemoryRoleRepository(seedRoles().map((role) => ({ ...role, tenantId: "tenant-b" })));
+    const audits = new InMemoryAuditRepository();
+    const base = await start(createPlatformHttpServer({ roles, audits }));
+    const headers = { "x-tenant-id": "tenant-b", "x-user-id": "user-b" };
+    const updated = await put(base, "/api/v1/platform/roles/role-agronomist", { name: "本租户角色", permissions: ["plot:read"] }, headers);
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toMatchObject({ data: { tenantId: "tenant-b", name: "本租户角色", permissions: ["plot:read"] } });
+    expect((await fetch(`${base}/api/v1/platform/roles/role-agronomist`, { method: "DELETE", headers })).status).toBe(200);
+    expect(await roles.findById("role-agronomist")).toBeNull();
+    expect(audits.all()).toEqual([
+      expect.objectContaining({ tenantId: "tenant-b", operator: "user-b", action: "role.delete" }),
+      expect.objectContaining({ tenantId: "tenant-b", operator: "user-b", action: "role.update" }),
+    ]);
+  });
+
+  it("内部权限按可信租户解析同名角色，不返回其他租户权限", async () => {
+    const roles = new InMemoryRoleRepository([
+      { ...seedRoles()[1]!, id: "role-a", tenantId: "tenant-a", permissions: ["plot:write"] },
+      { ...seedRoles()[1]!, id: "role-b", tenantId: "tenant-b", permissions: ["plot:read"] },
+    ]);
+    const base = await start(createPlatformHttpServer({ roles }));
+    for (const [tenantId, permissions] of [["tenant-a", ["plot:write"]], ["tenant-b", ["plot:read"]], ["tenant-missing", []]] as const) {
+      const resolved = await post(base, "/api/v1/internal/platform/role-permissions", { codes: ["agronomist"], tenantId: "tenant-a" }, { "x-internal-token": "agri-internal", "x-tenant-id": tenantId });
+      expect(resolved.status).toBe(200);
+      expect(await resolved.json()).toMatchObject({ data: { items: permissions.length ? [{ code: "agronomist", permissions }] : [] } });
+    }
   });
 });
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage } from "node:http";
 import type { AuthzPolicy } from "../src/authz.js";
-import { authorizeRequest, authzGuardEnabled, identityHeaders } from "../src/authz.js";
+import { authorizeRequest, authzGuardEnabled, constantTimeEquals, identityHeaders, isDeviceCallbackAuthorized } from "../src/authz.js";
 
 const policy: AuthzPolicy = {
   read: "plot:read",
@@ -59,6 +59,41 @@ describe("服务侧权限守卫", () => {
       message: "无权限执行该操作（需要 system:audit）",
     });
     expect(authorizeRequest(request("GET", "/api/v1/plots/audit", { "x-user-id": "user-1", "x-permissions": "system:audit" }), policy)).toBeNull();
+  });
+});
+
+describe("设备回调凭证", () => {
+  const callbackPolicy: AuthzPolicy = {
+    read: "telemetry:read",
+    write: "telemetry:write",
+    callbackPaths: ["/api/v1/telemetry/report", "/api/v1/telemetry/pest-events"],
+  };
+
+  it("开启守卫后回调路径认设备凭证，或用户身份加写权限", () => {
+    vi.stubEnv("AUTH_GUARD_MODE", "enforce");
+    vi.stubEnv("DEVICE_CALLBACK_TOKEN", "device-secret");
+    expect(authorizeRequest(request("POST", "/api/v1/telemetry/report", { "x-device-token": "device-secret" }), callbackPolicy)).toBeNull();
+    expect(authorizeRequest(request("POST", "/api/v1/telemetry/report", { "x-device-token": "wrong" }), callbackPolicy)).toEqual({ status: 401, message: "未登录或登录已失效" });
+    expect(authorizeRequest(request("POST", "/api/v1/telemetry/report"), callbackPolicy)).toEqual({ status: 401, message: "未登录或登录已失效" });
+    // 人工田间核查：无设备凭证时按用户写权限放行
+    expect(authorizeRequest(request("POST", "/api/v1/telemetry/pest-events", { "x-user-id": "user-1", "x-permissions": "telemetry:write" }), callbackPolicy)).toBeNull();
+    expect(authorizeRequest(request("POST", "/api/v1/telemetry/pest-events", { "x-user-id": "user-1", "x-permissions": "telemetry:read" }), callbackPolicy)).toEqual({ status: 403, message: "无权限执行该操作（需要 telemetry:write）" });
+  });
+
+  it("未配置凭证时设备通道关闭，空凭证永不放行", () => {
+    vi.stubEnv("AUTH_GUARD_MODE", "enforce");
+    vi.stubEnv("DEVICE_CALLBACK_TOKEN", "");
+    expect(authorizeRequest(request("POST", "/api/v1/telemetry/report", { "x-device-token": "" }), callbackPolicy)).toEqual({ status: 401, message: "未登录或登录已失效" });
+    expect(isDeviceCallbackAuthorized("anything")).toBe(false);
+    expect(constantTimeEquals("", "")).toBe(false);
+    expect(constantTimeEquals("abc", "abc")).toBe(true);
+    expect(constantTimeEquals("abc", "abd")).toBe(false);
+    expect(constantTimeEquals("abc", "abcd")).toBe(false);
+  });
+
+  it("守卫未开启时回调路径与其余路径一律放行", () => {
+    vi.stubEnv("AUTH_GUARD_MODE", "");
+    expect(authorizeRequest(request("POST", "/api/v1/telemetry/report"), callbackPolicy)).toBeNull();
   });
 });
 
