@@ -52,12 +52,12 @@ export interface ForwardResult {
 /**
  * 把识别结果转给遥测服务的虫情入口。
  *
- * 该入口是公开路径，算法侧不需要携带用户令牌；转发失败不抛出，
- * 由调用方把 forwarded=false 一并返回，便于现场排查网络而不是丢掉识别结果。
+ * 该入口认设备回调凭证：转发时携带与遥测服务一致的 DEVICE_CALLBACK_TOKEN；
+ * 转发失败不抛出，由调用方把 forwarded=false 一并返回，便于现场排查网络而不是丢掉识别结果。
  */
 export async function forwardPestDetection(
   detection: AiDetection,
-  options: { baseUrl: string; timeoutMs?: number },
+  options: { baseUrl: string; timeoutMs?: number; deviceToken?: string | undefined },
 ): Promise<ForwardResult> {
   const timeoutMs = options.timeoutMs ?? 3000;
   const controller = new AbortController();
@@ -65,7 +65,7 @@ export async function forwardPestDetection(
   try {
     const response = await fetch(`${options.baseUrl.replace(/\/$/, "")}/api/v1/telemetry/pest-events`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(options.deviceToken ? { "x-device-token": options.deviceToken } : {}) },
       body: JSON.stringify({
         deviceId: detection.cameraId,
         plotCode: detection.plotCode,
