@@ -67,6 +67,26 @@
         </el-table>
         <el-empty v-if="!recentTasks.length" description="该地块暂无农事任务" :image-size="80" />
       </div>
+
+      <div class="mt-20">
+        <h4 class="mb-16">变更历史</h4>
+        <el-timeline v-if="changeLogs.length">
+          <el-timeline-item
+            v-for="log in changeLogs"
+            :key="log.id"
+            :timestamp="formatDateTime(log.createdAt)"
+            placement="top"
+            :type="changeActionType(log.action)"
+          >
+            <div class="change-node">
+              <el-tag :type="changeActionType(log.action)" size="small">{{ changeActionText(log.action) }}</el-tag>
+              <span class="change-summary">{{ log.summary }}</span>
+              <span class="change-actor">操作人：{{ log.actor }}</span>
+            </div>
+          </el-timeline-item>
+        </el-timeline>
+        <el-empty v-else description="暂无变更记录（历史自启用留痕起记录）" :image-size="80" />
+      </div>
     </div>
     <div v-else-if="!loading" class="card-container">
       <el-empty :description="loadError || '地块不存在或已被删除'">
@@ -82,7 +102,7 @@ import { ref, watch } from 'vue'
 import PlotBoundaryMap from '@/components/PlotBoundaryMap.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { plotApi, operationApi } from '@/api'
-import type { Plot } from '@/types'
+import type { Plot, PlotChangeAction, PlotChangeLog } from '@/types'
 import {
   formatDateTime, formatArea,
   getPlotStatusText, getPlotStatusType, getPlotTypeText,
@@ -107,12 +127,19 @@ const loading = ref(false)
 const loadError = ref('')
 const plotData = ref<Plot | null>(null)
 const recentTasks = ref<any[]>([])
+const changeLogs = ref<PlotChangeLog[]>([])
+
+const changeActionText = (action: PlotChangeAction): string =>
+  action === 'CREATE' ? '建档' : action === 'UPDATE' ? '修改' : '删除'
+const changeActionType = (action: PlotChangeAction): 'primary' | 'warning' | 'danger' =>
+  action === 'CREATE' ? 'primary' : action === 'UPDATE' ? 'warning' : 'danger'
 
 async function loadDetail() {
   loading.value = true
   loadError.value = ''
   plotData.value = null
   recentTasks.value = []
+  changeLogs.value = []
   try {
     plotData.value = await plotApi.getById(route.params.id as string)
   } catch {
@@ -131,6 +158,11 @@ async function loadDetail() {
     }))
   } catch {
     // 农事任务拉取失败不影响档案本身，表格下方已有空态提示
+  }
+  try {
+    changeLogs.value = await plotApi.getHistory(code)
+  } catch {
+    // 变更历史拉取失败仅显示空态，不影响档案与任务展示
   }
 }
 

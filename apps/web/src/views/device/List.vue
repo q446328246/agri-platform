@@ -243,6 +243,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import type { DeviceQuery } from '@/types'
 import { formatDateTime, getControlTypeText, getDeviceStatusText, getDeviceStatusType } from '@/utils'
@@ -251,6 +252,7 @@ import { controlApi, iotApi, plotApi, type IrrigationPlan } from '@/api'
 import { useUserStore } from '@/stores'
 
 const loading = ref(false)
+const route = useRoute()
 const tableData = ref<any[]>([])
 const total = ref(0)
 const detailVisible = ref(false)
@@ -590,6 +592,9 @@ async function submitCommand() {
 }
 
 onMounted(() => {
+  // 一张图设备点位「设备台账」跳转带 plotCode 查询参数，进入即按该地块过滤
+  const fromQuery = route.query.plotCode
+  if (typeof fromQuery === 'string' && fromQuery) queryForm.plotCode = fromQuery
   fetchList()
 })
 </script>

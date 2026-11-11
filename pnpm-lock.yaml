@@ -177,6 +177,9 @@ importers:
       '@agri/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@agri/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@agri/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -374,6 +377,12 @@ importers:
       '@agri/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@agri/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@agri/mq':
+        specifier: workspace:*
+        version: link:../../packages/mq
       '@agri/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -589,6 +598,9 @@ importers:
       '@agri/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@agri/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@agri/shared':
         specifier: workspace:*
         version: link:../../packages/shared

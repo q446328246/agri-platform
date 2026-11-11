@@ -13,6 +13,14 @@
       </select>
     </label>
 
+    <label v-if="kind === 'line'" class="se-field">
+      <span>归属地块</span>
+      <select v-model="draftPlotCode" class="se-input">
+        <option value="">未绑定地块</option>
+        <option v-for="plot in plots" :key="plot.parcelCode" :value="plot.parcelCode">{{ plot.parcelName }}（{{ plot.parcelCode }}）</option>
+      </select>
+    </label>
+
     <label class="se-field">
       <span>名称</span>
       <input v-model="draftName" class="se-input" type="text" maxlength="40" :placeholder="`请输入${kindLabel}名称`" />
@@ -65,6 +73,7 @@ import type { LineCat } from '@/utils/infraLine'
 
 const props = defineProps<{
   zones: Array<{ zoneCode: string; zoneName: string }>
+  plots: Array<{ parcelCode: string; parcelName: string }>
   suggestName: (kind: MapShapeKind, lineType?: InfraLineType) => string
 }>()
 const emit = defineEmits<{
@@ -93,6 +102,7 @@ const draftName = ref('')
 const draftType = ref<InfraLineType>('IRRIGATION_PIPE')
 const draftPlotType = ref<PlotType>(PlotType.FIELD)
 const draftZoneCode = ref('')
+const draftPlotCode = ref('')
 const draftColor = ref('#00d4ff')
 const saving = ref(false)
 
@@ -274,6 +284,7 @@ async function fitToPoints() {
 function startLine(cat: LineCat) {
   if (!begin({ kind: 'line', mode: 'create', cat })) return
   draftType.value = defaultTypeOfCat[cat]
+  draftPlotCode.value = ''
   draftName.value = props.suggestName('line', draftType.value)
   openLayers()
 }
@@ -326,6 +337,7 @@ function editLine(source: MapShapeTarget) {
   points.value = source.points.map(([lng, lat]) => [lng, lat])
   draftName.value = source.name
   draftType.value = lineType
+  draftPlotCode.value = source.plotCode ?? ''
   openLayers()
   void fitToPoints()
 }
@@ -358,11 +370,11 @@ async function save() {
     if (shape.kind === 'line') {
       const geom = { type: 'LineString' as const, coordinates: points.value.map(([lng, lat]) => [lng, lat]), srid: 4490 }
       if (shape.mode === 'edit' && target.value) {
-        const updated = await plotApi.updateInfraLine(target.value.code, { lineName: name, lineType: draftType.value, geom })
+        const updated = await plotApi.updateInfraLine(target.value.code, { lineName: name, lineType: draftType.value, geom, plotCode: draftPlotCode.value })
         ElMessage.success(`管线「${updated.lineName}」已更新 · ${updated.lengthM.toFixed(0)} 米`)
         saved = { kind: 'line', mode: 'edit', code: updated.lineCode }
       } else {
-        const created = await plotApi.createInfraLine({ lineName: name, lineType: draftType.value, geom })
+        const created = await plotApi.createInfraLine({ lineName: name, lineType: draftType.value, geom, ...(draftPlotCode.value ? { plotCode: draftPlotCode.value } : {}) })
         ElMessage.success(`已保存「${created.lineName}」· ${created.lengthM.toFixed(0)} 米`)
         saved = { kind: 'line', mode: 'create', code: created.lineCode }
       }

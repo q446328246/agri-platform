@@ -113,7 +113,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -149,6 +149,54 @@ const mapEl = ref<HTMLElement | null>(null)
 let map: any = null
 let tiles: any[] = []
 let zoneLayer: any = null
+let detailRequest = 0
+let disposed = false
+
+// 切换、删除或新建改变当前编码时，立即使旧请求与旧成员失效。
+watch(activeCode, () => {
+  detailRequest += 1
+  members.value = []
+}, { flush: 'sync' })
+
+function clearZoneLayer() {
+  if (zoneLayer) {
+    zoneLayer.clearLayers()
+    if (map) map.removeLayer(zoneLayer)
+    zoneLayer = null
+  }
+}
+
+function destroyZoneMap() {
+  clearZoneLayer()
+  tiles.forEach((tile) => tile.remove())
+  tiles = []
+  map?.remove()
+  map = null
+}
+
+// mapEl 位于 v-if 内，必须等异步数据生成容器、DOM 更新完成后再初始化。
+watch([mapEl, active, members], ([element, current]) => {
+  if (disposed || !element || !current) {
+    destroyZoneMap()
+    return
+  }
+  if (map && map.getContainer() !== element) destroyZoneMap()
+  if (!map) {
+    map = L.map(element, { center: CENTER, zoom: 15, attributionControl: false })
+    tiles = [tianditu('img'), tianditu('cia')]
+    tiles.forEach((tile) => tile.addTo(map))
+  }
+  map.invalidateSize({ pan: false })
+  renderZoneMap()
+}, { flush: 'post' })
+
+function mapTooltip(name: string, summary: string): HTMLElement {
+  const content = document.createElement('div')
+  const title = document.createElement('strong')
+  title.textContent = name
+  content.append(title, document.createElement('br'), document.createTextNode(summary))
+  return content
+}
 
 function tianditu(layerName: string) {
   const key = import.meta.env.VITE_TIANDITU_KEY
@@ -162,7 +210,7 @@ function tianditu(layerName: string) {
 /** 画成员地块与片区凸包；坐标入库是 [经度, 纬度]，Leaflet 需要 [纬度, 经度]。 */
 function renderZoneMap() {
   if (!map) return
-  if (zoneLayer) map.removeLayer(zoneLayer)
+  clearZoneLayer()
   zoneLayer = L.layerGroup()
   const current = active.value
   const color = current?.color || '#00d4ff'
@@ -170,7 +218,7 @@ function renderZoneMap() {
   for (const boundary of parsePlotBoundaries(members.value as any[])) {
     for (const ring of boundary.rings) {
       L.polygon(ring, { color, weight: 1.5, fillColor: color, fillOpacity: 0.18 })
-        .bindTooltip(`<strong>${boundary.name}</strong><br>${boundary.areaMu.toFixed(2)} 亩`)
+        .bindTooltip(mapTooltip(boundary.name, `${boundary.areaMu.toFixed(2)} 亩`))
         .addTo(zoneLayer)
       for (const point of ring) bounds.extend(point)
     }
@@ -181,7 +229,7 @@ function renderZoneMap() {
     const hull = ring.map((point) => [Number(point[1]), Number(point[0])] as [number, number])
     for (const point of hull) bounds.extend(point)
     L.polygon(hull, { color, weight: 2, dashArray: '8 6', fill: false })
-      .bindTooltip(`<strong>${current?.zoneName ?? '片区'}</strong><br>${current?.plotCount ?? 0} 块 · ${(current?.areaMu ?? 0).toFixed(2)} 亩`)
+      .bindTooltip(mapTooltip(current?.zoneName ?? '片区', `${current?.plotCount ?? 0} 块 · ${(current?.areaMu ?? 0).toFixed(2)} 亩`))
       .addTo(zoneLayer)
   }
   zoneLayer.addTo(map)
@@ -192,7 +240,9 @@ function renderZoneMap() {
 async function fetchZones(keepActive = true) {
   loading.value = true
   try {
-    zones.value = await zoneApi.getMap()
+    const result = await zoneApi.getMap()
+    if (disposed) return
+    zones.value = result
     const exists = zones.value.some((item) => item.zoneCode === activeCode.value)
     if (!keepActive || !exists) activeCode.value = zones.value[0]?.zoneCode ?? ''
   } catch (error) {
@@ -203,15 +253,19 @@ async function fetchZones(keepActive = true) {
 }
 
 async function selectZone(zoneCode: string) {
+  if (disposed) return
   activeCode.value = zoneCode
+  const request = ++detailRequest
   members.value = []
+  if (!active.value) return
   try {
     const detail = await zoneApi.getDetail(zoneCode)
+    // A→B→A 或同片区重载也可能乱序，不能只比较编码。
+    if (disposed || request !== detailRequest || activeCode.value !== zoneCode || !active.value) return
     members.value = (detail.plots ?? []) as Plot[]
   } catch (error) {
-    console.error('获取片区详情失败', error)
+    if (!disposed && request === detailRequest) console.error('获取片区详情失败', error)
   }
-  renderZoneMap()
 }
 
 async function fetchAllPlots() {
@@ -283,7 +337,6 @@ async function removeZone() {
     members.value = []
     await fetchZones(false)
     if (activeCode.value) await selectZone(activeCode.value)
-    else renderZoneMap()
   } catch (error) {
     console.error('删除片区失败', error)
   }
@@ -326,23 +379,16 @@ async function removePlot(parcelCode: string) {
 }
 
 onMounted(async () => {
-  if (mapEl.value) {
-    map = L.map(mapEl.value, { center: CENTER, zoom: 15, attributionControl: false })
-    tiles = [tianditu('img'), tianditu('cia')]
-    tiles.forEach((tile) => tile.addTo(map))
-  }
   await fetchZones(false)
+  if (disposed) return
   if (activeCode.value) await selectZone(activeCode.value)
   void fetchAllPlots()
 })
 
 onBeforeUnmount(() => {
-  tiles.forEach((tile) => tile.remove())
-  tiles = []
-  if (zoneLayer && map) map.removeLayer(zoneLayer)
-  zoneLayer = null
-  map?.remove()
-  map = null
+  disposed = true
+  detailRequest += 1
+  destroyZoneMap()
 })
 </script>
 

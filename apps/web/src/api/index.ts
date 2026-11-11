@@ -1,11 +1,13 @@
 import { get, post, put, del } from '@/utils/request'
 import type {
   Plot, PlotQuery, PlotForm, PlotType, InfraLineType,
+  CropSeason, CropSeasonStatus,
+  PlotChangeLog,
   Device, DeviceRealtimeData,
   FarmTask, FarmTaskQuery,
   DashboardStats,
   PageResult, LoginParams, LoginResult,
-  Camera, PlotStats, Recording,
+  Camera, PlotStats, Recording, PtzAction, PtzCommand, VideoAiEvent,
   TelemetryHistoryPoint, TelemetryAlert,
   MessagePreference, MessageLevel,
   SystemUser, PlatformRole, PermissionGroup,
@@ -93,8 +95,17 @@ export const plotApi = {
   delete(id: string): Promise<void> {
     return del<void>(`/plots/${encodeURIComponent(id)}`)
   },
-  batchDelete(ids: string[]): Promise<void> {
-    return Promise.all(ids.map((id) => plotApi.delete(id))).then(() => undefined)
+  async batchDelete(parcelCodes: string[]): Promise<{ succeededCodes: string[]; failedCodes: string[] }> {
+    // 等待全部请求结束再刷新；单个失败不能掩盖已删除的地块或提前结束整批。
+    const results = await Promise.allSettled(parcelCodes.map((parcelCode) => plotApi.delete(parcelCode)))
+    const succeededCodes: string[] = []
+    const failedCodes: string[] = []
+    results.forEach((result, index) => {
+      const parcelCode = parcelCodes[index]!
+      if (result.status === 'fulfilled') succeededCodes.push(parcelCode)
+      else failedCodes.push(parcelCode)
+    })
+    return { succeededCodes, failedCodes }
   },
   /** 一张图用：全量地块边界，不分页 */
   getBounds(): Promise<Array<{ parcelCode: string; parcelName: string; areaMu: number; geom: unknown }>> {
@@ -104,22 +115,39 @@ export const plotApi = {
   getStats(): Promise<PlotStats> {
     return get('/plots/stats')
   },
-  /** 一张图用：田间线路/管线（灌水管、施肥管、电力线、机耕道） */
-  getInfraLines(lineType?: InfraLineType): Promise<InfraLine[]> {
-    return get<InfraLine[]>('/plots/infra-lines', lineType ? { lineType } : undefined)
+  /** 一张图用：田间线路/管线（灌水管、施肥管、电力线、机耕道）。可按类型或归属地块过滤 */
+  getInfraLines(params?: { lineType?: InfraLineType | undefined; plotCode?: string | undefined }): Promise<InfraLine[]> {
+    return get<InfraLine[]>('/plots/infra-lines', params)
   },
-  createInfraLine(data: { lineName: string; lineType: InfraLineType; geom: { type: 'LineString'; coordinates: number[][]; srid: number }; lineCode?: string }): Promise<InfraLine> {
+  createInfraLine(data: { lineName: string; lineType: InfraLineType; geom: { type: 'LineString'; coordinates: number[][]; srid: number }; lineCode?: string; plotCode?: string }): Promise<InfraLine> {
     return post<InfraLine>('/plots/infra-lines', data)
   },
   /** 局部更新：只发传入字段；改了 geom 时服务端按新折点重算 lengthM */
-  updateInfraLine(lineCode: string, data: { lineName?: string; lineType?: InfraLineType; geom?: { type: 'LineString'; coordinates: number[][]; srid: number } }): Promise<InfraLine> {
+  updateInfraLine(lineCode: string, data: { lineName?: string; lineType?: InfraLineType; geom?: { type: 'LineString'; coordinates: number[][]; srid: number }; plotCode?: string }): Promise<InfraLine> {
     return put<InfraLine>(`/plots/infra-lines/${encodeURIComponent(lineCode)}`, data)
   },
   deleteInfraLine(lineCode: string): Promise<void> {
     return del<void>(`/plots/infra-lines/${encodeURIComponent(lineCode)}`)
+  },
+  /** 种植季/茬口：按地块返回轮作正序（不传 plotCode 则跨地块列最近茬口），可按作物/年份/状态过滤 */
+  getSeasons(params?: { plotCode?: string | undefined; crop?: string | undefined; year?: string | undefined; status?: CropSeasonStatus | undefined }): Promise<CropSeason[]> {
+    return get<CropSeason[]>('/plots/seasons', cleanParams(params))
+  },
+  createSeason(data: { plotCode: string; crop: string; seasonYear: number; variety?: string; seasonIndex?: number; plantDate?: string; harvestDate?: string; status?: CropSeasonStatus; yieldKg?: number | null; note?: string }): Promise<CropSeason> {
+    return post<CropSeason>('/plots/seasons', data)
+  },
+  /** 局部更新：只发传入字段 */
+  updateSeason(seasonCode: string, data: { plotCode?: string; crop?: string; variety?: string; seasonYear?: number; seasonIndex?: number; plantDate?: string; harvestDate?: string; status?: CropSeasonStatus; yieldKg?: number | null; note?: string }): Promise<CropSeason> {
+    return put<CropSeason>(`/plots/seasons/${encodeURIComponent(seasonCode)}`, data)
+  },
+  deleteSeason(seasonCode: string): Promise<void> {
+    return del<void>(`/plots/seasons/${encodeURIComponent(seasonCode)}`)
+  },
+  /** 地块变更历史：追加式留痕，倒序返回（最近在前） */
+  getHistory(parcelCode: string): Promise<PlotChangeLog[]> {
+    return get<PlotChangeLog[]>(`/plots/${encodeURIComponent(parcelCode)}/history`)
   }
 }
-
 /** 管线类型定义在 @/types，这里转出保持既有引用路径 */
 export type { InfraLineType }
 
@@ -130,6 +158,8 @@ export interface InfraLine {
   lineType: InfraLineType
   geom: { type: 'LineString'; coordinates: number[][]; srid: number }
   lengthM: number
+  /** 归属地块编码（plots.parcelCode），空串表示未绑定地块 */
+  plotCode: string
   createdAt: string
 }
 
@@ -354,18 +384,18 @@ export const platformApi = {
 }
 
 export const telemetryApi = {
-  /** 最新读数：兼容旧的 deviceId 字符串写法，也支持地块/指标筛选 */
-  getLatest(params?: string | { deviceId?: string; plotCode?: string; metric?: string }): Promise<any[]> {
+  /** 最新读数：兼容旧的 deviceId 字符串写法，也支持地块/指标/分层深度筛选 */
+  getLatest(params?: string | { deviceId?: string; plotCode?: string; metric?: string; depthCm?: number }): Promise<any[]> {
     const query = typeof params === 'string' ? { deviceId: params } : params
     return get<any[]>('/telemetry/latest', cleanParams(query))
   },
   /** 历史读数原始序列 */
-  getHistory(params?: { deviceId?: string; metric?: string; from?: string; to?: string; size?: number }): Promise<any[]> {
-    return get<any[]>('/telemetry/history', params)
+  getHistory(params?: { deviceId?: string; plotCode?: string; metric?: string; depthCm?: number; from?: string; to?: string; size?: number }): Promise<any[]> {
+    return get<any[]>('/telemetry/history', cleanParams(params))
   },
-  /** 历史曲线：按时间升序返回 (时间, 数值)，供趋势图直接绑定 */
-  getHistorySeries(deviceId: string, metric: string): Promise<TelemetryHistoryPoint[]> {
-    return get<TelemetryHistoryPoint[]>('/telemetry/history/series', { deviceId, metric })
+  /** 历史曲线：按时间升序返回 (时间, 数值)，供趋势图直接绑定；extra 支持按地块/深度/时间窗筛选 */
+  getHistorySeries(deviceId: string, metric: string, extra?: { plotCode?: string; depthCm?: number; from?: string; to?: string; size?: number }): Promise<TelemetryHistoryPoint[]> {
+    return get<TelemetryHistoryPoint[]>('/telemetry/history/series', cleanParams({ deviceId, metric, ...extra }))
   },
   /** 待处置告警：可按级别/指标/地块筛选 */
   getAlerts(params?: { level?: MessageLevel; metric?: string; plotCode?: string }): Promise<any[]> {
@@ -379,15 +409,15 @@ export const telemetryApi = {
   getOverview(params?: { plotCode?: string; metric?: string; level?: MessageLevel; pestType?: string }): Promise<TelemetryOverview> {
     return get<TelemetryOverview>('/telemetry/overview', cleanParams(params))
   },
-  /** 阈值规则维护：同一指标只保留一条规则 */
-  getRules(): Promise<TelemetryRule[]> {
-    return get<TelemetryRule[]>('/telemetry/rules')
+  /** 阈值规则维护：按 (指标, 地块, 级别) 唯一；传 plotCode 时返回该地块专属 + 全局兜底 */
+  getRules(plotCode?: string): Promise<TelemetryRule[]> {
+    return get<TelemetryRule[]>('/telemetry/rules', cleanParams(plotCode ? { plotCode } : undefined))
   },
   saveRule(data: TelemetryRuleInput): Promise<TelemetryRule> {
     return post<TelemetryRule>('/telemetry/rules', data)
   },
-  deleteRule(metric: string): Promise<void> {
-    return del<void>(`/telemetry/rules/${encodeURIComponent(metric)}`)
+  deleteRule(metric: string, plotCode?: string, level?: RuleLevel): Promise<void> {
+    return del<void>(`/telemetry/rules/${encodeURIComponent(metric)}`, cleanParams({ plotCode, level }))
   },
   /** 虫情识别记录，pendingOnly 只看未处置，可按虫害类型与程度筛选 */
   getPests(params?: { plotCode?: string; pendingOnly?: boolean; size?: number; pestType?: string; level?: 1 | 2 | 3 }): Promise<PestEvent[]> {
@@ -400,6 +430,41 @@ export const telemetryApi = {
   /** 处置（关闭）一条虫情记录 */
   handlePest(id: string): Promise<void> {
     return post<void>(`/telemetry/pests/${encodeURIComponent(id)}/handle`)
+  },
+  /** 虫情区域统计：按等级/类型/地块聚合，可按地块与时间窗筛选 */
+  getPestStats(params?: { plotCode?: string; pestType?: string; from?: string; to?: string }): Promise<PestStats> {
+    return get<PestStats>('/telemetry/pests/stats', cleanParams(params))
+  },
+  /** 虫情趋势：最近 days 天的逐日识别计数（农场东八区日历日） */
+  getPestTrend(params?: { days?: number; plotCode?: string; pestType?: string }): Promise<PestTrendPoint[]> {
+    return get<PestTrendPoint[]>('/telemetry/pests/trend', cleanParams(params))
+  },
+  /** 虫情治理：记录药剂方案与派单信息并推进治理状态，taskId 为派单生成的植保任务 */
+  governPest(id: string, data: GovernPestInput): Promise<PestEvent> {
+    return post<PestEvent>(`/telemetry/pests/${encodeURIComponent(id)}/govern`, data)
+  },
+  /** 苗情生育期档案：按地块回看计划节点与实际节点，登记即幂等更新 */
+  getGrowthStages(plotCode?: string): Promise<GrowthStage[]> {
+    return get<GrowthStage[]>('/telemetry/growth-stages', cleanParams(plotCode ? { plotCode } : undefined))
+  },
+  saveGrowthStage(data: GrowthStageInput): Promise<GrowthStage> {
+    return post<GrowthStage>('/telemetry/growth-stages', data)
+  },
+  deleteGrowthStage(id: string): Promise<void> {
+    return del<void>(`/telemetry/growth-stages/${encodeURIComponent(id)}`)
+  },
+  /** 灾情档案（开发方案 6.4）：上报落库即 REPORTED，处置沿状态单向推进 */
+  getDisasters(params?: { plotCode?: string; disasterType?: string; status?: string; size?: number }): Promise<DisasterRecord[]> {
+    return get<DisasterRecord[]>('/telemetry/disasters', cleanParams(params))
+  },
+  getDisasterStats(params?: { plotCode?: string }): Promise<DisasterStats> {
+    return get<DisasterStats>('/telemetry/disasters/stats', cleanParams(params))
+  },
+  createDisaster(data: CreateDisasterInput): Promise<DisasterRecord> {
+    return post<DisasterRecord>('/telemetry/disasters', data)
+  },
+  supplementDisaster(id: string, data: SupplementDisasterInput): Promise<DisasterRecord> {
+    return post<DisasterRecord>(`/telemetry/disasters/${encodeURIComponent(id)}/supplement`, data)
   }
 }
 
@@ -410,6 +475,8 @@ export type RuleLevel = 'INFO' | 'WARNING' | 'CRITICAL'
 export interface TelemetryRule {
   id: string
   metric: string
+  /** 适用地块编码；空串表示全局默认规则 */
+  plotCode: string
   direction: RuleDirection
   threshold: number
   level: RuleLevel
@@ -420,6 +487,7 @@ export interface TelemetryRule {
 
 export interface TelemetryRuleInput {
   metric: string
+  plotCode?: string
   direction: RuleDirection
   threshold: number
   level: RuleLevel
@@ -438,13 +506,128 @@ export interface PestEvent {
   imageFileId?: string
   detectedAt: string
   handled: boolean
+  /** 治理状态：待处置/已定方案/已派单/已归档 */
+  governanceStatus: GovernanceStatus
+  measure: string
+  pesticide: string
+  dosage: string
+  dispatchNote: string
+  governedBy: string
+  governedAt?: string
+  /** 一键派单生成的植保农事任务 id */
+  taskId?: string
+}
+
+/** 虫情治理状态 */
+export type GovernanceStatus = 'pending' | 'planned' | 'dispatched' | 'archived'
+
+/** 虫情区域统计（按等级/类型/地块聚合） */
+export interface PestStats {
+  total: number
+  pending: number
+  byLevel: Array<{ level: 1 | 2 | 3; count: number }>
+  byType: Array<{ pestType: string; count: number }>
+  byPlot: Array<{ plotCode: string; count: number }>
+}
+
+/** 虫情趋势逐日点 */
+export interface PestTrendPoint {
+  date: string
+  count: number
+}
+
+/** 治理入参：状态向前推进，药剂方案与派单信息选填 */
+export interface GovernPestInput {
+  status: Exclude<GovernanceStatus, 'pending'>
+  measure?: string
+  pesticide?: string
+  dosage?: string
+  dispatchNote?: string
+  governedBy?: string
+  taskId?: string
 }
 
 export interface TelemetryOverview {
-  latest: Array<{ deviceId: string; plotCode: string; metric: string; value: number; unit: string; recordedAt: string }>
+  latest: Array<{ deviceId: string; plotCode: string; metric: string; value: number; unit: string; recordedAt: string; depthCm?: number }>
   alerts: TelemetryAlert[]
   pests: PestEvent[]
   rules: TelemetryRule[]
+}
+
+/** 苗情生育期档案：stage 为生育期编码，planned_* 计划节点、actual_* 田间实测节点 */
+export interface GrowthStage {
+  id: string
+  plotCode: string
+  stage: string
+  plannedStartAt?: string
+  plannedEndAt?: string
+  actualStartAt?: string
+  actualEndAt?: string
+  note: string
+  updatedAt: string
+}
+
+export interface GrowthStageInput {
+  plotCode: string
+  stage: string
+  plannedStartAt?: string
+  plannedEndAt?: string
+  actualStartAt?: string
+  actualEndAt?: string
+  note?: string
+}
+
+/** 灾种编码（开发方案 6.4）：干旱/洪涝/低温冻害/大风倒伏/冰雹/病虫害 */
+export type DisasterType = 'drought' | 'flood' | 'frost' | 'wind' | 'hail' | 'pest'
+/** 处置状态：已上报 / 已核查 / 已处置 / 已归档 */
+export type DisasterStatus = 'REPORTED' | 'ASSESSED' | 'HANDLED' | 'ARCHIVED'
+/** 灾害分级 1 轻度、2 中度、3 重度、4 特别重大 */
+export type DisasterSeverity = 1 | 2 | 3 | 4
+
+export interface DisasterRecord {
+  id: string
+  disasterType: DisasterType
+  plotCode: string
+  affectedAreaMu: number
+  severity: DisasterSeverity
+  occurredAt: string
+  suggestion: string
+  status: DisasterStatus
+  lossAssessment: string
+  imageFileIds: string[]
+  reportedBy: string
+  handledBy: string
+  handledAt?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateDisasterInput {
+  disasterType: DisasterType
+  plotCode: string
+  affectedAreaMu: number
+  severity: DisasterSeverity
+  occurredAt: string
+  suggestion?: string
+  imageFileIds?: string[]
+  reportedBy?: string
+}
+
+export interface SupplementDisasterInput {
+  status?: DisasterStatus
+  suggestion?: string
+  lossAssessment?: string
+  affectedAreaMu?: number
+  imageFileIds?: string[]
+  handledBy?: string
+}
+
+export interface DisasterStats {
+  total: number
+  open: number
+  affectedAreaMu: number
+  byType: Array<{ disasterType: DisasterType; count: number; affectedAreaMu: number }>
+  bySeverity: Array<{ severity: DisasterSeverity; count: number }>
 }
 
 export const weatherApi = {
@@ -483,15 +666,16 @@ export const operationApi = {
   getTasks(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; status?: string | undefined; type?: string | undefined; plotCode?: string | undefined; from?: string | undefined; to?: string | undefined }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/farm-tasks', cleanParams(params))
   },
-  createTask(data: { plotCode: string; type: string; name: string; scheduledAt?: string }): Promise<any> {
+  createTask(data: { plotCode: string; type: string; name: string; scheduledAt?: string; scheduledEndAt?: string; assigneeName?: string }): Promise<any> {
     return post<any>('/farm-tasks', data)
   },
   /** 单条任务详情：含 startedAt/completedAt 实际作业时间，不存在时服务端返回 404 */
   getTask(id: string): Promise<any> {
     return get<any>(`/farm-tasks/${encodeURIComponent(id)}`)
   },
-  updateStatus(id: string, status: string): Promise<any> {
-    return post<any>(`/farm-tasks/${id}/status`, { status })
+  /** 状态流转必须带当前 version 防并发覆盖；完成时必须附实际作业结果 */
+  updateStatus(id: string, status: string, options?: { version?: number; result?: { outcome: 'success' | 'partial' | 'failed'; finishedAreaMu: number; notes?: string } }): Promise<any> {
+    return post<any>(`/farm-tasks/${encodeURIComponent(id)}/status`, { status, ...options })
   },
   /** 田间导航规划：最近邻排站 + 2-opt 优化，提供机耕道时按沿路里程计算 */
   planNavigation(data: NavigationRequest): Promise<NavPlan> {
@@ -586,6 +770,13 @@ export interface FinanceQuery {
   to?: string
 }
 
+/** 核算报表：按月（东八区）、按类别、按地块三维聚合 */
+export interface FinanceReport {
+  months: Array<{ month: string; input: number; output: number; profit: number }>
+  categories: Array<{ kind: 'INPUT' | 'OUTPUT'; category: string; amount: number }>
+  plots: Array<{ plotCode: string; input: number; output: number; profit: number }>
+}
+
 export const financeApi = {
   getEntries(params?: FinanceQuery): Promise<any[]> {
     return get<any[]>('/finance/entries', cleanParams(params))
@@ -594,20 +785,40 @@ export const financeApi = {
   getSummary(params?: FinanceQuery): Promise<{ input: number; output: number; profit: number; currency: string }> {
     return get<{ input: number; output: number; profit: number; currency: string }>('/finance/summary', cleanParams(params))
   },
+  /** 报表与列表/汇总共用同一套筛选条件，图表随查询条联动 */
+  getReport(params?: FinanceQuery): Promise<FinanceReport> {
+    return get<FinanceReport>('/finance/report', cleanParams(params))
+  },
   createEntry(data: { plotCode: string; season: string; kind: 'INPUT' | 'OUTPUT'; category: string; amount: number; unit: string; note: string }): Promise<any> {
     return post<any>('/finance/entries', data)
   }
 }
 
+/** 溯源档案记录：batchCode 为溯源码，同一溯源码下多条事件串成一条链 */
+export interface TraceRecord {
+  id: string
+  traceCode: string
+  batchCode: string
+  plotCode: string
+  event: string
+  detail: string
+  operator: string
+  createdAt: string
+}
+
 export const traceApi = {
-  getRecords(params?: { plotCode?: string; event?: string; keyword?: string; from?: string; to?: string; page?: number; size?: number }): Promise<PageResult<any>> {
-    return get<PageResult<any>>('/trace/records', cleanParams(params))
+  getRecords(params?: { plotCode?: string; event?: string; batchCode?: string; keyword?: string; from?: string; to?: string; page?: number; size?: number }): Promise<PageResult<TraceRecord>> {
+    return get<PageResult<TraceRecord>>('/trace/records', cleanParams(params))
   },
-  createRecord(data: { plotCode: string; event: string; detail: string; operator: string }): Promise<any> {
-    return post<any>('/trace/records', data)
+  createRecord(data: { plotCode: string; event: string; detail: string; operator: string; batchCode?: string }): Promise<TraceRecord> {
+    return post<TraceRecord>('/trace/records', data)
   },
-  getByCode(traceCode: string): Promise<any> {
-    return get<any>(`/trace/${traceCode}`)
+  getByCode(traceCode: string): Promise<TraceRecord | null> {
+    return get<TraceRecord | null>(`/trace/${encodeURIComponent(traceCode)}`)
+  },
+  /** 按溯源码取完整生产链条，时间正序 */
+  getChain(batchCode: string): Promise<TraceRecord[]> {
+    return get<TraceRecord[]>(`/trace/chain/${encodeURIComponent(batchCode)}`)
   }
 }
 
@@ -618,11 +829,23 @@ export const videoApi = {
   getCamera(cameraId: string): Promise<Camera | null> {
     return get<Camera | null>(`/video/cameras/${encodeURIComponent(cameraId)}`)
   },
-  sendPtz(cameraId: string, command: Record<string, unknown>): Promise<{ commandId: string; status: string }> {
-    return post<{ commandId: string; status: string }>(`/video/cameras/${encodeURIComponent(cameraId)}/ptz`, command)
+  sendPtz(cameraId: string, command: { action: PtzAction; speed?: number }): Promise<PtzCommand> {
+    return post<PtzCommand>(`/video/cameras/${encodeURIComponent(cameraId)}/ptz`, command)
+  },
+  getPtzCommands(params?: { page?: number; size?: number; cameraId?: string }): Promise<PageResult<PtzCommand>> {
+    return get<PageResult<PtzCommand>>('/video/ptz-commands', cleanParams(params))
+  },
+  retryPtz(commandId: string): Promise<PtzCommand> {
+    return post<PtzCommand>(`/video/ptz-commands/${encodeURIComponent(commandId)}/retry`, {})
   },
   getRecordings(params?: { page?: number; size?: number; cameraId?: string; plotCode?: string; from?: string; to?: string }): Promise<PageResult<Recording>> {
     return get<PageResult<Recording>>('/video/recordings', cleanParams(params))
+  },
+  getAiEvents(params?: { page?: number; size?: number; plotCode?: string; forwarded?: boolean }): Promise<PageResult<VideoAiEvent>> {
+    return get<PageResult<VideoAiEvent>>('/video/ai-events', cleanParams(params))
+  },
+  retryAiEvent(eventId: string): Promise<VideoAiEvent> {
+    return post<VideoAiEvent>(`/video/ai-events/${encodeURIComponent(eventId)}/retry`, {})
   }
 }
 

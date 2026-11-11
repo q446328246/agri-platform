@@ -5,6 +5,31 @@
         <span>{{ item.label }}</span><strong>¥ {{ item.value.toFixed(2) }}</strong>
       </div>
     </div>
+
+    <div class="card-container mt-20">
+      <div class="report-header">
+        <span class="report-title">核算报表</span>
+        <span class="report-hint">随上方筛选条件联动，月份按东八区归档</span>
+      </div>
+      <div class="report-grid">
+        <div class="report-cell">
+          <div class="report-cell-title">月度投入产出</div>
+          <v-chart v-if="report.months.length" class="chart" :option="monthChartOption" autoresize />
+          <el-empty v-else description="暂无数据" :image-size="60" />
+        </div>
+        <div class="report-cell">
+          <div class="report-cell-title">类别构成</div>
+          <v-chart v-if="report.categories.length" class="chart" :option="categoryChartOption" autoresize />
+          <el-empty v-else description="暂无数据" :image-size="60" />
+        </div>
+        <div class="report-cell">
+          <div class="report-cell-title">地块利润排行</div>
+          <v-chart v-if="report.plots.length" class="chart" :option="plotChartOption" autoresize />
+          <el-empty v-else description="暂无数据" :image-size="60" />
+        </div>
+      </div>
+    </div>
+
     <div class="card-container mt-20">
       <el-form :inline="true" :model="query" @submit.prevent="search">
         <el-form-item label="地块编码"><el-input v-model="query.plotCode" placeholder="可选" clearable style="width: 170px" /></el-form-item>
@@ -108,14 +133,21 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import VChart from 'vue-echarts'
+import { use } from 'echarts/core'
+import { CanvasRenderer } from 'echarts/renderers'
+import { BarChart, LineChart, PieChart } from 'echarts/charts'
+import { TooltipComponent, LegendComponent, GridComponent } from 'echarts/components'
 import { financeApi } from '@/api'
-import type { FinanceQuery } from '@/api'
+import type { FinanceQuery, FinanceReport } from '@/api'
 import { useUserStore } from '@/stores'
 import { formatDateTime } from '@/utils'
+use([CanvasRenderer, BarChart, LineChart, PieChart, TooltipComponent, LegendComponent, GridComponent])
 const userStore = useUserStore()
 const loading = ref(false)
 const entries = ref<any[]>([])
 const summary = ref({ input: 0, output: 0, profit: 0, currency: 'CNY' })
+const report = ref<FinanceReport>({ months: [], categories: [], plots: [] })
 const form = reactive({ plotCode: '', season: String(new Date().getFullYear()), kind: 'INPUT' as 'INPUT' | 'OUTPUT', category: '农资', amount: 0, unit: '元', note: '' })
 const createVisible = ref(false)
 const creating = ref(false)
@@ -152,10 +184,43 @@ async function load() {
   loading.value = true
   try {
     const params = buildQuery()
-    // 列表与汇总共用同一套筛选条件，卡片数字随查询条联动
-    ;[entries.value, summary.value] = await Promise.all([financeApi.getEntries(params), financeApi.getSummary(params)])
+    // 列表、汇总与报表共用同一套筛选条件，卡片与图表随查询条联动
+    ;[entries.value, summary.value, report.value] = await Promise.all([financeApi.getEntries(params), financeApi.getSummary(params), financeApi.getReport(params)])
   } finally { loading.value = false }
 }
+const money = (value: number): string => `¥ ${Number(value).toFixed(2)}`
+const monthChartOption = computed(() => ({
+  tooltip: { trigger: 'axis', valueFormatter: money },
+  legend: { data: ['投入', '产出', '利润'], top: 0 },
+  grid: { left: 8, right: 12, bottom: 4, top: 34, containLabel: true },
+  xAxis: { type: 'category', data: report.value.months.map((m) => m.month) },
+  yAxis: { type: 'value' },
+  series: [
+    { name: '投入', type: 'bar', data: report.value.months.map((m) => m.input), itemStyle: { color: '#e6a23c' } },
+    { name: '产出', type: 'bar', data: report.value.months.map((m) => m.output), itemStyle: { color: '#67c23a' } },
+    { name: '利润', type: 'line', data: report.value.months.map((m) => m.profit), itemStyle: { color: '#409eff' } },
+  ],
+}))
+const categoryChartOption = computed(() => ({
+  tooltip: { trigger: 'item', valueFormatter: money },
+  legend: { type: 'scroll', bottom: 0 },
+  series: [{
+    type: 'pie', radius: ['38%', '62%'], center: ['50%', '44%'], avoidLabelOverlap: true,
+    data: report.value.categories.map((c) => ({ name: `${c.kind === 'INPUT' ? '投入' : '产出'}·${c.category}`, value: c.amount })),
+    label: { formatter: '{b}\n{d}%' },
+  }],
+}))
+const plotChartOption = computed(() => ({
+  tooltip: { trigger: 'axis', valueFormatter: money },
+  grid: { left: 8, right: 20, bottom: 4, top: 18, containLabel: true },
+  xAxis: { type: 'value' },
+  yAxis: { type: 'category', data: report.value.plots.map((p) => p.plotCode || '未关联地块').reverse() },
+  series: [{
+    type: 'bar', data: report.value.plots.map((p) => p.profit).reverse(),
+    label: { show: true, position: 'right', formatter: (v: any) => Number(v.value).toFixed(0) },
+    itemStyle: { color: (v: any) => (Number(v.value) >= 0 ? '#67c23a' : '#f56c6c') },
+  }],
+}))
 function search() { page.page = 1; void load() }
 function reset() {
   query.plotCode = ''
@@ -198,4 +263,13 @@ onMounted(() => void load())
 .summary-item { background: #fff; padding: 20px; border-radius: 8px; display: flex; flex-direction: column; gap: 10px; color: #909399; }
 .summary-item strong { color: #303133; font-size: 24px; }
 .form-hint { margin-left: 12px; font-size: 12px; color: var(--el-text-color-secondary); }
+.report-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+.report-title { font-size: 15px; font-weight: 600; color: #303133; }
+.report-hint { font-size: 12px; color: var(--el-text-color-secondary); }
+.report-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.report-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.report-cell-title { font-size: 13px; color: #606266; }
+/* vue-echarts 根节点没有 intrinsic 高度，不给高度图表会塌成 0 像素 */
+.chart { height: 260px; width: 100%; }
+@media (max-width: 1200px) { .report-grid { grid-template-columns: 1fr; } }
 </style>

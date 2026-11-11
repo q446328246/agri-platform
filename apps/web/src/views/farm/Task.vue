@@ -74,11 +74,12 @@
         <el-table-column prop="planEndDate" label="计划结束时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.planEndDate) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="200" align="center" fixed="right">
+        <el-table-column label="操作" width="240" align="center" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showDetail(row)">详情</el-button>
             <el-button v-if="row.status === 'PENDING'" link type="success" size="small" @click="handleStatus(row, 'RUNNING')">开始</el-button>
-            <el-button v-if="row.status === 'IN_PROGRESS'" link type="success" size="small" @click="handleStatus(row, 'COMPLETED')">完成</el-button>
+            <el-button v-if="row.status === 'IN_PROGRESS'" link type="success" size="small" @click="openComplete(row)">完成</el-button>
+            <el-button v-if="row.status === 'PENDING' || row.status === 'IN_PROGRESS'" link type="danger" size="small" @click="handleCancel(row)">取消</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -101,9 +102,30 @@
         <el-form-item label="任务名称" required><el-input v-model="createForm.name" /></el-form-item>
         <el-form-item label="地块编码" required><el-input v-model="createForm.plotCode" /></el-form-item>
         <el-form-item label="任务类型"><el-select v-model="createForm.type" style="width: 100%"><el-option label="翻耕" value="TILLAGE" /><el-option label="播种" value="SEEDING" /><el-option label="灌溉" value="IRRIGATION" /><el-option label="除草" value="WEEDING" /><el-option label="植保" value="SPRAYING" /><el-option label="施肥" value="FERTILIZATION" /></el-select></el-form-item>
-        <el-form-item label="计划时间"><el-date-picker v-model="createForm.scheduledAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" style="width: 100%" /></el-form-item>
+        <el-form-item label="计划开始"><el-date-picker v-model="createForm.scheduledAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" style="width: 100%" /></el-form-item>
+        <el-form-item label="计划结束"><el-date-picker v-model="createForm.scheduledEndAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" style="width: 100%" /></el-form-item>
+        <el-form-item label="负责人"><el-input v-model="createForm.assigneeName" maxlength="100" placeholder="选填" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="createVisible = false">取消</el-button><el-button type="primary" :loading="creating" @click="submitCreate">创建</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="completeVisible" title="完成农事任务" width="480px">
+      <el-form :model="completeForm" label-width="110px">
+        <el-form-item label="任务名称"><span>{{ completeTask?.name }}</span></el-form-item>
+        <el-form-item label="作业结果" required>
+          <el-select v-model="completeForm.outcome" style="width: 100%">
+            <el-option label="成功" value="success" />
+            <el-option label="部分完成" value="partial" />
+            <el-option label="失败" value="failed" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="实际作业面积" required>
+          <el-input-number v-model="completeForm.finishedAreaMu" :min="0" :precision="2" :step="1" style="width: 200px" /><span style="margin-left: 8px">亩</span>
+        </el-form-item>
+        <el-form-item label="作业说明">
+          <el-input v-model="completeForm.notes" type="textarea" :rows="3" maxlength="2000" show-word-limit placeholder="选填，记录作业情况与异常" />
+        </el-form-item>
+      </el-form>
+      <template #footer><el-button @click="completeVisible = false">取消</el-button><el-button type="primary" :loading="completing" @click="submitComplete">确认完成</el-button></template>
     </el-dialog>
     <el-dialog v-model="detailVisible" title="农事任务详情" width="760px">
       <div v-loading="detailLoading">
@@ -117,11 +139,16 @@
           </el-descriptions-item>
           <el-descriptions-item label="所属地块">{{ taskPlot ? `${taskPlot.parcelName}（${taskDetail.plotCode}）` : taskDetail.plotCode || '-' }}</el-descriptions-item>
           <el-descriptions-item label="地块面积">{{ taskPlot ? `${taskPlot.areaMu.toFixed(2)} 亩` : '-' }}</el-descriptions-item>
-          <el-descriptions-item label="计划时间">{{ formatDateTime(taskDetail.scheduledAt) }}</el-descriptions-item>
+          <el-descriptions-item label="计划开始">{{ formatDateTime(taskDetail.scheduledAt) }}</el-descriptions-item>
+          <el-descriptions-item label="计划结束">{{ formatDateTime(taskDetail.scheduledEndAt) }}</el-descriptions-item>
+          <el-descriptions-item label="负责人">{{ taskDetail.assigneeName || '-' }}</el-descriptions-item>
           <el-descriptions-item label="开始作业">{{ formatDateTime(taskDetail.startedAt) }}</el-descriptions-item>
           <el-descriptions-item label="完成作业">{{ formatDateTime(taskDetail.completedAt) }}</el-descriptions-item>
+          <el-descriptions-item label="取消时间">{{ formatDateTime(taskDetail.cancelledAt) }}</el-descriptions-item>
+          <el-descriptions-item label="作业结果">{{ taskDetail.result ? `${getOutcomeText(taskDetail.result.outcome)} · 实际 ${taskDetail.result.finishedAreaMu.toFixed(2)} 亩` : '-' }}</el-descriptions-item>
           <el-descriptions-item label="创建时间">{{ formatDateTime(taskDetail.createdAt) }}</el-descriptions-item>
           <el-descriptions-item label="任务编号">{{ taskDetail.id }}</el-descriptions-item>
+          <el-descriptions-item v-if="taskDetail.result?.notes" label="作业说明" :span="2">{{ taskDetail.result.notes }}</el-descriptions-item>
         </el-descriptions>
 
         <div class="detail-subtitle">该地块控制指令</div>
@@ -158,7 +185,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FarmTaskQuery, FarmTaskStatus } from '@/types'
 import { formatDateTime, getControlOriginText, getControlOriginType, getControlStatusText, getControlStatusType, getControlTypeText, getTaskStatusText, getTaskStatusType } from '@/utils'
 import { controlApi, operationApi, plotApi } from '@/api'
@@ -175,12 +202,17 @@ const getTaskTypeText = (type: string) => {
   return map[type] || type
 }
 
+const getOutcomeText = (outcome: string) => {
+  const map: Record<string, string> = { success: '成功', partial: '部分完成', failed: '失败' }
+  return map[outcome] || outcome
+}
+
 const loading = ref(false)
 const tableData = ref<any[]>([])
 const total = ref(0)
 const createVisible = ref(false)
 const creating = ref(false)
-const createForm = reactive({ name: '', plotCode: '', type: 'IRRIGATION', scheduledAt: '' })
+const createForm = reactive({ name: '', plotCode: '', type: 'IRRIGATION', scheduledAt: '', scheduledEndAt: '', assigneeName: '' })
 
 const queryForm = reactive<FarmTaskQuery>({
   page: 1,
@@ -222,8 +254,8 @@ async function fetchList() {
       taskType: task.type,
       parcelName: task.plotCode,
       status: task.status === 'RUNNING' ? 'IN_PROGRESS' : task.status,
-      planStartDate: task.scheduledAt || task.createdAt,
-      planEndDate: task.scheduledAt || task.createdAt
+      planStartDate: task.scheduledAt,
+      planEndDate: task.scheduledEndAt
     }))
     total.value = result.total
   } catch (error) {
@@ -249,12 +281,13 @@ function handleReset() {
 }
 
 function handleCreate() {
-  Object.assign(createForm, { name: '', plotCode: '', type: 'IRRIGATION', scheduledAt: '' })
+  Object.assign(createForm, { name: '', plotCode: '', type: 'IRRIGATION', scheduledAt: '', scheduledEndAt: '', assigneeName: '' })
   createVisible.value = true
 }
 
 async function submitCreate() {
   if (!createForm.name.trim() || !createForm.plotCode.trim()) { ElMessage.warning('请填写任务名称和地块编码'); return }
+  if (createForm.scheduledEndAt && (!createForm.scheduledAt || createForm.scheduledEndAt <= createForm.scheduledAt)) { ElMessage.warning('计划结束时间必须晚于开始时间'); return }
   creating.value = true
   try { await operationApi.createTask(createForm); ElMessage.success('任务已创建'); createVisible.value = false; await fetchList() } catch (error) { console.error('任务创建失败', error) } finally { creating.value = false }
 }
@@ -299,13 +332,62 @@ async function showDetail(row: { id: string }) {
 function goCommands() {
   void router.push('/device/commands')
 }
-async function handleStatus(row: { id: string; status: string }, status: string) {
+async function handleStatus(row: { id: string; status: string; version: number }, status: string) {
   try {
-    await operationApi.updateStatus(row.id, status)
+    await operationApi.updateStatus(row.id, status, { version: row.version })
     ElMessage.success('任务状态已更新')
     await fetchList()
   } catch (error) {
     console.error('任务状态更新失败', error)
+    // 409 说明任务已被他人更新，刷新列表拿最新状态与 version
+    await fetchList()
+  }
+}
+
+async function handleCancel(row: { id: string; name: string; version: number }) {
+  try {
+    await ElMessageBox.confirm(`确定取消任务「${row.name}」吗？取消后不可恢复执行`, '取消任务', { type: 'warning' })
+  } catch { return }
+  try {
+    await operationApi.updateStatus(row.id, 'CANCELLED', { version: row.version })
+    ElMessage.success('任务已取消')
+    await fetchList()
+  } catch (error) {
+    console.error('任务取消失败', error)
+    await fetchList()
+  }
+}
+
+/* ---------------- 完成任务：必须登记实际作业结果 ---------------- */
+
+const completeVisible = ref(false)
+const completing = ref(false)
+const completeTask = ref<any | null>(null)
+const completeForm = reactive<{ outcome: 'success' | 'partial' | 'failed'; finishedAreaMu: number; notes: string }>({ outcome: 'success', finishedAreaMu: 0, notes: '' })
+
+function openComplete(row: any) {
+  completeTask.value = row
+  Object.assign(completeForm, { outcome: 'success', finishedAreaMu: 0, notes: '' })
+  completeVisible.value = true
+}
+
+async function submitComplete() {
+  if (!completeTask.value) return
+  if (typeof completeForm.finishedAreaMu !== 'number' || !Number.isFinite(completeForm.finishedAreaMu) || completeForm.finishedAreaMu < 0) { ElMessage.warning('请填写非负的实际作业面积'); return }
+  completing.value = true
+  try {
+    await operationApi.updateStatus(completeTask.value.id, 'COMPLETED', {
+      version: completeTask.value.version,
+      result: { outcome: completeForm.outcome, finishedAreaMu: completeForm.finishedAreaMu, notes: completeForm.notes }
+    })
+    ElMessage.success('任务已完成，作业结果已登记')
+    completeVisible.value = false
+    await fetchList()
+  } catch (error) {
+    console.error('任务完成登记失败', error)
+    await fetchList()
+  } finally {
+    completing.value = false
   }
 }
 

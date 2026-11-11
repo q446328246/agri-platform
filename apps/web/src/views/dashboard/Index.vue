@@ -92,6 +92,7 @@
     <MapShapeEditor
       ref="shapeEditor"
       :zones="zoneOptions"
+      :plots="plotOptions"
       :suggest-name="suggestName"
       @active-change="activeShape = $event"
       @saved="handleShapeSaved"
@@ -200,6 +201,7 @@ const icon = (path: string): string => `<svg viewBox="0 0 24 24" width="16" heig
 const panelComps: Record<string, Component> = {
   '/plot/list': markRaw(defineAsyncComponent(() => import('@/views/plot/List.vue'))),
   '/plot/zone': markRaw(defineAsyncComponent(() => import('@/views/zone/Index.vue'))),
+  '/plot/season': markRaw(defineAsyncComponent(() => import('@/views/plot/Season.vue'))),
   '/farm/task': markRaw(defineAsyncComponent(() => import('@/views/farm/Task.vue'))),
   '/farm/record': markRaw(defineAsyncComponent(() => import('@/views/farm/Record.vue'))),
   '/farm/navigation': markRaw(defineAsyncComponent(() => import('@/views/farm/Navigation.vue'))),
@@ -226,6 +228,7 @@ const menuGroups: MenuGroup[] = [
     items: [
       { label: '地块台账', panel: '/plot/list', draw: 'plot', perm: 'plot:read' },
       { label: '片区信息', panel: '/plot/zone', draw: 'zone', perm: 'plot:read' },
+      { label: '种植季档案', panel: '/plot/season', perm: 'plot:read' },
       { label: '管线列表', panel: 'infra-lines', perm: 'plot:read' },
       { label: '导航路线', panel: '/farm/navigation', perm: 'operation:read' },
       { label: '水线', layer: 'WATER', draw: 'line' },
@@ -457,6 +460,7 @@ const plotList = ref<Plot[]>([])
 const zoneList = ref<ZoneSummary[]>([])
 const plotByCode = computed(() => new Map(plotList.value.map((plot) => [plot.parcelCode, plot])))
 const zoneOptions = computed(() => zoneList.value.map((zone) => ({ zoneCode: zone.zoneCode, zoneName: zone.zoneName })))
+const plotOptions = computed(() => plotList.value.map((plot) => ({ parcelCode: plot.parcelCode, parcelName: plot.name })))
 
 function isDrawing(item: MenuItem): boolean {
   const shape = activeShape.value
@@ -630,6 +634,7 @@ function editLineOnMap(line: InfraLine) {
   activePanel.value = ''
   shapeEditor.value?.editLine({
     code: line.lineCode, name: line.lineName, lineType: line.lineType, points: lineDraftPoints(line),
+    plotCode: line.plotCode,
   })
 }
 
@@ -656,13 +661,21 @@ function fitPadding(): { paddingTopLeft: [number, number]; paddingBottomRight: [
 }
 
 function linePopup(line: InfraLine): HTMLElement {
-  const actions: PopupAction[] = allowed('plot:write')
-    ? [
-        { label: '编辑线路', onClick: () => editLineOnMap(line) },
-        { label: '删除该管线', danger: true, onClick: () => void removeInfraLine(line) },
-      ]
-    : []
-  return shapePopup(line.lineName, [`${lineTypeLabel(line.lineType)} · ${line.lengthM.toFixed(0)} 米`, line.lineCode], actions)
+  const owner = line.plotCode ? plotByCode.value.get(line.plotCode) : undefined
+  const rows = [
+    `${lineTypeLabel(line.lineType)} · ${line.lengthM.toFixed(0)} 米`,
+    line.lineCode,
+    line.plotCode ? `归属地块：${owner?.name ?? line.plotCode}` : '未绑定地块',
+  ]
+  const actions: PopupAction[] = []
+  if (line.plotCode && allowed('plot:read')) {
+    actions.push({ label: '地块详情', onClick: () => { map?.closePopup(); void router.push(`/plot/detail/${encodeURIComponent(line.plotCode)}`) } })
+  }
+  if (allowed('plot:write')) {
+    actions.push({ label: '编辑线路', onClick: () => editLineOnMap(line) })
+    actions.push({ label: '删除该管线', danger: true, onClick: () => void removeInfraLine(line) })
+  }
+  return shapePopup(line.lineName, rows, actions)
 }
 
 /** 管线列表面板只负责查询，定位与改删都通过这里回到地图 */
@@ -765,8 +778,12 @@ function plotPopup(boundary: PlotBoundary, record: Plot, ring: [number, number][
     boundary.parcelCode,
     zoneName ? `所属片区：${zoneName}` : '未划入片区',
   ]
-  const actions: PopupAction[] = allowed('plot:write') ? [
-    {
+  const actions: PopupAction[] = []
+  if (allowed('plot:read')) {
+    actions.push({ label: '查看详情', onClick: () => { map?.closePopup(); void router.push(`/plot/detail/${record.parcelCode}`) } })
+  }
+  if (allowed('plot:write')) {
+    actions.push({
       label: '编辑边界',
       onClick: () => {
         map?.closePopup()
@@ -775,9 +792,9 @@ function plotPopup(boundary: PlotBoundary, record: Plot, ring: [number, number][
           plotType: record.type, zoneCode: record.zoneCode ?? null,
         })
       },
-    },
-    { label: '删除地块', danger: true, onClick: () => void removePlot(record) },
-  ] : []
+    })
+    actions.push({ label: '删除地块', danger: true, onClick: () => void removePlot(record) })
+  }
   return shapePopup(boundary.name, rows, actions)
 }
 
@@ -839,6 +856,45 @@ async function loadPlots(fit = true) {
   }
 }
 
+/** 设备按地块聚合成一个点位，弹窗用文本节点渲染名称避免注入，并挂业务跳转 */
+function devicePopup(code: string, g: { name: string; total: number; online: number; devices: { name: string; status: string }[] }): HTMLElement {
+  const box = document.createElement('div')
+  box.className = 'dev-pop'
+  const head = document.createElement('div')
+  head.className = 'dev-pop-h'
+  head.textContent = `${g.name} · 在线 ${g.online}/${g.total}`
+  box.appendChild(head)
+  for (const x of g.devices.slice(0, 10)) {
+    const row = document.createElement('div')
+    row.className = 'dev-row'
+    const dot = document.createElement('span')
+    dot.className = `dev-st ${x.status === 'ONLINE' ? 'on' : 'off'}`
+    row.appendChild(dot)
+    row.appendChild(document.createTextNode(x.name))
+    box.appendChild(row)
+  }
+  if (g.devices.length > 10) {
+    const more = document.createElement('div')
+    more.className = 'dev-more'
+    more.textContent = `…共 ${g.devices.length} 台`
+    box.appendChild(more)
+  }
+  const bar = document.createElement('div')
+  bar.className = 'shape-pop-actions'
+  const jump = (label: string, path: string) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'shape-pop-btn'
+    button.textContent = label
+    button.addEventListener('click', () => { map?.closePopup(); void router.push(path) })
+    bar.appendChild(button)
+  }
+  jump('设备台账', `/device/list?plotCode=${encodeURIComponent(code)}`)
+  if (allowed('plot:read')) jump('地块详情', `/plot/detail/${encodeURIComponent(code)}`)
+  box.appendChild(bar)
+  return box
+}
+
 /** 设备无经纬度，按其所属地块中心聚合打点；缺地块位置的设备归入“未定位”不参与绘制。 */
 async function loadDevices() {
   if (!map || !deviceLayer) return
@@ -859,11 +915,11 @@ async function loadDevices() {
       const latlng = parcelCenter.get(code)!
       const color = g.online === g.total ? '#00e676' : g.online > 0 ? '#f3c969' : '#ff8a65'
       const html = `<span class="dev-pin" style="background:${color}">${g.total}</span>`
-      const rows = g.devices.slice(0, 10).map((x) => `<div class="dev-row"><span class="dev-st ${x.status === 'ONLINE' ? 'on' : 'off'}"></span>${x.name}</div>`).join('')
-      const more = g.devices.length > 10 ? `<div class="dev-more">…共 ${g.devices.length} 台</div>` : ''
+      const tip = document.createElement('div')
+      tip.textContent = `${g.name}｜设备 ${g.total} 台 · 在线 ${g.online}`
       return L.marker(latlng, { icon: L.divIcon({ className: 'dev-ico', html, iconSize: [22, 22], iconAnchor: [11, 11] }) })
-        .bindTooltip(`<strong>${g.name}</strong><br>设备 ${g.total} 台 · 在线 ${g.online}`)
-        .bindPopup(`<div class="dev-pop"><div class="dev-pop-h">${g.name} · 在线 ${g.online}/${g.total}</div>${rows}${more}</div>`)
+        .bindTooltip(tip)
+        .bindPopup(devicePopup(code, g))
     })
     if (deviceLayer) map.removeLayer(deviceLayer)
     deviceLayer = L.layerGroup(markers)

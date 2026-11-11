@@ -125,18 +125,21 @@ export function getControlStatusType(status: string): 'warning' | 'success' | 'd
   return 'warning'
 }
 
-/** 生产档案事件类型：事件自动写入与人工录入并存 */
+/** 生产档案事件类型：事件自动写入与人工录入并存，链条含投入品、农事、处方、归档、采收 */
 export function getTraceEventText(event: string): string {
   const map: Record<string, string> = {
     PRESCRIPTION_ISSUED: '处方生成',
     FARM_OPERATION: '农事作业',
-    OPERATION_COMPLETED: '作业完成'
+    OPERATION_COMPLETED: '作业完成',
+    INPUT_MATERIAL: '投入品领用',
+    SOWING: '播种',
+    HARVEST: '采收'
   }
   return map[event] || event || '-'
 }
 
 export function getTraceEventType(event: string): 'success' | 'warning' | 'info' {
-  if (event === 'PRESCRIPTION_ISSUED') return 'success'
+  if (event === 'PRESCRIPTION_ISSUED' || event === 'HARVEST') return 'success'
   if (event === 'OPERATION_COMPLETED') return 'warning'
   return 'info'
 }

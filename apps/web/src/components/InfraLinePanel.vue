@@ -10,6 +10,12 @@
         <el-form-item label="名称">
           <el-input v-model="keyword" size="small" style="width: 200px" placeholder="名称或编码关键字" clearable @keyup.enter="reload" />
         </el-form-item>
+        <el-form-item label="归属地块">
+          <el-select v-model="filterPlot" size="small" style="width: 180px" placeholder="全部地块" clearable filterable>
+            <el-option label="未绑定地块" value="__none__" />
+            <el-option v-for="plot in plots" :key="plot.parcelCode" :label="`${plot.parcelName}（${plot.parcelCode}）`" :value="plot.parcelCode" />
+          </el-select>
+        </el-form-item>
         <el-form-item>
           <el-button size="small" type="primary" @click="reload">查询</el-button>
           <el-button size="small" @click="reset">重置</el-button>
@@ -39,6 +45,9 @@
           <template #default="{ row }">{{ row.geom?.coordinates?.length ?? 0 }}</template>
         </el-table-column>
         <el-table-column prop="lineCode" label="编码" width="150" show-overflow-tooltip />
+        <el-table-column label="归属地块" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">{{ plotName(row.plotCode) }}</template>
+        </el-table-column>
         <el-table-column label="操作" width="168" align="center" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" :disabled="!bridge" @click="bridge?.locate(row)">定位</el-button>
@@ -70,14 +79,23 @@ const userStore = useUserStore()
 const canWrite = computed(() => checkPermission(userStore.permissions, 'plot:write'))
 
 const lines = ref<InfraLine[]>([])
+const plots = ref<{ parcelCode: string; parcelName: string }[]>([])
 const loading = ref(false)
 const filterCat = ref<LineFilter>('ALL')
 const keyword = ref('')
+const filterPlot = ref('')
+
+const plotNameByCode = computed(() => new Map(plots.value.map((plot) => [plot.parcelCode, plot.parcelName])))
+function plotName(code?: string): string {
+  if (!code) return '未绑定地块'
+  return plotNameByCode.value.get(code) ?? code
+}
 
 const rows = computed(() => {
   const text = keyword.value.trim().toLowerCase()
   return lines.value.filter((line) => (filterCat.value === 'ALL' || categorize(line.lineType) === filterCat.value)
-    && (text === '' || line.lineName.toLowerCase().includes(text) || line.lineCode.toLowerCase().includes(text)))
+    && (text === '' || line.lineName.toLowerCase().includes(text) || line.lineCode.toLowerCase().includes(text))
+    && (filterPlot.value === '' || (filterPlot.value === '__none__' ? !line.plotCode : line.plotCode === filterPlot.value)))
 })
 const totalLengthM = computed(() => rows.value.reduce((sum, line) => sum + Number(line.lengthM ?? 0), 0))
 
@@ -86,10 +104,15 @@ async function reload() {
   const seq = ++reloadSeq
   loading.value = true
   try {
-    const list = await plotApi.getInfraLines()
-    if (seq === reloadSeq) lines.value = list
+    const [list, plotPage] = await Promise.all([plotApi.getInfraLines(), plotApi.getList({ page: 1, pageSize: 200 })])
+    if (seq !== reloadSeq) return
+    lines.value = list
+    plots.value = plotPage.items.map((item: { parcelCode: string; parcelName?: string; name?: string }) => ({
+      parcelCode: item.parcelCode,
+      parcelName: item.parcelName ?? item.name ?? item.parcelCode,
+    }))
   } catch {
-    if (seq === reloadSeq) lines.value = []
+    if (seq === reloadSeq) { lines.value = []; plots.value = [] }
   } finally {
     if (seq === reloadSeq) loading.value = false
   }
@@ -98,6 +121,7 @@ async function reload() {
 function reset() {
   filterCat.value = 'ALL'
   keyword.value = ''
+  filterPlot.value = ''
   void reload()
 }
 

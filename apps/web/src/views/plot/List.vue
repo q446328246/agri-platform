@@ -55,7 +55,7 @@
           <el-button type="primary" @click="handleCreate">
             <el-icon><Plus /></el-icon>新增地块
           </el-button>
-          <el-button type="danger" :disabled="!selectedIds.length" @click="handleBatchDelete">
+          <el-button type="danger" :disabled="!selectedCodes.length" :loading="deleting" @click="handleBatchDelete">
             <el-icon><Delete /></el-icon>批量删除
           </el-button>
           <el-button :loading="exporting" @click="handleExport">
@@ -192,9 +192,10 @@ const router = useRouter()
 const loading = ref(false)
 const tableData = ref<any[]>([])
 const total = ref(0)
-const selectedIds = ref<string[]>([])
+const selectedCodes = ref<string[]>([])
 const selectedRows = ref<any[]>([])
 const exporting = ref(false)
+const deleting = ref(false)
 
 const queryForm = reactive<PlotQuery>({
   page: 1,
@@ -279,23 +280,41 @@ async function handleDelete(id: string) {
 }
 
 async function handleBatchDelete() {
+  if (!selectedCodes.value.length || deleting.value) return
+  const parcelCodes = [...selectedCodes.value]
+  let confirmed = false
+  deleting.value = true
   try {
-    await ElMessageBox.confirm('确定删除选中的地块吗？此操作不可恢复', '警告', {
+    await ElMessageBox.confirm(`确定删除选中的 ${parcelCodes.length} 个地块吗？此操作不可恢复`, '警告', {
       type: 'warning'
     })
-    await plotApi.batchDelete(selectedIds.value)
-    ElMessage.success('批量删除成功')
-    fetchList()
-  } catch (error) {
-    if (error !== 'cancel') {
-      console.error('批量删除失败', error)
+    confirmed = true
+    const { succeededCodes, failedCodes } = await plotApi.batchDelete(parcelCodes)
+    if (failedCodes.length) {
+      const message = `成功删除 ${succeededCodes.length} 个地块，失败 ${failedCodes.length} 个（${failedCodes.join('、')}），请重试失败地块`
+      if (succeededCodes.length) ElMessage.warning(message)
+      else ElMessage.error(message)
+    } else {
+      ElMessage.success(`批量删除成功，共 ${succeededCodes.length} 个地块`)
     }
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      console.error('批量删除失败', error)
+      ElMessage.error('批量删除失败，部分地块可能已删除，请刷新列表确认')
+    }
+  } finally {
+    if (confirmed) {
+      selectedCodes.value = []
+      selectedRows.value = []
+      await fetchList()
+    }
+    deleting.value = false
   }
 }
 
 function handleSelectionChange(selection: any[]) {
   selectedRows.value = selection
-  selectedIds.value = selection.map(item => item.id)
+  selectedCodes.value = selection.map(item => item.parcelCode)
 }
 
 const exportHeaders = ['地块编码', '地块名称', '所属片区', '地块类型', '状态', '面积(亩)', '当前作物', '负责人', '创建时间']

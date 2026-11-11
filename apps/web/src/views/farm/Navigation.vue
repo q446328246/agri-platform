@@ -201,7 +201,7 @@ function renderRoute() {
 
 async function loadData() {
   try {
-    const [plots, lines] = await Promise.all([plotApi.getList({ page: 1, pageSize: 200 }), plotApi.getInfraLines('ROAD')])
+    const [plots, lines] = await Promise.all([plotApi.getList({ page: 1, pageSize: 200 }), plotApi.getInfraLines({ lineType: 'ROAD' })])
     allPlots.value = plots.items
     roadNetwork.value = lines
       .filter((line) => Array.isArray(line.geom?.coordinates) && line.geom.coordinates.length >= 2)

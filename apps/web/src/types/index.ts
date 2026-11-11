@@ -137,6 +137,39 @@ export type MapShapeMode = 'create' | 'edit';
 /** 管线类型：灌水管、施肥管、电力线、机耕道、通信网线 */
 export type InfraLineType = 'IRRIGATION_PIPE' | 'FERTILIZATION_PIPE' | 'ELECTRIC_LINE' | 'ROAD' | 'TELECOM';
 
+/** 种植季状态：计划中 / 种植中 / 已采收 */
+export type CropSeasonStatus = 'planned' | 'growing' | 'harvested';
+
+/** 地块变更动作：建档 / 更新 / 删除 */
+export type PlotChangeAction = 'CREATE' | 'UPDATE' | 'DELETE';
+
+/** 地块变更历史条目（追加式留痕） */
+export interface PlotChangeLog {
+  id: string;
+  parcelCode: string;
+  action: PlotChangeAction;
+  summary: string;
+  actor: string;
+  createdAt: string;
+}
+
+/** 种植季/茬口档案：某地块某季种了什么，用于还原轮作序列 */
+export interface CropSeason {
+  seasonCode: string;
+  plotCode: string;
+  crop: string;
+  variety: string;
+  seasonYear: number;
+  seasonIndex: number;
+  /** YYYY-MM-DD，空串表示未定 */
+  plantDate: string;
+  harvestDate: string;
+  status: CropSeasonStatus;
+  yieldKg: number | null;
+  note: string;
+  createdAt: string;
+}
+
 export interface MapShapeActive {
   kind: MapShapeKind;
   mode: MapShapeMode;
@@ -153,6 +186,8 @@ export interface MapShapeTarget {
   zoneCode?: string | null | undefined;
   color?: string | undefined;
   lineType?: InfraLineType | undefined;
+  /** 管线归属地块编码（plots.parcelCode），空/缺省表示未绑定 */
+  plotCode?: string | undefined;
 }
 
 export interface MapShapeSaved {
@@ -336,6 +371,40 @@ export interface Recording {
   startedAt: string
   endedAt: string
   playbackUrl: string
+}
+
+export type PtzAction = 'LEFT' | 'RIGHT' | 'UP' | 'DOWN' | 'ZOOM_IN' | 'ZOOM_OUT' | 'STOP'
+export type PtzStatus = 'QUEUED' | 'SENT' | 'FAILED'
+
+/** 云台指令台账：QUEUED 表示通道未接入或待下发，SENT/FAILED 为摄像机网关真实回执 */
+export interface PtzCommand {
+  id: string
+  cameraId: string
+  action: PtzAction
+  speed?: number
+  status: PtzStatus
+  message: string
+  createdAt: string
+  deliveredAt?: string
+}
+
+/** 视频 AI 识别事件：转发失败保留记录，可人工重试 */
+export interface VideoAiEvent {
+  id: string
+  cameraId: string
+  plotCode: string
+  pestType: string
+  level: 1 | 2 | 3
+  confidence: number
+  imageFileId?: string
+  detectedAt: string
+  receivedAt: string
+  forwarded: boolean
+  forwardStatus: number
+  forwardMessage: string
+  retryCount: number
+  lastError?: string
+  forwardedAt?: string
 }
 
 /** 消息级别（与 @agri/contracts 一致） */

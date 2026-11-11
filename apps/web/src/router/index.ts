@@ -42,6 +42,12 @@ const routes: RouteRecordRaw[] = [
             meta: { title: '片区管理', permission: 'plot:read' }
           },
           {
+            path: 'season',
+            name: 'PlotSeason',
+            component: () => import('@/views/plot/Season.vue'),
+            meta: { title: '种植季档案', permission: 'plot:read' }
+          },
+          {
             path: 'create',
             name: 'PlotCreate',
             component: () => import('@/views/plot/Edit.vue'),
