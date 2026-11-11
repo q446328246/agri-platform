@@ -69,15 +69,17 @@ function mountSplit(options: { getById?: () => Promise<unknown>; confirm?: () =>
 }
 
 describe("地块拆分页", () => {
-  it("载入后按原边界给每块子地块塞参考顶点，面积取几何现算", async () => {
+  it("载入后只给第一块塞原边界作参照，其余子地块从零画起", async () => {
     const { state } = mountSplit();
     await flushView();
     expect(state.source).toMatchObject({ parcelCode: sourcePlot.parcelCode });
     expect(state.pieces).toHaveLength(2);
-    for (const piece of state.pieces) {
-      expect(piece.coordinates).toHaveLength(4);
-      expect(piece.areaMu).toBe(fullAreaMu);
-    }
+    // 每块都复制整份原边界会让合计翻倍（演示库误拆的成因），现在只有首块预填
+    expect(state.pieces[0].coordinates).toHaveLength(4);
+    expect(state.pieces[0].areaMu).toBe(fullAreaMu);
+    expect(state.pieces[1].coordinates).toHaveLength(0);
+    expect(state.pieces[1].areaMu).toBe(0);
+    expect(state.overSourceArea).toBe(false);
   });
 
   it("无边界地块不进拆分流，档案为空态", async () => {
@@ -97,6 +99,21 @@ describe("地块拆分页", () => {
     await state.handleSplit();
     expect(split).not.toHaveBeenCalled();
     expect(warning).toHaveBeenCalledWith(expect.stringContaining("超过原地块"));
+  });
+
+  it("子块各自不超原块但重叠导致合计超限：预检拦下且置为不可提交", async () => {
+    const { state, split, warning } = mountSplit();
+    await flushView();
+    const wideA = rect(107.4212, 30.9805, 107.4242, 30.9825);
+    const wideB = rect(107.4222, 30.9805, 107.4252, 30.9825);
+    state.pieces[0].coordinates = wideA.map((point) => [...point] as [number, number]);
+    state.handlePieceArea(0, geo.polygonAreaMu(wideA));
+    state.pieces[1].coordinates = wideB.map((point) => [...point] as [number, number]);
+    state.handlePieceArea(1, geo.polygonAreaMu(wideB));
+    expect(state.overSourceArea).toBe(true);
+    await state.handleSplit();
+    expect(split).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("合计"));
   });
 
   it("确认拆分提交闭合环 GeoJSON，成功后回退", async () => {    const { state, split, success, back } = mountSplit();

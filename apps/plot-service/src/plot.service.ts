@@ -338,8 +338,9 @@ export class PlotService {
    * 地块拆分：一块拆多块。
    *
    * 不在服务端做线切/布尔运算：子地块边界由操作人在地图上逐块绘制后提交，
-   * 每块面积同样只认自己的几何。校验：子块 ≥2、顶点 ≥3、面积为正、
-   * 单块不得超过原地块面积（分出去的不能比原块还大）。
+   * 每块面积同样只认自己的几何。校验：子块 ≥2、顶点 ≥3、面积为正，
+   * 且单块与合计都不得超过原地块面积（分出去的不能比原块还大，
+   * 重叠或超出原边界的画法会让全场在账面积凭空增长）。
    * 默认删除（软删归档）原地块；`keepSource` 仅用于先验证切法再归档的操作节奏。
    */
   async splitPlot(input: SplitPlotInput): Promise<SplitPlotResult> {
@@ -365,6 +366,13 @@ export class PlotService {
       }
       total += areaMu;
       prepared.push({ piece, geom, areaMu });
+    }
+
+    // 合计口径：每块各自两位小数进位，允许 pieces × 0.01 亩的舍入余量，
+    // 再大就是子地块互相重叠或画出了原边界，会在账面积上凭空多出一块
+    const pieceAreaSum = roundAreaMu(total);
+    if (pieceAreaSum > source.areaMu + 0.01 * pieces.length) {
+      throw new ValidationError(`子地块合计 ${pieceAreaSum} 亩超过原地块 ${source.areaMu} 亩，请检查是否重叠或画出原边界`);
     }
 
     const now = new Date().toISOString();
@@ -407,6 +415,6 @@ export class PlotService {
       }
       if (!keepSource) await this.repository.remove(tx, source.parcelCode, deletedAt);
     });
-    return { plots, sourceCode: source.parcelCode, sourceRemoved: !keepSource, pieceAreaSum: roundAreaMu(total) };
+    return { plots, sourceCode: source.parcelCode, sourceRemoved: !keepSource, pieceAreaSum };
   }
 }

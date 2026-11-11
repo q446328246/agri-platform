@@ -8,12 +8,12 @@
         </div>
         <el-alert type="warning" :closable="false" class="split-alert">
           拆分将按你逐块绘制的边界生成新地块，面积一律以各自边界现算；原地块默认整块归档（可勾选保留）。
-          子地块边界不要重叠，合计面积超过原地块会被服务端拒绝。
+          子地块要沿原边界切开：边界重叠或画出原地块会让合计面积超过原地块，此时无法提交。
         </el-alert>
         <div class="split-summary">
           <span>原地块台账面积：<b>{{ sourceAreaMu.toFixed(2) }}</b> 亩</span>
-          <span>子地块合计：<b :class="{ 'split-over': pieceAreaSum > sourceAreaMu + 0.01 }">{{ pieceAreaSum.toFixed(2) }}</b> 亩</span>
-          <span v-if="pieceAreaSum > sourceAreaMu + 0.01" class="split-over">合计已超过原地块，请检查边界</span>
+          <span>子地块合计：<b :class="{ 'split-over': overSourceArea }">{{ pieceAreaSum.toFixed(2) }}</b> 亩</span>
+          <span v-if="overSourceArea" class="split-over">合计已超过原地块，请检查边界是否重叠或画出原地块</span>
         </div>
 
         <div class="split-tabs">
@@ -50,7 +50,7 @@
         <div class="split-actions">
           <el-checkbox v-model="keepSource">保留原地块（默认拆分后归档原边界）</el-checkbox>
           <div>
-            <el-button type="primary" :loading="submitting" @click="handleSplit">确认拆分</el-button>
+            <el-button type="primary" :loading="submitting" :disabled="overSourceArea" @click="handleSplit">确认拆分</el-button>
             <el-button @click="router.back()">取消</el-button>
           </div>
         </div>
@@ -94,6 +94,9 @@ const pieces = reactive<SplitPiece[]>([
 // 服务端逐块校验用的就是台账面积，前端预检沿用同一口径，避免"前端放行、后端拒绝"
 const sourceAreaMu = computed(() => Number(source.value?.areaMu ?? 0))
 const pieceAreaSum = computed(() => pieces.reduce((total, piece) => total + piece.areaMu, 0))
+// 与服务端同口径：每块各自两位小数进位，允许 pieces × 0.01 亩舍入余量
+const pieceAreaSlack = computed(() => 0.01 * pieces.length)
+const overSourceArea = computed(() => pieceAreaSum.value > sourceAreaMu.value + pieceAreaSlack.value)
 // activeIndex 只在列表内切换且删除时钳制，取不到只可能出现在渲染瞬间，兜到首块即可
 const activePiece = computed(() => pieces[activeIndex.value] ?? pieces[0]!)
 
@@ -123,6 +126,9 @@ function validatePieces(): string | null {
       return `第 ${i + 1} 块面积 ${piece.areaMu.toFixed(2)} 亩超过原地块 ${sourceAreaMu.value.toFixed(2)} 亩`
     }
   }
+  if (overSourceArea.value) {
+    return `子地块合计 ${pieceAreaSum.value.toFixed(2)} 亩超过原地块 ${sourceAreaMu.value.toFixed(2)} 亩，请检查边界是否重叠或画出原地块`
+  }
   return null
 }
 
@@ -134,13 +140,11 @@ async function loadSource() {
     const boundary = parsePlotBoundary(res as unknown as PlotBoundarySource)
     const ring = boundary?.rings[0]
     if (!ring) return
-    // 底图参考边界按子地块数各塞一份：拆分通常是沿着原线切，省去从零描起
-    const seed = ring.map(([lat, lng]) => [Number(lng.toFixed(6)), Number(lat.toFixed(6))] as [number, number])
-    for (let i = 0; i < pieces.length; i += 1) {
-      const piece = pieces[i]!
-      piece.coordinates = seed.map((point) => [...point] as [number, number])
-      piece.areaMu = Number(polygonAreaMu(piece.coordinates).toFixed(2))
-    }
+    // 只把原边界塞给第一块作参照：每块都复制整份原边界的话，
+    // 用户只改其中一块就会让合计面积凭空翻倍，拆分前踩到过
+    const first = pieces[0]!
+    first.coordinates = ring.map(([lat, lng]) => [Number(lng.toFixed(6)), Number(lat.toFixed(6))] as [number, number])
+    first.areaMu = Number(polygonAreaMu(first.coordinates).toFixed(2))
   } catch (error) {
     console.error('加载地块失败', error)
   } finally {

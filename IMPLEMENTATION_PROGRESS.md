@@ -370,11 +370,23 @@
 ### 2026-11-11：PlotCreated 接入下游消费方与地块合并/拆分
 
 - **`PlotCreated` 下游消费（#82）**：`packages/contracts` 消息模板目录新增「地块建档通知」（`EventTopic.PlotCreated` → NOTICE/INFO，标题带地块编码，正文含名称/面积/土壤类型中文映射/归属农场，`dedupeKey` 用 `主题:eventId`）；`message-service` `MessageEventConsumer` 注册 `onPlotCreated` 处理器，走通用「模板渲染 → 偏好过滤 → 落库」链路。`plot-created-closure.spec.ts` 验证跨进程契约：建档事件经（内存同构的）`event_log` 中继后恰生成一条通知、位点提交后重投不重复；`preference.spec.ts` 基线同步。`#80` 一节的「仍无下游订阅」边界自此关闭。
-- **地块合并/拆分（#83）**：`PlotService.mergePlots` 以各源地块外环顶点的**凸包**为合并边界，面积一律按合并后几何现算（`polygonAreaMu → roundAreaMu`，不是源面积求和），源地块整批软删归档，挂在其上的管线与种植季保持指向旧编码（与普通删除口径一致）；`splitPlot` 由操作人逐块提交子地块边界（≥2 块、面积为正、单块不超过原地块台账面积 +0.01 亩容忍），每块面积按各自边界现算，源地块默认归档（可 `keepSource` 保留）。**已知口径**：选中互不相邻地块时凸包会框进中间空地，接口不回显源面积和、前端弹窗如实提示合并后须到编辑页复核边界。
+- **地块合并/拆分（#83）**：`PlotService.mergePlots` 以各源地块外环顶点的**凸包**为合并边界，面积一律按合并后几何现算（`polygonAreaMu → roundAreaMu`，不是源面积求和），源地块整批软删归档，挂在其上的管线与种植季保持指向旧编码（与普通删除口径一致）；`splitPlot` 由操作人逐块提交子地块边界（≥2 块、面积为正、单块与合计均不超过原地块台账面积 + 每块 0.01 亩舍入余量），每块面积按各自边界现算，源地块默认归档（可 `keepSource` 保留）。**已知口径**：选中互不相邻地块时凸包会框进中间空地，接口不回显源面积和、前端弹窗如实提示合并后须到编辑页复核边界。合计上限校验与拆分页只预填首块参照边界是 2026-11-11「拆分面积合计校验」一节补的，起因见该节。
   - HTTP：`POST /api/v1/plots/merge`、`POST /api/v1/plots/split`（静态前缀路由置于 `/plots/:code` 之前）；建档/归档同事务写 `PlotCreated` 与变更留痕，异常改由 `BizError.httpStatus` 决定 400/404/409。
   - 留痕：动作枚举扩为 `CREATE/UPDATE/DELETE/MERGE/SPLIT`（迁移 `029_plot_change_log_actions.sql` 放宽 027 的 CHECK，不产生失效历史行），源地块记「已合并至/已拆分为」、目标/子地块记「合并生成/拆分生成（按边界现算）」。
   - 前端：`plot/List.vue` 勾选 ≥2 块弹「合并地块」对话框（源清单与面积、凸包警示）；`plot/Detail.vue` 新增「拆分」入口（无边界先提示补画）；新页 `plot/Split.vue`（路由 `/plot/split/:id`，`plot:write`）逐块绘制子边界——单编辑器实例按块切换、参考边界按原地块预填、合计超台账即时警示、确认弹窗列出将归档的源地块。
 - **验证**：根 `npx tsc -b`、`pnpm --filter @agri/web exec vue-tsc -b --force`、`pnpm --filter @agri/web build` 通过；`merge-split.spec.ts` 6 用例（凸包面积口径、源归档、留痕文案、空更新不落库、越权面积拒绝且无半成品写入、租户内新编码唯一）与 `plot-service` 全套 34/34 绿；前端 `plot-split-view.spec.ts` 6 用例（参考边界预填、面积预检、提交闭合环 GeoJSON、`plotApi.merge/split` 线格式）与 `plot-detail-history.spec.ts` 4 用例绿；全量 `vitest` 497 passed（5 个失败用例均为并行负载超时抖动，隔离复跑全绿）。一次性临时库 `agri_verify_tmp` 应用 `025`–`029` 后跑真实 SQL 往返：合并落库（目标在库、双源软删、MERGE 留痕含源编码与 actor）、拆分落库（子地块按几何面积、SPLIT/DELETE 留痕、029 CHECK 放行新动作）、超面积子地块 400 且零写入，验证后即销毁；**演示库 `agri` 全程未执行任何真实合并/拆分**。
+
+### 2026-11-11：拆分面积合计校验（真实合并/拆分链路复验中发现）
+
+- **复验方式**：一次性库 `agri_verify_tmp` 应用全部 29 个迁移后，本地起 `plot-service`（`SERVICE_MODE=http` + `PLOT_REPOSITORY_MODE=sql`）真跑合并与拆分，不触碰演示库。合并（东区一号田 80.86 + 二号田 71.68）→ 新编码 `...EYZCN-0000-T`，边界为七点凸包，面积 **199.63 亩按合并后几何现算**（源面积和仅 152.54，差额即凸包框进的中间空地，印证「不求和、只认几何」口径）；两块源地块软删归档，留痕 `MERGE` + 两条 `DELETE`。拆分该合并田 → 两块子地块各 153.81 亩按自身边界现算，源归档，留痕 `DELETE` + 两条 `SPLIT`。事件侧 3 条 `PlotCreated` 同事务落 `plot_outbox`，中继后待投清零、`event_log` 恰 3 条 `plot.plot.created`；`GET /plots/:code/history` 双向可回查去向；`merge` 含不存在编码 404，退化几何 400。验证后临时库与服务即销毁（本机 curl 输出经 PowerShell 管道显示的中文乱码是控制台码页问题，`psql` 与 node 直读均为正常 UTF-8）。
+- **发现的问题**：`splitPlot` 只校验「单块 ≤ 原地块 +0.01」，没校验「合计 ≤ 原地块」。上述复验中两块各 153.81（合计 307.62 > 原块 199.63）被放行；更早用户在演示库前端的一次真实拆分同样踩到——联片二号田 92.25 亩拆成 92.25 + 61.50，全场在账面积由 1246.64 涨到 1308.14 亩，凭空多计 61.5 亩。根因有两处叠加：服务端缺合计口径，且 `Split.vue` 把原边界**逐块复制**预填进每个子地块，用户只改其中一块就会整块重复计入。
+- **修复**：
+  - 服务端 `PlotService.splitPlot` 逐块校验后补合计口径：`pieceAreaSum > source.areaMu + 0.01 × pieces.length` 抛 `ValidationError`（舍入余量按块数给，避免多块各自进位被误判），返回值复用同一 `pieceAreaSum`；校验全在事务之前，超限即零写入。
+  - 前端 `Split.vue`：预填只给第 1 块原边界，其余子地块从零画起；新增 `overSourceArea`（与服务端同容差口径）驱动合计行红字、警示文案与「确认拆分」按钮 `disabled`，`validatePieces` 补合计超限提示（文案含「合计」）；顶部说明改为「边界重叠或画出原地块会让合计超过原地块，此时无法提交」。
+  - 用例：`merge-split.spec.ts` +1（两块各占 3/4 宽度且中间重叠，单块放行、合计 1.5 倍拒绝，且原地块未归档、无子地块落库）；`plot-split-view.spec.ts` 改预填断言（首块 4 顶点 = 原面积、次块空）并 +1 合计超限拦截用例（`overSourceArea` 为真、不发请求、warning 含「合计」）。
+- **演示库数据修复（用户选定「回滚这次误拆」）**：事务内恢复 `511723-000001-03-00009-0000-J`（联片二号田，92.25 亩，原边界不动）为在册，把 `...E7M02-0000-C`（92.25）与 `...FNZNH-0000-7`（61.50）软删归档（几何与面积保留可回查），补 3 条 `actor='manual-repair'` 留痕（原地块 `UPDATE` 记撤销原因与面积对比，两块子地块各一条 `DELETE` 记归档去向）。修复后在册 23 块、在账面积 1271.07 亩（= 修复前 1332.57 − 61.50，差额归零）。用户当天在地图新建的地块18–24 等自有数据未作任何改动；已发生的 `PlotCreated` 事件与消息中心建档通知属追加式历史，不做撤回。
+- **验证**：`npx tsc -b` 通过；`npx vitest run` 全量 **504 passed / 11 skipped**（首轮并行负载下 4 个前端 view-harness 用例超时，独占复跑全绿，非回归）；`pnpm --filter @agri/web build` 通过。重建 `app`+`edge` 镜像并 `--force-recreate` 上线后，经 edge→网关（admin）对恢复在册的联片二号田（92.25 亩）提交「两块各 69.94 亩、合计 139.88 亩」的超限切法 → **400 `子地块合计 139.88 亩超过原地块 92.25 亩，请检查是否重叠或画出原边界`**，退化几何仍 400；复验前后演示库基线逐项相同（在册 23 块 / 1271.07 亩、`plot_change_logs` 15、`plot_outbox` 10、`event_log` 最大位点 63，无「复验」命名残留），确认拒绝路径零写入。edge 产物已含新 chunk `Split-CJcjH4nz.js`（合计红字与「此时无法提交」文案在内）。
+- **冒烟回归中的一处既有缺口**：`pnpm smoke:demo` 除「农事任务 ≥8」外全 PASS，`pnpm smoke:filters` 相应两项 FAIL——演示库 `operation_tasks` 为空表。迁移 016 只建表不种子，SQL 模式下农事任务无演示数据可展示（该表无软删列，历史行被硬删也无法辨别），与本轮改动无关，列为待决：是否补一条农事任务种子迁移。
 
 ## 下一步（中断后从这里继续）
 

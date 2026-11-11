@@ -21,7 +21,7 @@ import { createExamplePrismaFactory } from "../src/prisma.factory.js";
  * 口径要点在这里被当成断言而不是注释：
  * - 合并后边界取源地块顶点凸包，面积按合并边界现算——两块紧邻共边的矩形
  *   凸包即真并集，因此「合并面积 = 两块面积之和」可逐位校验；
- * - 拆分块边界由调用方给出，面积同样只认几何，单块不得超过原地块；
+ * - 拆分块边界由调用方给出，面积同样只认几何，单块与合计都不得超过原地块；
  * - 源地块软删归档，变更历史分别落 MERGE/SPLIT/DELETE，可回查去向。
  */
 
@@ -202,6 +202,27 @@ describe("地块拆分", () => {
     const pieceHistory = await call(base, "GET", `/api/v1/plots/${plots[0]!.parcelCode}/history`);
     expect(pieceHistory.body.data[0]).toMatchObject({ action: "SPLIT" });
     expect(pieceHistory.body.data[0].summary).toContain(`由 ${code} 拆出`);
+  });
+
+  it("子块各自不超原块但相互重叠，合计超原地块仍被拒绝", async () => {
+    const { base, repository } = await startServer();
+    const code = await register(base, "9332", "重叠切法", whole);
+    // 两块各占 3/4 宽度、中间重叠 1/4：单块校验放行，合计 1.5 倍原面积必须拦下
+    const wide = rectangle(107.4212, 30.9805, 107.4242, 30.9825);
+    const wideShifted = rectangle(107.4222, 30.9805, 107.4252, 30.9825);
+
+    const result = await call(base, "POST", "/api/v1/plots/split", {
+      parcelCode: code,
+      pieces: [
+        { parcelName: "重叠子块甲", geom: wide },
+        { parcelName: "重叠子块乙", geom: wideShifted },
+      ],
+    });
+    expect(result.status).toBe(400);
+    expect(result.body.message).toContain("合计");
+    expect(result.body.message).toContain("超过原地块");
+    expect(repository.all()).toHaveLength(1);
+    expect(repository.all()[0]?.deletedAt).toBeUndefined();
   });
 
   it("keepSource 保留原地块，留痕记 UPDATE", async () => {
