@@ -4,10 +4,10 @@
 
 ## 当前状态
 
-- 更新时间：2026-11-06
+- 更新时间：2026-11-11
 - 当前阶段：全量验证与交付
 - 总体状态：首版交付完成（待验收）
-- 当前主线：事件日志总线打通跨进程链路，处方效果回流调优规则，系统管理用户/角色已落库，越限/处方事件已驱动控制指令与生产档案，消息中心按订阅偏好过滤并按来源主题去重，网关与服务侧已按角色权限拦截接口，控制指令来源与生产档案事件类型已在前端展示并可筛选；登录会话已落 `auth_sessions`、口令改为 scrypt 并支持滑动续期；已完成本机容器化部署（`app` + `edge`，HTTPS 443）并逐接口复验；四情监控（苗情/虫情/灾情/阈值规则）、视频 AI 识别联动、水肥配比与变量灌溉曲线、一张图管网图层已补齐并通过冒烟；片区台账（`plot_zones`）、田间导航（机耕道沿路里程）与一张图片区图层已补齐，需求矩阵无「部分完成」项；全页面演示数据已就位（`010_demo_data.sql` 落库 + iot/video/operation/finance 服务种子）；地块档案字段（类型/状态/当前作物/负责人，`011_plot_profile.sql`）已落库，地块/设备/任务/指令/核算/溯源/视频/四情/消息等页面统一「关键词+枚举+时间区间+重置+分页」查询条并全部下沉服务端，`pnpm smoke:filters` 38 项条件查询冒烟通过；气象服务升级为完整微服务（`weather-service` 7 个 REST 端点、SQL/内存双模式、`012_weather_forecast.sql` 三张表），决策服务处方生成自动从 weather 取降雨概率参与规则求值，前端新增「气象服务」独立页面，`pnpm smoke:weather` 13 项天气冒烟通过
+- 当前主线：事件日志总线打通跨进程链路，处方效果回流调优规则，系统管理用户/角色已落库，越限/处方事件已驱动控制指令与生产档案，消息中心按订阅偏好过滤并按来源主题去重，网关与服务侧已按角色权限拦截接口，控制指令来源与生产档案事件类型已在前端展示并可筛选；登录会话已落 `auth_sessions`、口令改为 scrypt 并支持滑动续期；已完成本机容器化部署（`app` + `edge`，HTTPS 443）并逐接口复验；四情监控（苗情/虫情/灾情/阈值规则）、视频 AI 识别联动、水肥配比与变量灌溉曲线、一张图管网图层已补齐并通过冒烟；片区台账（`plot_zones`）、田间导航（机耕道沿路里程）与一张图片区图层已补齐，需求矩阵仅「智能决策」保留「部分完成」（决策侧未内置图像识别模型，属外部依赖）；全页面演示数据已就位（`010_demo_data.sql` 落库 + iot/video/operation/finance 服务种子）；地块档案字段（类型/状态/当前作物/负责人，`011_plot_profile.sql`）已落库，地块/设备/任务/指令/核算/溯源/视频/四情/消息等页面统一「关键词+枚举+时间区间+重置+分页」查询条并全部下沉服务端，`pnpm smoke:filters` 38 项条件查询冒烟通过；气象服务升级为完整微服务（`weather-service` 7 个 REST 端点、SQL/内存双模式、`012_weather_forecast.sql` 三张表），决策服务处方生成自动从 weather 取降雨概率参与规则求值，前端新增「气象服务」独立页面，`pnpm smoke:weather` 13 项天气冒烟通过
 
 ## 规格来源
 
@@ -350,9 +350,20 @@
 - 验证：`pnpm run build` 全量 tsc -b 通过；`npx vitest run` 全量 **227 用例通过**（基线 216）；Docker 重建 healthy，容器实跑 `sync-status` 返 `{enabled:false, dataSource:"sql"}`（本地零配置行为与接入前一致）；`node -e` 直接 import 验证传 v1 Host + Key 时 config.apiVersion=v1、lat/lng 正确。冒烟回归：weather 13 + demo 37 + filters 38 全 PASS。
 - 用户侧启用步骤（拿到专属 Host 后）：将 `.env` 里 `QWEATHER_KEY / QWEATHER_HOST / QWEATHER_LATITUDE / QWEATHER_LONGITUDE` 四行取消注释并填入真实值（或填 `QWEATHER_JWT`），`docker compose -f infra/docker-compose.yml up -d --force-recreate app`；日志会输出 `apiVersion:"v1", host:"https://xxx.yz.qweatherapi.com"` 确认启用。旧 Key 过渡可临时改 `QWEATHER_API_VERSION=v7` 走 v7 接口。
 
+### 2026-11-11：财务多维报表、全链路追溯、种植季/茬口档案与地块变更历史
+
+本轮把审计中列为「未完成/部分完成」且可纯代码落地的四项业务补齐（#76–#79），迁移号接 `024` 之后为 `025`–`027`。
+
+- **财务核算报表（#76）**：`finance-service` 新增 `GET /api/v1/finance/report`，`aggregateReport` 按三维度聚合——月度（`months`：农场时区归属月的投入/产出/利润，升序）、科目（`categories`：`kind`+`category` 金额，降序）、地块（`plots`：每地块投入/产出/利润，按利润降序）；支持 `plotCode` 过滤，复用列表同套查询口径。前端「核算」页新增报表卡与 ECharts 趋势/构成图，登记仍走弹窗；`test/http-report.spec.ts`、`test/repository.spec.ts`、`apps/web/test/finance-report.spec.ts`。
+- **全链路质量溯源（#77）**：迁移 `025_trace_chain.sql` 为 `trace_records` 增 `batch_code` 并**仅回填既有档案**（回填后行数仍为 22，不动演示数据语义）；`trace-service` `repository`/`consumer`/`http` 支持按批次码聚合与 `GET .../chain` 链条查询，前端溯源页按追溯码展示完整链条，`TraceRecord.batchCode`。加工/物流/质检等下游环节无外部系统可对接，在链条时间轴如实标注为待接入依赖（不编造节点）。`http-chain.spec.ts`、`repository.spec.ts`、`apps/web/test/trace-chain.spec.ts`。
+- **种植季/茬口档案（#78）**：迁移 `026_crop_seasons.sql`（`crop_seasons` 表，**无预置种子**，如实建表）；`season.repository.ts` SQL/内存双模 + `compareRotation`（年→季序→栽期→创建时间）轮作排序 + `isValidFarmDate` 日期校验；HTTP `GET/POST/PUT/DELETE /plots/seasons`（建档校验地块存在、作物非空、年份 1900–2999、季序≥1、收获≥栽插、状态枚举、产量非负；季码 `SEASON-<ulid>` 重码 409）；前端 `plot/Season.vue` 轮作时间轴 + 连作预警（决策支持，非自动判定）、路由与看板菜单接入。`season.spec.ts` 5 + `plot-season.spec.ts` 5。
+- **地块变更历史（#79）**：迁移 `027_plot_change_logs.sql`（`plot_change_logs` 追加式，**无历史回填**）；`plot-change-log.repository.ts` SQL/内存双模（`append` 随业务事务、`listByPlot` 按时间倒序）；HTTP 在建档/修改/删除处按字段中文标签留痕（`actor` 取 `x-user-id`，缺省 `system`；仅当字段实际变化才记 UPDATE），新增 `GET /plots/:code/history`；前端 `plot/Detail.vue` 变更历史时间轴（按 `parcelCode` 取数，历史拉取失败不阻断档案展示）。`plot-change-log.spec.ts` 3 + `plot-detail-history.spec.ts` 3。**地块合并/拆分**属破坏性几何改写（重划边界、可能丢面积与历史归属），未擅自实现，列为待用户确认项。
+- **全量验证**：根 `npx tsc -b` 通过；`npx vitest run` **483 passed / 11 skipped**（DB 门控用例自动跳过）；`pnpm --filter @agri/web build` 通过；一次性临时库 `agri_verify_tmp` 对 `025`–`027` 与追溯链条做 SQL 往返（追加/倒序/actor 映射/租户隔离）后即销毁，演示库 `agri` 全程未写、`trace_records` 基线 22 保持不变。
+- **同步修正的文档不实之处**：根 `README.md` 原称「口令以 sha256 入库（待换 bcrypt/argon2）」与代码实际的 scrypt 随机盐不符，已改述；原「业务数据与待投递事件写入同一事务」对 `plot-service` 过头（其 `OutboxStore` 仍是内存实现、仅单进程演示中继，且 `PlotCreated` 无消费方），已限定为决策/遥测/农事三服务的 `*_outbox` 落库事务。
+
 ## 下一步（中断后从这里继续）
 
-首版业务链路已闭环，剩余工作是业务子项补齐：
+首版业务链路已闭环，剩余工作是业务子项补齐与外部依赖对接：
 
 1. **已完成**：会话持久化与口令强散列（`007` 迁移 + `SessionRepository` + scrypt + `POST /auth/refresh`），旧 token 重启后仍有效，改密/删号即时回收会话。
 2. **已完成**：部署编排（`Dockerfile` 双目标、compose `app`/`edge`、HTTPS 终止、`AUTH_GUARD_MODE=enforce`、连接池与内部凭证配置）；已在本机完成镜像构建与容器实跑复验（详见「本机容器化部署实录」）。环境侧约束：`docker.io` 直连不可用，需先把基础镜像经镜像源拉取并重打 tag。
@@ -370,7 +381,14 @@
 7. **已完成**：和风天气（QWeather）可插拔接入与免费额度保护（`qweather.ts` v7 客户端 + `sync.ts` 定时同步器默认 **每日一次** + 启动周期内跳过 + 每日硬上限 + `/sync-status` 观测端点 + `dataSource` 字段），**前端接口全程只读本地数据库，页面刷新不消耗外部额度**；不配 Key 时保持本地仓储行为，配 Key 后外部预报与预警每日一次落库。单测 21 用例全 PASS。
 8. **已完成**：管理员强制同步接口 `POST /api/v1/weather/sync-now`，需 `weather:sync` 权限（网关与服务双侧拦截）；bypass `dailyCallLimit`不走上限判定；前端 `views/weather/Index.vue` 顶部同步条仅管理员可见。单测新增 4 个端点用例 + 1 个 force bypass 用例 + 1 个网关路由用例（共 +6）。
 9. **已完成**：和风 WebAPI v7→v1 接口迁移（`QWeatherMapper` 抽象、`createQWeatherClientV1`、经纬度参数、`X-QW-Api-Key`/JWT 认证、16 方位中文映射、severity/color 三向映射）；v1 无专属 Host 时自动不启动同步器，适配本地开发；旧接口可通过 `QWEATHER_API_VERSION=v7` 过渡。单测 +11（基线 216 → 227），冒烟 88 项全 PASS。
-10. **可选后续（未排期）**：决策侧内置图像识别模型、真实农机调度对接。
+10. **未完成 / 外部依赖（需外部条件或用户确认，未擅自伪造）**：
+   - 真实设备闭环：农机/水肥/云台的实际执行回执、急停到位确认依赖现场硬件与协议对接，当前只有指令下发与人工/事件状态流转；
+   - 覆盖式路径规划、真实农机调度：现有点到点导航不含地块全覆盖作业规划；
+   - 决策侧内置图像识别模型、模型效果评审：识别仍由 `video-service` AI 事件承接，平台侧不内置/不评测模型；
+   - 溯源下游环节（加工 / 物流 / 质检）：无外部系统可对接，`#77` 链条时间轴已如实标注为待接入，不编造节点；
+   - 双人复核、正式备份/恢复演练、性能与现场验收：属交付流程/现场验收项，非代码缺口；
+   - **地块合并 / 拆分**（`#79` 相关）：破坏性几何改写，需明确边界重划与历史归属口径，待用户确认后再做；
+   - **`plot-service` 事件跨进程可靠性**：建档事件目前只在内存消息表、单进程演示中继，`PlotCreated` 无消费方；若将来要驱动下游，需要补 `plot_outbox` 落库 + HTTP 模式中继（详见 README 已限定的表述）。
 
 ## 验证记录
 

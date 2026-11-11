@@ -228,15 +228,18 @@ agri-platform-nodejs-scaffold/
   地图绘制时的实时预览与保存后落库因此是同一个数；010 示范数据原先手填的面积与边界差了一半以上，
   就是靠迁移 015 统一掉的。**任何带边界的种子、夹具、脚本都不许写死面积**，一律调 `polygonAreaMu` 现算；
   地块编辑页在已绘制边界时禁用面积输入，只有尚未补边界的老地块才按申报面积记账。
-- **事件不丢也不重**：业务数据与待投递事件写入同一事务（本地消息表），事务提交后由中继投递；
-  消费侧用 `eventId` 幂等去重，重试按指数退避，超出次数转死信。
+- **事件不丢也不重**：决策 / 遥测 / 农事服务把业务数据与待投递事件写入同一事务（各自 `*_outbox` 表），
+  事务提交后由中继投递；消费侧用 `eventId` 幂等去重，重试按指数退避，超出次数转死信。
+  地块服务仍只在单进程演示里把建档事件写进内存消息表并中继，`PlotCreated` 目前无消费方订阅，
+  故其事件尚未具备跨进程可靠性（需要时再补 `plot_outbox` 落库与 HTTP 模式中继）。
 - **跨进程事件靠事件日志**：`event_log` 按主题递增位点，`event_log_offsets` 记录消费者组位点；
   生产侧用 `EventLogPublisher`，消费侧用 `EventLogConsumer` 轮询，便于横向扩容与重放。
 - **处方要能被调优**：处方执行后必须回写实际效果，`evaluateOutcome` 给出阈值建议，
   由调用方决定是否写回规则，阈值调整记录随评估留痕。
 - **账号与角色分域存储**：`auth_users`/`auth_user_roles` 属于认证域，`platform_roles`/
-  `platform_role_permissions` 属于平台域，用户只存角色编码；口令以 sha256 散列入库
-  （开发期方案，生产需换 bcrypt/argon2）。`AUTH_REPOSITORY_MODE` / `PLATFORM_REPOSITORY_MODE`
+  `platform_role_permissions` 属于平台域，用户只存角色编码；口令以 scrypt 散列入库
+  （每口令独立随机盐，存储格式 `scrypt$N$r$p$salt$hash`），登录时兼容并把历史 sha256 就地升级。
+  `AUTH_REPOSITORY_MODE` / `PLATFORM_REPOSITORY_MODE`
   不设或设为 `sql` 时随 `DB_URL` 落库，设为 `memory` 时退回内存实现。
 - **事件消费方只做翻译**：`control-service` 把「土壤含水率低于下限」与灌溉/施肥处方
   翻译成自动指令（执行人 `system:event`、保留 `sourceEventId`），`trace-service` 把处方
