@@ -39,7 +39,9 @@ const MATERIAL_BY_TYPE: Record<Rule["type"], string> = {
   PEST_WARNING: "MAT-PEST-BROAD",
 };
 
-function numberOrUndefined(value: unknown): number | undefined {
+/** 缺测不是零；兼容手动录入的非空数字字符串，不转换 null、布尔值或数组。 */
+export function optionalFiniteNumber(value: unknown): number | undefined {
+  if (typeof value !== "number" && (typeof value !== "string" || value.trim() === "")) return undefined;
   const num = Number(value);
   return Number.isFinite(num) ? num : undefined;
 }
@@ -51,11 +53,11 @@ export function matchesRule(rule: Rule, input: RuleEvaluationInput): boolean {
   const keys = Object.keys(condition) as Array<keyof Rule["condition"]>;
   if (keys.length === 0) return false;
   if (condition.soilMoistureBelow !== undefined) {
-    const soil = numberOrUndefined(input.soilMoisture);
+    const soil = optionalFiniteNumber(input.soilMoisture);
     if (soil === undefined || soil >= condition.soilMoistureBelow) return false;
   }
   if (condition.rainProbabilityBelow !== undefined) {
-    const rain = numberOrUndefined(input.rainProbability);
+    const rain = optionalFiniteNumber(input.rainProbability);
     if (rain === undefined || rain >= condition.rainProbabilityBelow) return false;
   }
   if (condition.growthStage !== undefined) {

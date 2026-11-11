@@ -42,9 +42,14 @@ const PLAN_LABELS: Record<PrescriptionIssuedPayload["planType"], string> = {
 /** 自动指令的执行人标识，与人工指令的账号区分 */
 const AUTO_OPERATOR = "system:event";
 
-/** 未绑定地块时的设备占位，避免生成空设备号 */
-function resolveDeviceId(plotCode: string): string {
-  return `auto-${plotCode || "unbound"}`;
+/** 自动控制不得把缺失地块映射成 unbound 设备。 */
+function requireParcelId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("自动控制事件 parcelId 必须为非空字符串");
+  return value.trim();
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 /**
@@ -59,10 +64,11 @@ function buildCommand(
   reason: string,
   parameters: Record<string, unknown>,
 ): ControlCommand {
-  const plotCode = String((event.payload as { parcelId?: string }).parcelId ?? "");
+  const plotCode = requireParcelId((event.payload as { parcelId?: unknown }).parcelId);
+  if (typeof event.eventId !== "string" || !event.eventId.trim()) throw new Error("自动控制事件 eventId 不能为空");
   return {
     id: `CTL-${event.eventId}`,
-    deviceId: resolveDeviceId(plotCode),
+    deviceId: `auto-${plotCode}`,
     plotCode,
     operatorId: AUTO_OPERATOR,
     type,
@@ -87,6 +93,9 @@ export class ControlCommandConsumer {
   async onThresholdBreached(event: DomainEvent<ThresholdBreachedPayload>): Promise<void> {
     const payload = event.payload;
     if (payload.metric !== "soilMoisture" || payload.direction !== "below") return;
+    if (!isNonNegativeNumber(payload.value) || !isNonNegativeNumber(payload.threshold) || payload.value >= payload.threshold) {
+      throw new Error("自动补灌越限事件数值非法");
+    }
     await this.commands.create(
       buildCommand(event, "IRRIGATION", `土壤含水率 ${payload.value} 低于阈值 ${payload.threshold}，自动补灌`, {
         source: "threshold",
@@ -102,17 +111,33 @@ export class ControlCommandConsumer {
   @registerHandler(EventTopic.DecisionPrescriptionIssued)
   async onPrescriptionIssued(event: DomainEvent<PrescriptionIssuedPayload>): Promise<void> {
     const payload = event.payload;
-    const type = COMMAND_BY_PLAN[payload.planType];
-    if (!type) return;
-    const first = payload.items[0];
-    const detail = first ? `首项 ${first.materialCode} 用量 ${first.dosage}` : "无作业明细";
+    if (payload.planType === "pesticide") return;
+    if (payload.planType !== "irrigation" && payload.planType !== "fertilization") throw new Error("未知处方动作类型");
+    requireParcelId(payload.parcelId);
+    if (!Array.isArray(payload.items)) throw new Error("处方 items 必须为数组");
+    if (payload.items.length === 0) return;
+    // 必须先校验全部明细，再创建一条完整指令；不可过滤非法项后部分执行。
+    const items = payload.items.map((item) => {
+      if (!item || !isNonNegativeNumber(item.dosage)) throw new Error("处方用量必须为非负有限数字");
+      if (typeof item.materialCode !== "string" || !item.materialCode.trim()) throw new Error("处方投入品编码不能为空");
+      if (item.gridCode !== undefined && (typeof item.gridCode !== "string" || !item.gridCode.trim())) throw new Error("处方网格编码非法");
+      if (typeof item.windowStart !== "string" || typeof item.windowEnd !== "string"
+        || !Number.isFinite(Date.parse(item.windowStart)) || !Number.isFinite(Date.parse(item.windowEnd))
+        || Date.parse(item.windowEnd) < Date.parse(item.windowStart)) throw new Error("处方时间窗非法");
+      return { ...item };
+    });
+    const type = COMMAND_BY_PLAN[payload.planType]!;
+    const first = items[0]!;
     await this.commands.create(
-      buildCommand(event, type, `${PLAN_LABELS[payload.planType]}处方下发：${detail}`, {
+      buildCommand(event, type, `${PLAN_LABELS[payload.planType]}处方下发：共 ${items.length} 项明细`, {
         source: "prescription",
+        ...(payload.prescriptionId ? { prescriptionId: payload.prescriptionId } : {}),
         seasonId: payload.seasonId,
         planType: payload.planType,
-        itemCount: payload.items.length,
-        ...(first ? { materialCode: first.materialCode, dosage: first.dosage } : {}),
+        itemCount: items.length,
+        items,
+        // 兼容旧的单项参数读取方式，多项必须使用完整 items。
+        ...(items.length === 1 ? { materialCode: first.materialCode, dosage: first.dosage } : {}),
       }),
     );
   }

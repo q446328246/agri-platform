@@ -78,6 +78,8 @@ export interface PrescriptionItem {
 
 /** decision.prescription.issued —— 地块级处方生成完成 */
 export interface PrescriptionIssuedPayload {
+  /** 处方留痕标识；同一处方按动作类型分组发布时共用，兼容旧事件 */
+  prescriptionId?: string;
   parcelId: string;
   seasonId: string;
   /** 处方类型：irrigation 灌溉、fertilization 施肥、pesticide 植保 */
@@ -91,7 +93,7 @@ export interface TaskCompletedPayload {
   taskId: string;
   parcelId: string;
   /** 作业类型：tillage 整地、sowing 播种、spraying 植保、weeding 除草 */
-  taskType: "tillage" | "sowing" | "spraying" | "weeding";
+  taskType: "tillage" | "sowing" | "spraying" | "weeding" | "irrigation" | "fertilization";
   /** 执行结果：success 成功、partial 部分完成、failed 失败 */
   result: "success" | "partial" | "failed";
   /** 实际作业面积，单位：亩 */

@@ -4,17 +4,18 @@ import { randomUUID } from "node:crypto";
 import type { ApiResponse, PageResult } from "@agri/contracts";
 import { EventTopic } from "@agri/contracts";
 import type { PrescriptionIssuedPayload } from "@agri/contracts";
+import type { PrismaClientLike, Tx } from "@agri/db";
 import { OutboxService, InMemoryEventPublisher, InMemoryOutboxStore, publishEvent, setDefaultPublisher } from "@agri/mq";
 import type { EventPublisher, OutboxStore } from "@agri/mq";
 import { snowflakeId } from "@agri/shared";
 import { authorizeRequest, identityHeaders } from "@agri/shared";
 
-import { InMemoryPrescriptionRepository } from "./prescription.repository.js";
+import { InMemoryPrescriptionRepository, SqlPrescriptionRepository } from "./prescription.repository.js";
 import type { CreatePrescriptionInput, PrescriptionQuery, PrescriptionRecord, PrescriptionRepository, PrescriptionStatus } from "./prescription.repository.js";
 import { newPrescriptionId } from "./prescription.repository.js";
 import { evaluateOutcome, formatCondition, InMemoryOutcomeRepository, newOutcomeId } from "./outcome.repository.js";
 import type { OutcomeRepository, PrescriptionOutcome } from "./outcome.repository.js";
-import { RuleEngine } from "./rule.engine.js";
+import { optionalFiniteNumber, RuleEngine } from "./rule.engine.js";
 import type { RuleEvaluationInput } from "./rule.engine.js";
 import { defaultRule, InMemoryRuleRepository, isRuleType, normalizeAction, normalizeCondition } from "./rule.repository.js";
 import type { CreateRuleInput, RuleRepository, RuleType, UpdateRuleInput } from "./rule.repository.js";
@@ -26,11 +27,13 @@ export interface DecisionDependencies {
   prescriptions?: PrescriptionRepository;
   outcomes?: OutcomeRepository;
   outbox?: OutboxStore;
+  /** SQL 留痕与消息表的事务边界；内存测试路径不提供原子性保证。 */
+  withTransaction?: PrismaClientLike["$transaction"];
   /** 事件发布器：接入事件日志时由启动层注入，缺省进程内发布 */
   publisher?: EventPublisher;
   /** 处方生成时向遥测服务补齐最新墒情，缺省直接使用请求体中的数值 */
   fetchSoilMoisture?: (plotCode: string, identity: Record<string, string>) => Promise<number | undefined>;
-  /** 处方生成时从天气预报取未来降雨概率，缺省使用请求体或 0 */
+  /** 处方生成时从天气预报取未来降雨概率，缺测时依赖降雨的规则不命中。 */
   fetchRainProbability?: (plotCode: string | undefined, identity: Record<string, string>) => Promise<number | undefined>;
   tenantId?: string;
 }
@@ -92,8 +95,15 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
   const fetchRainProbability = dependencies?.fetchRainProbability;
   const publisher = dependencies?.publisher ?? new InMemoryEventPublisher();
   const outbox = dependencies?.outbox;
-  // 有本地消息表时先落表再由中继投递；无表时直接进程内发布，便于本地联调
-  const outboxService = new OutboxService(outbox ?? new InMemoryOutboxStore(), publisher, { tenantId, traceId: "decision", producer: "decision" });
+  const withTransaction = dependencies?.withTransaction;
+  if (outbox && !(outbox instanceof InMemoryOutboxStore) && !withTransaction) {
+    throw new Error("持久化 outbox 必须配置 withTransaction");
+  }
+  if (prescriptions instanceof SqlPrescriptionRepository && (!outbox || !withTransaction)) {
+    throw new Error("SQL 处方仓储必须同时配置 outbox 与 withTransaction");
+  }
+  // 未注入事务的内存路径仅供测试，不保证留痕与发布原子性。
+  const outboxService = outbox ? new OutboxService(outbox, publisher, { tenantId, traceId: "decision", producer: "decision" }) : undefined;
   setDefaultPublisher(publisher);
 
   return createServer(async (req, res) => {
@@ -172,37 +182,60 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
         const now = new Date().toISOString();
         const plotCode = String(body.plotCode ?? body.parcelCode ?? "").trim();
         const plotName = String(body.plotName ?? "").trim();
-        const reportedSoil = Number(body.soilMoisture);
-        const reportedRain = Number(body.rainProbability);
+        const reportedSoil = optionalFiniteNumber(body.soilMoisture);
+        const reportedRain = optionalFiniteNumber(body.rainProbability);
         const identity = identityHeaders(req);
-        const liveSoil = plotCode ? await fetchSoilMoisture?.(plotCode, identity) : undefined;
-        const liveRain = !Number.isFinite(reportedRain) && fetchRainProbability ? await fetchRainProbability(plotCode || undefined, identity) : undefined;
-        const soilMoisture = Number.isFinite(reportedSoil) ? reportedSoil : liveSoil ?? 100;
-        const rainProbability = Number.isFinite(reportedRain) ? reportedRain : liveRain ?? 0;
+        const liveSoil = reportedSoil === undefined && plotCode && fetchSoilMoisture
+          ? optionalFiniteNumber(await fetchSoilMoisture(plotCode, identity).catch(() => undefined)) : undefined;
+        const liveRain = reportedRain === undefined && fetchRainProbability
+          ? optionalFiniteNumber(await fetchRainProbability(plotCode || undefined, identity).catch(() => undefined)) : undefined;
+        const soilMoisture = reportedSoil ?? liveSoil;
+        const rainProbability = reportedRain ?? liveRain;
+        const measurements = {
+          ...(soilMoisture !== undefined ? { soilMoisture } : {}),
+          ...(rainProbability !== undefined ? { rainProbability } : {}),
+        };
         const growthStage = String(body.growthStage ?? "").trim();
-        const evaluationInput: RuleEvaluationInput = { plotCode, plotName, growthStage, soilMoisture, rainProbability };
+        const evaluationInput: RuleEvaluationInput = { plotCode, plotName, growthStage, ...measurements };
         const { matchedRules, items } = await engine.evaluate(evaluationInput, now);
         const input: CreatePrescriptionInput = {
           id: newPrescriptionId(),
           plotCode,
           plotName,
           status: items.length > 0 ? "RECOMMENDED" : "NO_ACTION",
-          soilMoisture,
-          rainProbability,
+          ...measurements,
           growthStage,
-          inputs: { plotCode, plotName, growthStage, soilMoisture, rainProbability, soilMoistureSource: Number.isFinite(reportedSoil) ? "request" : liveSoil !== undefined ? "telemetry" : "default", rainProbabilitySource: Number.isFinite(reportedRain) ? "request" : liveRain !== undefined ? "weather" : "default", requestedAt: now },
+          inputs: { plotCode, plotName, growthStage, ...measurements, soilMoistureSource: reportedSoil !== undefined ? "request" : liveSoil !== undefined ? "telemetry" : "missing", rainProbabilitySource: reportedRain !== undefined ? "request" : liveRain !== undefined ? "weather" : "missing", requestedAt: now },
           matchedRules,
           actions: items,
           generatedAt: now,
         };
-        const record = await prescriptions.create(undefined, input);
-        const planType = matchedRules.length > 0 && isRuleType(matchedRules[0]?.action.type) ? PLAN_TYPE_BY_RULE[matchedRules[0]!.action.type] : "irrigation";
-        const payload: PrescriptionIssuedPayload = { parcelId: plotCode, seasonId: "", planType, items };
-        if (outbox) {
-          // 处方与事件同事务写入本地消息表，事务提交后由中继投递，保证留痕与通知一致
-          await outboxService.enqueue(undefined, EventTopic.DecisionPrescriptionIssued, payload, { tenantId, traceId, producer: "decision" });
-        } else {
-          await publishEvent({ topic: EventTopic.DecisionPrescriptionIssued, payload, tenantId, traceId, producer: "decision", key: plotCode }, publisher);
+        const groups = new Map<PrescriptionIssuedPayload["planType"], PrescriptionIssuedPayload>();
+        // 引擎保证 matchedRules 与 items 一一对应；按动作而非首条规则归类。
+        matchedRules.forEach((rule, index) => {
+          const item = items[index];
+          if (!item || !isRuleType(rule.action.type)) throw new Error("处方动作与规则不一致");
+          const planType = PLAN_TYPE_BY_RULE[rule.action.type];
+          const payload: PrescriptionIssuedPayload = groups.get(planType) ?? { prescriptionId: input.id, parcelId: plotCode, seasonId: "", planType, items: [] };
+          payload.items.push(item);
+          groups.set(planType, payload);
+        });
+        const save = async (tx: Tx | undefined): Promise<PrescriptionRecord> => {
+          const record = await prescriptions.create(tx, input);
+          // NO_ACTION 的分组为空，只留痕；所有非空分组与处方共用同一事务。
+          if (outboxService) {
+            for (const payload of groups.values()) {
+              await outboxService.enqueue(tx, EventTopic.DecisionPrescriptionIssued, payload, { tenantId, traceId, producer: "decision" });
+            }
+          }
+          return record;
+        };
+        const record = withTransaction ? await withTransaction(save) : await save(undefined);
+        if (!outboxService) {
+          // 仅供内存测试：直接发布不具有数据库事务保证。
+          for (const payload of groups.values()) {
+            await publishEvent({ topic: EventTopic.DecisionPrescriptionIssued, payload, tenantId, traceId, producer: "decision", key: plotCode }, publisher);
+          }
         }
         send(res, 201, record, traceId);
         return;

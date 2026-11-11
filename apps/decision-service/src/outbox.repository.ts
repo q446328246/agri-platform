@@ -13,7 +13,10 @@ export class SqlOutboxStore implements OutboxStore {
   constructor(private readonly client: PrismaClientLike) {}
 
   private executor(tx: unknown): Pick<Tx, "$queryRawUnsafe" | "$executeRawUnsafe"> {
-    return (tx as Tx | undefined) ?? this.client;
+    if (!tx || typeof (tx as Tx).$executeRawUnsafe !== "function") {
+      throw new Error("SqlOutboxStore.enqueue 必须在事务中执行");
+    }
+    return tx as Tx;
   }
 
   async enqueue(tx: unknown, record: OutboxRecord): Promise<void> {

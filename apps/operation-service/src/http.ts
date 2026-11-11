@@ -1,34 +1,18 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import type { ApiResponse, PageResult } from "@agri/contracts";
+import type { ApiResponse } from "@agri/contracts";
 import { authorizeRequest } from "@agri/shared";
 import { parseNavigationRequest, planNavigation } from "./navigation.js";
 import type { NavPlan } from "./navigation.js";
 
-type TaskStatus = "PENDING" | "RUNNING" | "COMPLETED" | "CANCELLED";
-type TaskType = "TILLAGE" | "SEEDING" | "IRRIGATION" | "WEEDING" | "SPRAYING" | "FERTILIZATION";
-const TASK_TYPES: TaskType[] = ["TILLAGE", "SEEDING", "IRRIGATION", "WEEDING", "SPRAYING", "FERTILIZATION"];
-const TASK_STATUSES: TaskStatus[] = ["PENDING", "RUNNING", "COMPLETED", "CANCELLED"];
-interface Task {
-  id: string;
-  tenantId: string;
-  plotCode: string;
-  type: TaskType;
-  name: string;
-  status: TaskStatus;
-  scheduledAt?: string;
-  createdAt: string;
-  /** 首次进入 RUNNING 的时刻 */
-  startedAt?: string;
-  /** 首次进入 COMPLETED 的时刻 */
-  completedAt?: string;
-}
+import { canTransition, InMemoryTaskRepository, TASK_STATUSES, TASK_TYPES } from "./task.repository.js";
+import type { Task, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType } from "./task.repository.js";
 const hoursFromNow = (hours: number): string => new Date(Date.now() + hours * 3600000).toISOString();
 /** 演示农事任务：覆盖六种作业类型与四种状态，任务调度页一进就能看到排程
  * startedAt/completedAt 与状态对齐（进行中的任务按计划时间开工，已完成的补一个作业时长），
  * 已取消的任务从未开工，不留时间戳。 */
-const tasks: Task[] = [
+const demoTasks: Omit<Task, "version">[] = [
   { id: "task-demo-001", tenantId: "tenant-demo", plotCode: "511723-000001-02-00005-0000-C", type: "IRRIGATION", name: "西区一号田补灌执行", status: "RUNNING", scheduledAt: hoursFromNow(-4), createdAt: hoursFromNow(-8), startedAt: hoursFromNow(-4) },
   { id: "task-demo-002", tenantId: "tenant-demo", plotCode: "511723-000001-01-00003-0000-T", type: "SPRAYING", name: "东区三号田病虫害喷防", status: "PENDING", scheduledAt: hoursFromNow(6), createdAt: hoursFromNow(-10) },
   { id: "task-demo-003", tenantId: "tenant-demo", plotCode: "511723-000001-03-00009-0000-J", type: "FERTILIZATION", name: "联片二号田抽穗期追肥", status: "PENDING", scheduledAt: hoursFromNow(20), createdAt: hoursFromNow(-26) },
@@ -38,45 +22,116 @@ const tasks: Task[] = [
   { id: "task-demo-007", tenantId: "tenant-demo", plotCode: "511723-000001-02-00007-0000-0", type: "SPRAYING", name: "西区三号田叶面肥喷施", status: "COMPLETED", scheduledAt: hoursFromNow(-96), createdAt: hoursFromNow(-110), startedAt: hoursFromNow(-96), completedAt: hoursFromNow(-93) },
   { id: "task-demo-008", tenantId: "tenant-demo", plotCode: "511723-000001-01-00002-0000-Z", type: "SEEDING", name: "东区二号田机插秧", status: "CANCELLED", scheduledAt: hoursFromNow(-140), createdAt: hoursFromNow(-150) },
 ];
-/** 最近的导航方案；导航是瞬时计算，进程内保留 20 条供页面回看，不落库 */
-const navPlans: NavPlan[] = [];
-function send<T>(res: ServerResponse, status: number, data: T | null, traceId: string, message = ""): void { const body: ApiResponse<T> = { code: status >= 400 ? `OPERATION-${status}` : "OK", message, data, traceId, timestamp: Date.now() }; res.writeHead(status, { "content-type": "application/json; charset=utf-8" }); res.end(JSON.stringify(body)); }
-function trace(req: IncomingMessage): string { return req.headers["x-request-id"]?.toString() || randomUUID(); }
-async function json(req: IncomingMessage): Promise<Record<string, unknown>> { const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const value: unknown = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}; if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("请求体必须是 JSON 对象"); return value as Record<string, unknown>; }
-/** 把纯日期（YYYY-MM-DD）扩展为当日 23:59:59.999，使「截止日」含当天全部任务；已是完整 ISO 时原样使用 */
-function endOfDay(value: string): string {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:59.999Z` : value;
+class InputError extends Error {}
+function send<T>(res: ServerResponse, status: number, data: T | null, traceId: string, message = ""): void {
+  const body: ApiResponse<T> = { code: status === 409 ? "OPS-409-001" : status >= 400 ? `OPERATION-${status}` : "OK", message, data, traceId, timestamp: Date.now() };
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8" }); res.end(JSON.stringify(body));
 }
-/** 任务筛选：关键词命中名称/地块，类型与状态精确匹配，from/to 按计划时间（无计划时按创建时间）过滤；ISO 字符串直接字典序比较即可 */
-function page(query: URLSearchParams): PageResult<Task> { const pageNo = Math.max(1, Number(query.get("page") || 1)); const size = Math.min(200, Math.max(1, Number(query.get("size") || 20))); const keyword = (query.get("keyword") || "").trim().toLowerCase(); const status = query.get("status"); const type = (query.get("type") || "").trim(); const plotCode = (query.get("plotCode") || "").trim(); const from = (query.get("from") || "").trim(); const to = (query.get("to") || "").trim(); const filtered = tasks.filter((task) => {
-  if (type !== "" && task.type !== type) return false;
-  if (plotCode !== "" && task.plotCode !== plotCode) return false;
-  const occurredAt = task.scheduledAt ?? task.createdAt;
-  if (from !== "" && occurredAt < from) return false;
-  if (to !== "" && occurredAt > endOfDay(to)) return false;
-  return (!keyword || `${task.name} ${task.plotCode}`.toLowerCase().includes(keyword)) && (!status || task.status === (status === "IN_PROGRESS" ? "RUNNING" : status));
-}); const start = (pageNo - 1) * size; return { items: filtered.slice(start, start + size), total: filtered.length, page: pageNo, size, pages: Math.ceil(filtered.length / size) }; }
-export function createOperationHttpServer(): Server { return createServer(async (req, res) => { const traceId = trace(req); const url = new URL(req.url ?? "/", "http://localhost"); try {
-  if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "operation" }, traceId); return; }
-  const denied = authorizeRequest(req, { read: "operation:read", write: "operation:write" });
-  if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
-  if (req.method === "GET" && url.pathname === "/api/v1/farm-tasks") { send(res, 200, page(url.searchParams), traceId); return; }
-  if (req.method === "POST" && url.pathname === "/api/v1/farm-tasks") { const body = await json(req); const type = (body.type as TaskType) || "IRRIGATION"; if (!TASK_TYPES.includes(type)) { send(res, 400, null, traceId, "任务类型非法"); return; } const task: Task = { id: randomUUID(), tenantId: req.headers["x-tenant-id"]?.toString() || "tenant-demo", plotCode: String(body.plotCode ?? ""), type, name: String(body.name ?? "未命名农事任务"), status: "PENDING", createdAt: new Date().toISOString() }; if (typeof body.scheduledAt === "string") task.scheduledAt = body.scheduledAt; tasks.unshift(task); send(res, 201, task, traceId); return; }
-  const statusMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/status$/);
-  const detailMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)$/);
-  if (statusMatch?.[1] && req.method === "POST") { const body = await json(req); const task = tasks.find((item) => item.id === statusMatch[1]); if (!task) { send(res, 404, null, traceId, "任务不存在"); return; } const status = body.status as TaskStatus; if (!TASK_STATUSES.includes(status)) { send(res, 400, null, traceId, "任务状态非法"); return; }
-    // 作业时间只在首次进入该状态时写入，重复置状态或回滚都不覆盖已发生的作业窗口
-    const occurredAt = new Date().toISOString();
-    if (status === "RUNNING" && !task.startedAt) task.startedAt = occurredAt;
-    if (status === "COMPLETED" && !task.completedAt) task.completedAt = occurredAt;
-    task.status = status; send(res, 200, task, traceId); return; }
-  if (detailMatch?.[1] && req.method === "GET") {
-    const task = tasks.find((item) => item.id === detailMatch[1]);
-    if (!task) { send(res, 404, null, traceId, "任务不存在"); return; }
-    send(res, 200, task, traceId);
-    return;
-  }
-  if (req.method === "POST" && url.pathname === "/api/v1/operations/path-plan") { const parsed = parseNavigationRequest(await json(req)); if (!parsed.ok || !parsed.input) { send(res, 400, null, traceId, parsed.errors.join("；")); return; } const plan = planNavigation(parsed.input); navPlans.unshift(plan); if (navPlans.length > 20) navPlans.pop(); send(res, 200, plan, traceId); return; }
-  if (req.method === "GET" && url.pathname === "/api/v1/operations/path-plans") { send(res, 200, navPlans, traceId); return; }
-  send(res, 404, null, traceId, "接口不存在");
-} catch (error) { send(res, 400, null, traceId, error instanceof Error ? error.message : "请求处理失败"); } }); }
+async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = []; let size = 0;
+  for await (const chunk of req) { size += Buffer.byteLength(chunk); if (size > 1_048_576) throw new InputError("请求体过大"); chunks.push(Buffer.from(chunk)); }
+  const value: unknown = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new InputError("请求体必须是 JSON 对象");
+  return value as Record<string, unknown>;
+}
+function text(value: unknown, field: string, max: number, required = false): string {
+  if (value === undefined && !required) return "";
+  if (typeof value !== "string" || value.trim().length > max || (required && !value.trim())) throw new InputError(`${field}不能为空且不能超过${max}字`);
+  return value.trim();
+}
+function time(value: unknown, field: string, dateOnly = false, end = false): string | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string") throw new InputError(`${field}格式非法`);
+  let source = value;
+  if (dateOnly && /^\d{4}-\d{2}-\d{2}$/.test(source)) source += end ? "T23:59:59.999Z" : "T00:00:00.000Z";
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(source) || !Number.isFinite(Date.parse(source))) throw new InputError(`${field}需为含时区的有效时间`);
+  const day = source.slice(0, 10);
+  if (new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) !== day) throw new InputError(`${field}日期非法`);
+  return new Date(source).toISOString();
+}
+function integer(value: string | null, fallback: number, max: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > max) throw new InputError("分页参数非法");
+  return parsed;
+}
+function queryOf(query: URLSearchParams): TaskQuery {
+  const result: TaskQuery = { page: integer(query.get("page"), 1, 1_000_000), size: integer(query.get("size"), 20, 200) };
+  const status = query.get("status") === "IN_PROGRESS" ? "RUNNING" : query.get("status");
+  const type = query.get("type");
+  if (status) { if (!TASK_STATUSES.includes(status as TaskStatus)) throw new InputError("任务状态非法"); result.status = status as TaskStatus; }
+  if (type) { if (!TASK_TYPES.includes(type as TaskType)) throw new InputError("任务类型非法"); result.type = type as TaskType; }
+  if (query.get("keyword")) result.keyword = text(query.get("keyword"), "关键词", 200);
+  if (query.get("plotCode")) result.plotCode = text(query.get("plotCode"), "地块编码", 100);
+  const from = time(query.get("from") || undefined, "开始日期", true);
+  const to = time(query.get("to") || undefined, "结束日期", true, true);
+  if (from) result.from = from;
+  if (to) result.to = to;
+  if (from && to && from > to) throw new InputError("开始日期不能晚于结束日期");
+  return result;
+}
+function resultOf(value: unknown): TaskResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new InputError("完成任务必须填写实际作业结果");
+  const result = value as Record<string, unknown>;
+  if (!["success", "partial", "failed"].includes(String(result.outcome))) throw new InputError("作业结果非法");
+  if (typeof result.finishedAreaMu !== "number" || !Number.isFinite(result.finishedAreaMu) || result.finishedAreaMu < 0) throw new InputError("实际作业面积必须为非负数");
+  return { outcome: result.outcome as TaskResult["outcome"], finishedAreaMu: result.finishedAreaMu, notes: text(result.notes, "作业说明", 2000) };
+}
+export function createOperationHttpServer(options: { tasks?: TaskRepository } = {}): Server {
+  const tasks = options.tasks ?? new InMemoryTaskRepository(demoTasks.map((task) => ({ ...task, version: 1 })));
+  const navPlans = new Map<string, NavPlan[]>();
+  return createServer(async (req, res) => {
+    const traceId = req.headers["x-request-id"]?.toString() || randomUUID();
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const tenantId = req.headers["x-tenant-id"]?.toString() || "tenant-demo";
+    try {
+      if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "operation" }, traceId); return; }
+      const denied = authorizeRequest(req, { read: "operation:read", write: "operation:write" });
+      if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
+      if (req.method === "GET" && url.pathname === "/api/v1/farm-tasks") { send(res, 200, await tasks.page(tenantId, queryOf(url.searchParams)), traceId); return; }
+      if (req.method === "POST" && url.pathname === "/api/v1/farm-tasks") {
+        const body = await json(req); const type = body.type ?? "IRRIGATION";
+        if (!TASK_TYPES.includes(type as TaskType)) throw new InputError("任务类型非法");
+        const task: Task = { id: randomUUID(), tenantId, plotCode: text(body.plotCode, "地块编码", 100, true), type: type as TaskType, name: text(body.name, "任务名称", 200, true), status: "PENDING", createdAt: new Date().toISOString(), version: 1 };
+        const start = time(body.scheduledAt, "计划开始时间"); const end = time(body.scheduledEndAt, "计划结束时间");
+        if (end && (!start || end <= start)) throw new InputError("计划结束时间必须晚于开始时间");
+        if (start) task.scheduledAt = start;
+        if (end) task.scheduledEndAt = end;
+        const assigneeName = text(body.assigneeName, "负责人", 100);
+        if (assigneeName) task.assigneeName = assigneeName;
+        send(res, 201, await tasks.create(task), traceId); return;
+      }
+      const statusMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/status$/);
+      const detailMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)$/);
+      if (statusMatch?.[1] && req.method === "POST") {
+        const body = await json(req);
+        const task = await tasks.find(tenantId, decodeURIComponent(statusMatch[1]));
+        if (!task) { send(res, 404, null, traceId, "任务不存在"); return; }
+        const status = body.status as TaskStatus;
+        if (!TASK_STATUSES.includes(status)) throw new InputError("任务状态非法");
+        if (task.status === status) { send(res, 200, task, traceId); return; }
+        if (!canTransition(task.status, status) || (body.version !== undefined && body.version !== task.version)) { send(res, 409, null, traceId, "任务状态已变化或不允许该操作，请刷新后重试"); return; }
+        const result = status === "COMPLETED" ? resultOf(body.result) : undefined;
+        const updated = await tasks.transition(task, status, new Date().toISOString(), traceId, result);
+        if (!updated) { send(res, 409, null, traceId, "任务已被其他操作更新，请刷新后重试"); return; }
+        send(res, 200, updated, traceId); return;
+      }
+      if (detailMatch?.[1] && req.method === "GET") {
+        const task = await tasks.find(tenantId, decodeURIComponent(detailMatch[1]));
+        send(res, task ? 200 : 404, task, traceId, task ? "" : "任务不存在"); return;
+      }
+      if (req.method === "POST" && url.pathname === "/api/v1/operations/path-plan") {
+        const parsed = parseNavigationRequest(await json(req));
+        if (!parsed.ok || !parsed.input) throw new InputError(parsed.errors.join("；"));
+        const plan = planNavigation(parsed.input); const plans = navPlans.get(tenantId) ?? [];
+        plans.unshift(plan); if (plans.length > 20) plans.pop(); navPlans.set(tenantId, plans);
+        send(res, 200, plan, traceId); return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/v1/operations/path-plans") { send(res, 200, navPlans.get(tenantId) ?? [], traceId); return; }
+      send(res, 404, null, traceId, "接口不存在");
+    } catch (error) {
+      const invalid = error instanceof InputError || error instanceof SyntaxError || error instanceof URIError;
+      send(res, invalid ? 400 : 500, null, traceId, invalid ? error.message : "任务服务处理失败");
+    }
+  });
+}

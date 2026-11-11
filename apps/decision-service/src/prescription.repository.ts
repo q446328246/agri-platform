@@ -153,7 +153,7 @@ export class SqlPrescriptionRepository implements PrescriptionRepository {
   }
 }
 
-/** 内存实现：本地模式与测试使用 */
+/** 内存实现仅供测试：忽略 tx，不提供回滚或原子性保证。 */
 export class InMemoryPrescriptionRepository implements PrescriptionRepository {
   private readonly rows: PrescriptionRecord[] = [];
 

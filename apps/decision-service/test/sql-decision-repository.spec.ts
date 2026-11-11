@@ -75,15 +75,17 @@ describe.runIf(databaseUrl)("SqlPrescriptionRepository（真实库）", () => {
       expect(hit?.inputs.source).toBe("smoke");
       expect(hit?.actions[0]?.materialCode).toBe("MAT-WATER-IRRIGATION");
 
-      await outbox.enqueue(undefined, {
-        id: `evt-${Date.now()}`,
-        topic: "decision.prescription.issued",
-        payload: { parcelId: hit?.plotCode, seasonId: "", planType: "irrigation", items: [] },
-        tenantId: "tenant-demo",
-        traceId: "smoke",
-        producer: "decision",
-        createdAt: now,
-        retryCount: 0,
+      await client.$transaction(async (tx) => {
+        await outbox.enqueue(tx, {
+          id: `evt-${Date.now()}`,
+          topic: "decision.prescription.issued",
+          payload: { parcelId: hit?.plotCode, seasonId: "", planType: "irrigation", items: [] },
+          tenantId: "tenant-demo",
+          traceId: "smoke",
+          producer: "decision",
+          createdAt: now,
+          retryCount: 0,
+        });
       });
       expect((await outbox.listPending(50)).length).toBeGreaterThan(0);
     } finally {

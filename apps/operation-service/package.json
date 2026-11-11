@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@agri/config": "workspace:*",
+    "@agri/db": "workspace:*",
+    "@agri/mq": "workspace:*",
     "@agri/contracts": "workspace:*",
     "@agri/shared": "workspace:*",
     "@nestjs/common": "^11.2.8",

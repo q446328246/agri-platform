@@ -9,22 +9,23 @@ import type { DecisionDependencies } from "./http.js";
 import { SqlOutcomeRepository } from "./outcome.repository.js";
 import { SqlPrescriptionRepository } from "./prescription.repository.js";
 import { SqlOutboxStore } from "./outbox.repository.js";
-import { defaultRule, InMemoryRuleRepository, SqlRuleRepository } from "./rule.repository.js";
+import { defaultRule, SqlRuleRepository } from "./rule.repository.js";
+import { optionalFiniteNumber } from "./rule.engine.js";
 
 /** 日志级别白名单，缺省 info */
 function parseLogLevel(value?: string): "debug" | "info" | "warn" | "error" {
   return value === "debug" || value === "warn" || value === "error" ? value : "info";
 }
 
-/** 从天气预报服务取未来 24h 降雨概率，用于规则求值（无降雨时不会误推迟） */
+/** 从天气预报服务取未来 24h 降雨概率；不可用时返回缺测，绝不假定无雨。 */
 function createRainProbabilityFetcher(weatherUrl: string): NonNullable<DecisionDependencies["fetchRainProbability"]> {
   return async (_plotCode, identity) => {
     try {
-      // 服务侧守卫为 enforce 时必须透传身份头，否则天气服务判 401，降雨概率静默退化成 0
+      // 透传身份头；鉴权失败或天气不可用时保留缺测状态。
       const res = await fetch(`${weatherUrl}/api/v1/weather/forecast?days=1`, { headers: identity, signal: AbortSignal.timeout(2000) });
       if (!res.ok) return undefined;
-      const json = (await res.json()) as { data?: { forecast?: Array<{ rainProbability: number }> } };
-      return json.data?.forecast?.[0]?.rainProbability;
+      const json = (await res.json()) as { data?: { forecast?: Array<{ rainProbability?: unknown }> } };
+      return optionalFiniteNumber(json.data?.forecast?.[0]?.rainProbability);
     } catch { return undefined; }
   };
 }
@@ -34,8 +35,8 @@ async function bootstrap(): Promise<void> {
   const logger = new LoggerService({ serviceName: "decision-service", level: parseLogLevel(process.env.LOG_LEVEL) });
   configureDecorators({ logger });
 
-  // 默认连接数据库持久化规则与处方留痕；显式设置为 memory 时使用内存实现，
-  // 无数据库的本地演示仍可运行，但处方事件与留痕不再落库。
+  // 默认连接数据库持久化规则与处方留痕；内存路径仅供测试，
+  // 不提供持久化、事务或自动控制可靠性保证。
   const mode = process.env.DECISION_REPOSITORY_MODE === "memory" || !process.env.DB_URL ? "memory" : "sql";
 
   if (mode === "sql" && process.env.SERVICE_MODE === "http") {
@@ -55,7 +56,7 @@ async function bootstrap(): Promise<void> {
     const relay = new OutboxService(outbox, publisher, { tenantId, traceId: "decision-relay", producer: "decision" });
     relay.start();
     setDefaultPublisher(publisher);
-    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, outbox, publisher, tenantId, fetchRainProbability } satisfies Partial<DecisionDependencies>);
+    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, outbox, publisher, tenantId, fetchRainProbability, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
     const shutdown = async (): Promise<void> => {
       server.close();
@@ -71,7 +72,7 @@ async function bootstrap(): Promise<void> {
     const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
     const fetchRainProbability = createRainProbabilityFetcher(weatherUrl);
     const server = createDecisionHttpServer({ fetchRainProbability });
-    server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（内存实现）", { port }));
+    server.listen(port, "127.0.0.1", () => logger.warn("decision-service HTTP 已启动（仅供内存测试，无事务保证）", { port }));
     return;
   }
   logger.info("decision-service 已启动（demo 模式）");
