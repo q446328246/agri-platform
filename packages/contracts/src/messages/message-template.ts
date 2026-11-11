@@ -1,4 +1,4 @@
-import type { PestDetectedPayload, PrescriptionIssuedPayload, ThresholdBreachedPayload } from "../events/payload.js";
+import type { PestDetectedPayload, PlotCreatedPayload, PrescriptionIssuedPayload, ThresholdBreachedPayload } from "../events/payload.js";
 import { EventTopic } from "../events/topic.js";
 
 /**
@@ -152,11 +152,40 @@ const pestDetectedTemplate: MessageTemplate<PestDetectedPayload> = {
   },
 };
 
+/** 土壤类型编码中文名，未登记的回落到原编码 */
+const SOIL_LABELS: Record<string, string> = {
+  PADDY_SOIL: "水稻土",
+  FLUVO_AQUIC_SOIL: "潮土",
+  RED_SOIL: "红壤",
+  YELLOW_SOIL: "黄壤",
+  PURPLE_SOIL: "紫色土",
+};
+
+/** 地块建档事件：通知消息，提示新地块已进入平台 */
+const plotCreatedTemplate: MessageTemplate<PlotCreatedPayload> = {
+  topic: EventTopic.PlotCreated,
+  label: "地块建档通知",
+  type: "NOTICE",
+  render(payload, context) {
+    const soil = payload.soilType ? (SOIL_LABELS[payload.soilType] ?? payload.soilType) : "未登记";
+    return {
+      type: "NOTICE",
+      level: "INFO",
+      title: `新地块已建档：${payload.parcelCode}`,
+      content: `${payload.parcelName}（${payload.parcelCode}）已完成建档，面积 ${payload.areaMu} 亩，土壤类型 ${soil}，归属农场 ${payload.farmId}。可前往地块详情完善边界与档案。`,
+      plotCode: payload.parcelCode,
+      occurredAt: context.occurredAt,
+      dedupeKey: `${EventTopic.PlotCreated}:${context.eventId}`,
+    };
+  },
+};
+
 /** 主题到模板的映射，新增消费主题时在这里登记 */
 export const MESSAGE_TEMPLATES = {
   [EventTopic.TelemetryThresholdBreached]: thresholdTemplate,
   [EventTopic.TelemetryPestDetected]: pestDetectedTemplate,
   [EventTopic.DecisionPrescriptionIssued]: prescriptionTemplate,
+  [EventTopic.PlotCreated]: plotCreatedTemplate,
 } as const;
 
 /** 已登记模板的主题 */
@@ -189,6 +218,8 @@ export function buildMessageDraft(
       return pestDetectedTemplate.render(payload as PestDetectedPayload, context);
     case EventTopic.DecisionPrescriptionIssued:
       return prescriptionTemplate.render(payload as PrescriptionIssuedPayload, context);
+    case EventTopic.PlotCreated:
+      return plotCreatedTemplate.render(payload as PlotCreatedPayload, context);
     default:
       return null;
   }

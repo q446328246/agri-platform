@@ -87,6 +87,25 @@ describe("消息模板与去重键", () => {
     expect(slight?.dedupeKey).not.toBe(severe?.dedupeKey);
   });
 
+  it("地块建档生成通知，按来源事件去重", () => {
+    const payload = {
+      parcelId: "P-5", parcelCode: "511723-000001-01-00001-0000-5", parcelName: "示范田一号", tenantId: "tenant-demo",
+      farmId: "farm-kaijiang-01", areaMu: 1.65, soilType: "PADDY_SOIL", geom: { type: "Polygon", coordinates: [], srid: 4490 },
+    };
+    const first = buildMessageDraft(EventTopic.PlotCreated, payload, { eventId: "evt-p1", occurredAt: context.occurredAt });
+    expect(first).toMatchObject({ type: "NOTICE", level: "INFO", plotCode: "511723-000001-01-00001-0000-5" });
+    expect(first?.title).toBe("新地块已建档：511723-000001-01-00001-0000-5");
+    expect(first?.content).toContain("示范田一号");
+    expect(first?.content).toContain("1.65 亩");
+    expect(first?.content).toContain("水稻土");
+    // 建档事件按来源事件唯一，两次不同事件各通知一次
+    const second = buildMessageDraft(EventTopic.PlotCreated, payload, { eventId: "evt-p2", occurredAt: context.occurredAt });
+    expect(first?.dedupeKey).not.toBe(second?.dedupeKey);
+    // 缺省土壤类型回落为「未登记」
+    const noSoil = buildMessageDraft(EventTopic.PlotCreated, { ...payload, soilType: undefined }, context);
+    expect(noSoil?.content).toContain("未登记");
+  });
+
   it("未登记模板的主题不生成消息，级别权重可比较", () => {
     expect(buildMessageDraft(EventTopic.OperationTaskCompleted, {}, context)).toBeNull();
     expect(isMessageTemplateTopic(EventTopic.TelemetryThresholdBreached)).toBe(true);
@@ -95,6 +114,7 @@ describe("消息模板与去重键", () => {
       EventTopic.TelemetryThresholdBreached,
       EventTopic.TelemetryPestDetected,
       EventTopic.DecisionPrescriptionIssued,
+      EventTopic.PlotCreated,
     ]);
     expect(MESSAGE_LEVEL_RANK.CRITICAL).toBeGreaterThan(MESSAGE_LEVEL_RANK.WARNING);
   });

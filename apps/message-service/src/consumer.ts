@@ -50,6 +50,12 @@ export class MessageEventConsumer {
     await this.deliver(event);
   }
 
+  /** 地块建档：生成通知消息，提示新地块已进入平台 */
+  @registerHandler(EventTopic.PlotCreated)
+  async onPlotCreated(event: DomainEvent<unknown>): Promise<void> {
+    await this.deliver(event);
+  }
+
   /**
    * 通用投递：模板渲染 → 偏好过滤 → 落库。
    * 未登记模板的主题直接跳过，便于后续扩展主题时先加模板再加订阅。
