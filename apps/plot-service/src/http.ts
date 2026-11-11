@@ -6,6 +6,10 @@ import { authorizeRequest, ulid } from "@agri/shared";
 
 import { INFRA_LINE_TYPES, InMemoryInfraLineRepository, estimateLengthM } from "./infra-line.repository.js";
 import type { InfraLine, InfraLinePatch, InfraLineRepository, InfraLineType } from "./infra-line.repository.js";
+import { CROP_SEASON_STATUSES, InMemoryCropSeasonRepository, isValidFarmDate } from "./season.repository.js";
+import type { CropSeason, CropSeasonPatch, CropSeasonRepository, CropSeasonStatus } from "./season.repository.js";
+import { InMemoryPlotChangeLogRepository } from "./plot-change-log.repository.js";
+import type { PlotChangeAction, PlotChangeLog, PlotChangeLogRepository } from "./plot-change-log.repository.js";
 import type { PlotPatch, PlotRecord } from "./plot.repository.js";
 import { PLOT_STATUSES, PLOT_TYPES } from "./plot.service.js";
 import type { PlotService, RegisterPlotInput } from "./plot.service.js";
@@ -96,8 +100,32 @@ export function createPlotHttpServer(
   service: PlotService,
   infraLines: InfraLineRepository = new InMemoryInfraLineRepository(),
   zones: ZoneRepository = new InMemoryZoneRepository(),
+  seasons: CropSeasonRepository = new InMemoryCropSeasonRepository(),
+  changeLogs: PlotChangeLogRepository = new InMemoryPlotChangeLogRepository(),
 ): Server {
   const tenantOf = (request: IncomingMessage): string => request.headers["x-tenant-id"]?.toString() || "tenant-demo";
+  const actorOf = (request: IncomingMessage): string => request.headers["x-user-id"]?.toString() || "system";
+
+  /** 档案字段 → 中文标签，用于把改动的键拼成人可读的变更摘要 */
+  const PATCH_LABELS: Record<string, string> = {
+    parcelName: "名称", areaMu: "面积", soilType: "土壤", zoneCode: "片区",
+    plotType: "类型", plotStatus: "状态", currentCrop: "当前作物",
+    ownerName: "负责人", ownerPhone: "联系电话", remark: "备注", geom: "边界",
+  };
+  /** 追加一条地块变更历史；日志写入失败不应让已成功的业务操作回退，故吞掉异常仅记 console */
+  const logChange = async (request: IncomingMessage, parcelCode: string, action: PlotChangeAction, summary: string): Promise<void> => {
+    const log: PlotChangeLog = {
+      id: ulid(),
+      parcelCode,
+      tenantId: tenantOf(request),
+      action,
+      summary,
+      actor: actorOf(request),
+      createdAt: new Date().toISOString(),
+    };
+    try { await changeLogs.append(undefined, log); }
+    catch (error) { console.warn("地块变更留痕写入失败", error instanceof Error ? error.message : error); }
+  };
 
   /** 汇总片区统计；withGeometry 时由成员地块外轮廓算凸包，供一张图直接绘制 */
   const zoneSummaries = async (tenantId: string, withGeometry: boolean): Promise<ZoneSummary[]> => {
@@ -153,8 +181,11 @@ export function createPlotHttpServer(
       if (url.pathname === `${API_PREFIX}/plots/infra-lines` && request.method === "GET") {
         const tenantId = request.headers["x-tenant-id"]?.toString() || "tenant-demo";
         const type = url.searchParams.get("lineType");
+        const plotCode = (url.searchParams.get("plotCode") ?? "").trim();
         const lines = await infraLines.listByTenant(tenantId);
-        send(response, 200, type ? lines.filter((line) => line.lineType === type) : lines, requestTraceId);
+        send(response, 200, lines.filter((line) =>
+          (!type || line.lineType === type) && (plotCode === "" || line.plotCode === plotCode),
+        ), requestTraceId);
         return;
       }
       if (url.pathname === `${API_PREFIX}/plots/infra-lines` && request.method === "POST") {
@@ -179,6 +210,11 @@ export function createPlotHttpServer(
           send(response, 409, null, requestTraceId, `管线编码 ${lineCode} 已存在`);
           return;
         }
+        const plotCode = String(input.plotCode ?? "").trim();
+        if (plotCode !== "" && !(await service.exists(plotCode))) {
+          send(response, 400, null, requestTraceId, `归属地块 ${plotCode} 不存在`);
+          return;
+        }
         const line: InfraLine = {
           id: ulid(),
           lineCode,
@@ -187,6 +223,7 @@ export function createPlotHttpServer(
           tenantId: request.headers["x-tenant-id"]?.toString() || "tenant-demo",
           geom: { type: "LineString", coordinates: geom.coordinates, srid: Number(geom.srid ?? 4490) },
           lengthM: input.lengthM !== undefined ? Number(input.lengthM) : estimateLengthM(geom),
+          plotCode,
           createdAt: new Date().toISOString(),
         };
         await infraLines.create(undefined, line);
@@ -237,6 +274,15 @@ export function createPlotHttpServer(
           // 改了形状就按新折点重算里程，避免列表与地图上显示的长度和实际走向脱节
           patch.lengthM = estimateLengthM(patch.geom);
         }
+        if (input.plotCode !== undefined) {
+          // 允许传空串解绑地块；非空时必须是本地已存在的地块编码，避免联动查询命中幽灵地块
+          const plotCode = String(input.plotCode).trim();
+          if (plotCode !== "" && !(await service.exists(plotCode))) {
+            send(response, 400, null, requestTraceId, `归属地块 ${plotCode} 不存在`);
+            return;
+          }
+          patch.plotCode = plotCode;
+        }
         const updated = await infraLines.update(undefined, lineCode, patch);
         if (!updated) {
           send(response, 404, null, requestTraceId, "管线不存在");
@@ -249,6 +295,199 @@ export function createPlotHttpServer(
         const removed = await infraLines.remove(undefined, decodeURIComponent(lineMatch[1]), new Date().toISOString());
         if (!removed) {
           send(response, 404, null, requestTraceId, "管线不存在");
+          return;
+        }
+        send(response, 200, null, requestTraceId);
+        return;
+      }
+      // 种植季/茬口：前缀 /plots/seasons，须先于 /plots/:code 匹配，否则 seasons 会被当成地块编码
+      if (url.pathname === `${API_PREFIX}/plots/seasons` && request.method === "GET") {
+        const tenantId = tenantOf(request);
+        const plotCode = (url.searchParams.get("plotCode") ?? "").trim();
+        const crop = (url.searchParams.get("crop") ?? "").trim().toLowerCase();
+        const status = (url.searchParams.get("status") ?? "").trim();
+        const year = (url.searchParams.get("year") ?? "").trim();
+        if (status !== "" && !CROP_SEASON_STATUSES.includes(status as CropSeasonStatus)) {
+          send(response, 400, null, requestTraceId, `status需为 ${CROP_SEASON_STATUSES.join("/")}`);
+          return;
+        }
+        const rows = plotCode !== ""
+          ? await seasons.listByPlot(tenantId, plotCode)
+          : (await seasons.listByTenant(tenantId)).sort((a, b) => b.seasonYear - a.seasonYear || a.plotCode.localeCompare(b.plotCode));
+        send(response, 200, rows.filter((item) =>
+          (crop === "" || item.crop.toLowerCase().includes(crop))
+          && (status === "" || item.status === status)
+          && (year === "" || String(item.seasonYear) === year),
+        ), requestTraceId);
+        return;
+      }
+      if (url.pathname === `${API_PREFIX}/plots/seasons` && request.method === "POST") {
+        const input = await readJson(request);
+        const plotCode = String(input.plotCode ?? "").trim();
+        const crop = String(input.crop ?? "").trim();
+        if (plotCode === "") {
+          send(response, 400, null, requestTraceId, "所属地块不能为空");
+          return;
+        }
+        if (!(await service.exists(plotCode))) {
+          send(response, 400, null, requestTraceId, `所属地块 ${plotCode} 不存在`);
+          return;
+        }
+        if (crop === "") {
+          send(response, 400, null, requestTraceId, "作物名称不能为空");
+          return;
+        }
+        const seasonYear = Number(input.seasonYear);
+        if (!Number.isInteger(seasonYear) || seasonYear < 1900 || seasonYear > 2999) {
+          send(response, 400, null, requestTraceId, "种植年份需为 1900~2999 的整数");
+          return;
+        }
+        const seasonIndex = input.seasonIndex === undefined ? 1 : Number(input.seasonIndex);
+        if (!Number.isInteger(seasonIndex) || seasonIndex < 1) {
+          send(response, 400, null, requestTraceId, "茬次需为不小于 1 的整数");
+          return;
+        }
+        const plantDate = String(input.plantDate ?? "").trim();
+        const harvestDate = String(input.harvestDate ?? "").trim();
+        if (!isValidFarmDate(plantDate) || !isValidFarmDate(harvestDate)) {
+          send(response, 400, null, requestTraceId, "日期需为 YYYY-MM-DD 或留空");
+          return;
+        }
+        if (plantDate !== "" && harvestDate !== "" && harvestDate < plantDate) {
+          send(response, 400, null, requestTraceId, "采收日期不能早于栽插日期");
+          return;
+        }
+        const status = (input.status === undefined ? "planned" : String(input.status)) as CropSeasonStatus;
+        if (!CROP_SEASON_STATUSES.includes(status)) {
+          send(response, 400, null, requestTraceId, `状态需为 ${CROP_SEASON_STATUSES.join("/")}`);
+          return;
+        }
+        const yieldKg = input.yieldKg === undefined || input.yieldKg === null ? null : Number(input.yieldKg);
+        if (yieldKg !== null && (!Number.isFinite(yieldKg) || yieldKg < 0)) {
+          send(response, 400, null, requestTraceId, "产量需为非负数或留空");
+          return;
+        }
+        const seasonCode = typeof input.seasonCode === "string" && input.seasonCode !== "" ? input.seasonCode : `SEASON-${ulid().slice(-8)}`;
+        if (await seasons.findByCode(seasonCode)) {
+          send(response, 409, null, requestTraceId, `种植季编码 ${seasonCode} 已存在`);
+          return;
+        }
+        const record: CropSeason = {
+          id: ulid(),
+          seasonCode,
+          plotCode,
+          crop,
+          variety: String(input.variety ?? "").trim(),
+          seasonYear,
+          seasonIndex,
+          plantDate,
+          harvestDate,
+          status,
+          yieldKg,
+          note: String(input.note ?? "").trim(),
+          tenantId: tenantOf(request),
+          createdAt: new Date().toISOString(),
+        };
+        await seasons.create(undefined, record);
+        send(response, 201, record, requestTraceId);
+        return;
+      }
+      const seasonMatch = url.pathname.match(new RegExp(`^${API_PREFIX}/plots/seasons/([^/]+)$`));
+      if (seasonMatch?.[1] && request.method === "PUT") {
+        const seasonCode = decodeURIComponent(seasonMatch[1]);
+        if (!(await seasons.findByCode(seasonCode))) {
+          send(response, 404, null, requestTraceId, "种植季不存在");
+          return;
+        }
+        const input = await readJson(request);
+        const patch: CropSeasonPatch = {};
+        if (input.plotCode !== undefined) {
+          const plotCode = String(input.plotCode).trim();
+          if (plotCode === "" || !(await service.exists(plotCode))) {
+            send(response, 400, null, requestTraceId, `所属地块 ${plotCode || "（空）"} 不存在`);
+            return;
+          }
+          patch.plotCode = plotCode;
+        }
+        if (input.crop !== undefined) {
+          const crop = String(input.crop).trim();
+          if (crop === "") {
+            send(response, 400, null, requestTraceId, "作物名称不能为空");
+            return;
+          }
+          patch.crop = crop;
+        }
+        if (input.variety !== undefined) patch.variety = String(input.variety).trim();
+        if (input.seasonYear !== undefined) {
+          const seasonYear = Number(input.seasonYear);
+          if (!Number.isInteger(seasonYear) || seasonYear < 1900 || seasonYear > 2999) {
+            send(response, 400, null, requestTraceId, "种植年份需为 1900~2999 的整数");
+            return;
+          }
+          patch.seasonYear = seasonYear;
+        }
+        if (input.seasonIndex !== undefined) {
+          const seasonIndex = Number(input.seasonIndex);
+          if (!Number.isInteger(seasonIndex) || seasonIndex < 1) {
+            send(response, 400, null, requestTraceId, "茬次需为不小于 1 的整数");
+            return;
+          }
+          patch.seasonIndex = seasonIndex;
+        }
+        if (input.plantDate !== undefined) {
+          const plantDate = String(input.plantDate).trim();
+          if (!isValidFarmDate(plantDate)) {
+            send(response, 400, null, requestTraceId, "栽插日期需为 YYYY-MM-DD 或留空");
+            return;
+          }
+          patch.plantDate = plantDate;
+        }
+        if (input.harvestDate !== undefined) {
+          const harvestDate = String(input.harvestDate).trim();
+          if (!isValidFarmDate(harvestDate)) {
+            send(response, 400, null, requestTraceId, "采收日期需为 YYYY-MM-DD 或留空");
+            return;
+          }
+          patch.harvestDate = harvestDate;
+        }
+        if ((patch.plantDate !== undefined || patch.harvestDate !== undefined)) {
+          const current = await seasons.findByCode(seasonCode);
+          const plantDate = patch.plantDate ?? current?.plantDate ?? "";
+          const harvestDate = patch.harvestDate ?? current?.harvestDate ?? "";
+          if (plantDate !== "" && harvestDate !== "" && harvestDate < plantDate) {
+            send(response, 400, null, requestTraceId, "采收日期不能早于栽插日期");
+            return;
+          }
+        }
+        if (input.status !== undefined) {
+          const status = String(input.status) as CropSeasonStatus;
+          if (!CROP_SEASON_STATUSES.includes(status)) {
+            send(response, 400, null, requestTraceId, `状态需为 ${CROP_SEASON_STATUSES.join("/")}`);
+            return;
+          }
+          patch.status = status;
+        }
+        if (input.yieldKg !== undefined) {
+          const yieldKg = input.yieldKg === null ? null : Number(input.yieldKg);
+          if (yieldKg !== null && (!Number.isFinite(yieldKg) || yieldKg < 0)) {
+            send(response, 400, null, requestTraceId, "产量需为非负数或留空");
+            return;
+          }
+          patch.yieldKg = yieldKg;
+        }
+        if (input.note !== undefined) patch.note = String(input.note).trim();
+        const updated = await seasons.update(undefined, seasonCode, patch);
+        if (!updated) {
+          send(response, 404, null, requestTraceId, "种植季不存在");
+          return;
+        }
+        send(response, 200, updated, requestTraceId);
+        return;
+      }
+      if (seasonMatch?.[1] && request.method === "DELETE") {
+        const removed = await seasons.remove(undefined, decodeURIComponent(seasonMatch[1]), new Date().toISOString());
+        if (!removed) {
+          send(response, 404, null, requestTraceId, "种植季不存在");
           return;
         }
         send(response, 200, null, requestTraceId);
@@ -375,6 +614,12 @@ export function createPlotHttpServer(
       }
       const codeMatch = url.pathname.match(new RegExp(`^${API_PREFIX}/plots/([^/]+)$`));
       const plotCode = codeMatch?.[1];
+      const historyMatch = url.pathname.match(new RegExp(`^${API_PREFIX}/plots/([^/]+)/history$`));
+      const historyCode = historyMatch?.[1];
+      if (historyCode && request.method === "GET") {
+        send(response, 200, await changeLogs.listByPlot(tenantOf(request), decodeURIComponent(historyCode)), requestTraceId);
+        return;
+      }
       if (plotCode && request.method === "GET") {
         send(response, 200, await service.getByCode(decodeURIComponent(plotCode)), requestTraceId);
         return;
@@ -382,6 +627,7 @@ export function createPlotHttpServer(
       if (url.pathname === `${API_PREFIX}/plots` && request.method === "POST") {
         const input = await readJson(request);
         const record = await service.registerPlot({ ...(input as unknown as RegisterPlotInput), tenantId: request.headers["x-tenant-id"]?.toString() || "tenant-demo", traceId: requestTraceId });
+        await logChange(request, record.parcelCode, "CREATE", `建档：新增地块「${record.parcelName}」，面积 ${record.areaMu} 亩`);
         send(response, 201, record, requestTraceId);
         return;
       }
@@ -400,11 +646,19 @@ export function createPlotHttpServer(
           else if (value === null) patch[key] = null;
         }
         if (input.geom && typeof input.geom === "object") patch.geom = input.geom as NonNullable<PlotPatch["geom"]>;
-        send(response, 200, await service.updatePlot(decodeURIComponent(plotCode), patch), requestTraceId);
+        const code = decodeURIComponent(plotCode);
+        const updated = await service.updatePlot(code, patch);
+        const changed = Object.keys(patch)
+          .filter((key) => key !== "updatedAt")
+          .map((key) => PATCH_LABELS[key] ?? key);
+        if (changed.length > 0) await logChange(request, code, "UPDATE", `修改：${changed.join("、")}`);
+        send(response, 200, updated, requestTraceId);
         return;
       }
       if (plotCode && request.method === "DELETE") {
-        await service.removePlot(decodeURIComponent(plotCode));
+        const code = decodeURIComponent(plotCode);
+        await service.removePlot(code);
+        await logChange(request, code, "DELETE", "删除：地块已归档移除（软删）");
         send(response, 200, null, requestTraceId);
         return;
       }

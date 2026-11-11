@@ -150,6 +150,11 @@ export class PlotService {
     return hit;
   }
 
+  /** 地块是否存在（未软删）。供管线归属校验用，parcel_code 全局唯一，无需带租户。 */
+  async exists(parcelCode: string): Promise<boolean> {
+    return (await this.repository.findByCode(undefined, parcelCode)) !== null;
+  }
+
   /** 按租户列出未删除地块，HTTP 层负责分页与排序。 */
   async listByTenant(tenantId: string): Promise<PlotRecord[]> {
     return this.repository.listByTenant(tenantId);

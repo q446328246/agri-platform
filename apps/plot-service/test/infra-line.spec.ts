@@ -2,6 +2,7 @@ import "reflect-metadata";
 
 import { PrismaService } from "@agri/db";
 import { InMemoryEventPublisher, InMemoryOutboxStore, OutboxService } from "@agri/mq";
+import { polygonAreaMu, roundAreaMu } from "@agri/shared";
 import type { Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -160,5 +161,69 @@ describe("田间管线", () => {
       body: JSON.stringify({ lineName: "x", lineType: "ROAD", geom: { type: "LineString", coordinates: [[1, 2]], srid: 4490 } }),
     });
     expect(badGeom.status).toBe(400);
+  });
+
+  it("管线归属地块：绑定真实编码、拒绝幽灵编码、按地块过滤与解绑", async () => {
+    const base = await startServer();
+    const plotGeom = {
+      type: "Polygon",
+      coordinates: [[[107.4212, 30.9805], [107.4232, 30.9805], [107.4232, 30.9825], [107.4212, 30.9825], [107.4212, 30.9805]]],
+      srid: 4490,
+    };
+    const plot = await fetch(`${base}/api/v1/plots`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        region: "511723", farm: "000001", area: "01", parcel: "9001", parcelName: "联动验证地块",
+        areaMu: roundAreaMu(polygonAreaMu(plotGeom.coordinates[0] ?? [])), farmId: "farm-kaijiang-01", geom: plotGeom,
+      }),
+    });
+    expect(plot.status).toBe(201);
+    const parcelCode = (await plot.json() as { data: { parcelCode: string } }).data.parcelCode;
+
+    // 绑定到真实地块
+    const linked = await fetch(`${base}/api/v1/plots/infra-lines`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lineName: "该地块灌溉管", lineType: "IRRIGATION_PIPE", plotCode: parcelCode, geom: { type: "LineString", coordinates: [[107.4213, 30.9824], [107.4223, 30.9824]], srid: 4490 } }),
+    });
+    expect(linked.status).toBe(201);
+    const linkedLine = (await linked.json() as { data: { lineCode: string; plotCode: string } }).data;
+    expect(linkedLine.plotCode).toBe(parcelCode);
+
+    // 未归属地块：不传 plotCode 时为空串
+    const orphan = await fetch(`${base}/api/v1/plots/infra-lines`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lineName: "未归属主管", lineType: "ELECTRIC_LINE", geom: { type: "LineString", coordinates: [[107.4213, 30.9824], [107.4213, 30.9834]], srid: 4490 } }),
+    });
+    expect(orphan.status).toBe(201);
+    expect((await orphan.json() as { data: { plotCode: string } }).data.plotCode).toBe("");
+
+    // 幽灵地块编码被拒绝
+    const ghost = await fetch(`${base}/api/v1/plots/infra-lines`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lineName: "坏归属", lineType: "ROAD", plotCode: "PLOT-NOT-EXIST", geom: { type: "LineString", coordinates: [[1, 2], [3, 4]], srid: 4490 } }),
+    });
+    expect(ghost.status).toBe(400);
+
+    // 按地块过滤只命中绑定线
+    const filtered = await fetch(`${base}/api/v1/plots/infra-lines?plotCode=${parcelCode}`);
+    const rows = (await filtered.json() as { data: { lineCode: string }[] }).data;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.lineCode).toBe(linkedLine.lineCode);
+
+    // 改归属为空串即解绑
+    const unbound = await fetch(`${base}/api/v1/plots/infra-lines/${linkedLine.lineCode}`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ plotCode: "" }),
+    });
+    expect(unbound.status).toBe(200);
+    expect((await unbound.json() as { data: { plotCode: string } }).data.plotCode).toBe("");
+    // 改成幽灵地块被拒绝
+    const badRebind = await fetch(`${base}/api/v1/plots/infra-lines/${linkedLine.lineCode}`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ plotCode: "PLOT-NOT-EXIST" }),
+    });
+    expect(badRebind.status).toBe(400);
   });
 });

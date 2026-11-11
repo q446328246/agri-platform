@@ -25,6 +25,8 @@ export interface InfraLine {
   geom: GeoLineString;
   /** 线路长度，单位：米 */
   lengthM: number;
+  /** 归属地块编码（plots.parcel_code），空串表示未绑定地块 */
+  plotCode: string;
   createdAt: string;
   deletedAt?: string;
 }
@@ -36,6 +38,7 @@ export interface InfraLineInput {
   lineType: InfraLineType;
   geom: GeoLineString;
   lengthM?: number;
+  plotCode?: string;
 }
 
 /** 局部更新入参：只覆盖传入的字段，几何变化时长度由调用方重算 */
@@ -44,6 +47,7 @@ export interface InfraLinePatch {
   lineType?: InfraLineType;
   geom?: GeoLineString;
   lengthM?: number;
+  plotCode?: string;
 }
 
 export interface InfraLineRepository {
@@ -91,6 +95,7 @@ function toLine(row: Record<string, unknown>): InfraLine {
     tenantId: String(row.tenant_id ?? "tenant-demo"),
     geom: row.geom as GeoLineString,
     lengthM: Number(row.length_m ?? 0),
+    plotCode: String(row.plot_code ?? ""),
     createdAt: toIsoTimestamp(row.created_at),
   };
   if (row.deleted_at !== null && row.deleted_at !== undefined) record.deletedAt = toIsoTimestamp(row.deleted_at);
@@ -107,7 +112,7 @@ export class SqlInfraLineRepository implements InfraLineRepository {
 
   async listByTenant(tenantId: string): Promise<InfraLine[]> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, created_at, deleted_at
+      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, created_at, deleted_at
        FROM infra_lines WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY line_code`,
       tenantId,
     );
@@ -116,7 +121,7 @@ export class SqlInfraLineRepository implements InfraLineRepository {
 
   async findByCode(lineCode: string): Promise<InfraLine | null> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, created_at, deleted_at
+      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, created_at, deleted_at
        FROM infra_lines WHERE line_code = $1 AND deleted_at IS NULL LIMIT 1`,
       lineCode,
     );
@@ -126,8 +131,8 @@ export class SqlInfraLineRepository implements InfraLineRepository {
 
   async create(tx: unknown, record: InfraLine): Promise<InfraLine> {
     await this.executor(tx).$executeRawUnsafe(
-      `INSERT INTO infra_lines (id, line_code, line_name, line_type, tenant_id, geom, length_m, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`,
+      `INSERT INTO infra_lines (id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)`,
       record.id,
       record.lineCode,
       record.lineName,
@@ -135,6 +140,7 @@ export class SqlInfraLineRepository implements InfraLineRepository {
       record.tenantId,
       JSON.stringify(record.geom),
       record.lengthM,
+      record.plotCode,
       record.createdAt,
     );
     return record;
@@ -143,7 +149,7 @@ export class SqlInfraLineRepository implements InfraLineRepository {
   async update(tx: unknown, lineCode: string, patch: InfraLinePatch): Promise<InfraLine | null> {
     const executor = this.executor(tx);
     const rows = await executor.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, created_at, deleted_at
+      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, created_at, deleted_at
        FROM infra_lines WHERE line_code = $1 AND deleted_at IS NULL LIMIT 1`,
       lineCode,
     );
@@ -172,6 +178,10 @@ export class SqlInfraLineRepository implements InfraLineRepository {
     if (patch.lengthM !== undefined) {
       add("length_m", patch.lengthM);
       next.lengthM = patch.lengthM;
+    }
+    if (patch.plotCode !== undefined) {
+      add("plot_code", patch.plotCode);
+      next.plotCode = patch.plotCode;
     }
     if (sets.length > 0) {
       await executor.$executeRawUnsafe(
@@ -221,6 +231,7 @@ export class InMemoryInfraLineRepository implements InfraLineRepository {
     if (patch.lineType !== undefined) row.lineType = patch.lineType;
     if (patch.geom !== undefined) row.geom = patch.geom;
     if (patch.lengthM !== undefined) row.lengthM = patch.lengthM;
+    if (patch.plotCode !== undefined) row.plotCode = patch.plotCode;
     return row;
   }
 
