@@ -231,7 +231,7 @@ agri-platform-nodejs-scaffold/
 - **事件不丢也不重**：决策 / 遥测 / 农事 / 地块服务把业务数据与待投递事件写入同一事务（各自 `*_outbox` 表），
   事务提交后由中继投递；消费侧用 `eventId` 幂等去重，重试按指数退避，超出次数转死信。
   地块建档走 `plot_outbox`（迁移 028），SQL 模式 HTTP 启动后周期性中继把 `PlotCreated` 写入共享 `event_log`，
-  跨进程可靠；只是 `PlotCreated` 目前仍无下游服务订阅，事件已可靠落库待用，尚未接出消费链路。
+  跨进程可靠；`message-service` 已订阅 `PlotCreated` 生成「地块建档通知」（模板渲染 → 偏好过滤 → 落库，按 `eventId` 幂等）。
 - **跨进程事件靠事件日志**：`event_log` 按主题递增位点，`event_log_offsets` 记录消费者组位点；
   生产侧用 `EventLogPublisher`，消费侧用 `EventLogConsumer` 轮询，便于横向扩容与重放。
 - **处方要能被调优**：处方执行后必须回写实际效果，`evaluateOutcome` 给出阈值建议，

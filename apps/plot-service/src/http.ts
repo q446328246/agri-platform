@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 
 import type { ApiResponse, GeoLineString, GeoPolygon, PageResult } from "@agri/contracts";
-import { authorizeRequest, ulid } from "@agri/shared";
+import { authorizeRequest, ulid, BizError } from "@agri/shared";
 
 import { INFRA_LINE_TYPES, InMemoryInfraLineRepository, estimateLengthM } from "./infra-line.repository.js";
 import type { InfraLine, InfraLinePatch, InfraLineRepository, InfraLineType } from "./infra-line.repository.js";
@@ -12,7 +12,7 @@ import { InMemoryPlotChangeLogRepository } from "./plot-change-log.repository.js
 import type { PlotChangeAction, PlotChangeLog, PlotChangeLogRepository } from "./plot-change-log.repository.js";
 import type { PlotPatch, PlotRecord } from "./plot.repository.js";
 import { PLOT_STATUSES, PLOT_TYPES } from "./plot.service.js";
-import type { PlotService, RegisterPlotInput } from "./plot.service.js";
+import type { PlotService, RegisterPlotInput, SplitPlotPiece } from "./plot.service.js";
 import { centroidOf, hullPolygon, ringPoints } from "./zone.geometry.js";
 import type { LngLat } from "./zone.geometry.js";
 import { InMemoryZoneRepository } from "./zone.repository.js";
@@ -612,6 +612,72 @@ export function createPlotHttpServer(
         send(response, 200, null, requestTraceId);
         return;
       }
+      // 合并/拆分：静态前缀路由，必须先于 /plots/:code 匹配，否则 merge/split 会被当成地块编码
+      if (url.pathname === `${API_PREFIX}/plots/merge` && request.method === "POST") {
+        const input = await readJson(request);
+        const parcelCodes = Array.isArray(input.parcelCodes) ? input.parcelCodes.map(String) : [];
+        if (parcelCodes.length < 2) {
+          send(response, 400, null, requestTraceId, "parcelCodes 至少需要两个地块编码");
+          return;
+        }
+        // 档案字段：字符串才覆盖、未传保持继承；exactOptionalPropertyTypes 下不能把 undefined 塞进可选属性
+        const optionalFields: Record<string, string> = {};
+        for (const key of ["parcelName", "soilType", "zoneCode", "plotType", "plotStatus", "currentCrop", "ownerName", "ownerPhone", "remark"] as const) {
+          if (typeof input[key] === "string") optionalFields[key] = input[key] as string;
+        }
+        const result = await service.mergePlots({
+          tenantId: tenantOf(request),
+          traceId: requestTraceId,
+          parcelCodes,
+          ...optionalFields,
+        });
+        // 留痕与归档解耦：合并已提交，日志写不进只告警，不回滚业务
+        await logChange(request, result.plot.parcelCode, "MERGE", `合并生成：由 ${result.sourceCodes.join("、")} 合并，面积 ${result.plot.areaMu} 亩（按合并边界现算）`);
+        for (const code of result.sourceCodes) {
+          await logChange(request, code, "DELETE", `已合并至 ${result.plot.parcelCode}（原地块归档，管线/种植季仍指向本编码，历史可回查）`);
+        }
+        send(response, 201, result, requestTraceId);
+        return;
+      }
+      if (url.pathname === `${API_PREFIX}/plots/split` && request.method === "POST") {
+        const input = await readJson(request);
+        const parcelCode = String(input.parcelCode ?? "").trim();
+        if (parcelCode === "") {
+          send(response, 400, null, requestTraceId, "parcelCode 不能为空");
+          return;
+        }
+        const rawPieces = Array.isArray(input.pieces) ? input.pieces : [];
+        if (rawPieces.length < 2) {
+          send(response, 400, null, requestTraceId, "pieces 至少需要两个子地块边界");
+          return;
+        }
+        const pieces: SplitPlotPiece[] = rawPieces.map((item) => {
+          const piece = (item ?? {}) as Record<string, unknown>;
+          return {
+            parcelName: String(piece.parcelName ?? ""),
+            geom: piece.geom as SplitPlotPiece["geom"],
+            ...(typeof piece.plotType === "string" ? { plotType: piece.plotType } : {}),
+            ...(typeof piece.plotStatus === "string" ? { plotStatus: piece.plotStatus } : {}),
+          };
+        });
+        const result = await service.splitPlot({
+          tenantId: tenantOf(request),
+          traceId: requestTraceId,
+          parcelCode,
+          pieces,
+          keepSource: input.keepSource === true,
+        });
+        const pieceCodes = result.plots.map((plot) => plot.parcelCode).join("、");
+        await logChange(request, result.sourceCode, result.sourceRemoved ? "DELETE" : "UPDATE",
+          result.sourceRemoved
+            ? `已拆分为：${pieceCodes}（原子地块合计 ${result.pieceAreaSum} 亩）`
+            : `拆分出 ${result.plots.length} 块子地块（保留原地块，未归档）`);
+        for (const plot of result.plots) {
+          await logChange(request, plot.parcelCode, "SPLIT", `拆分生成：由 ${result.sourceCode} 拆出，面积 ${plot.areaMu} 亩（按子地块边界现算）`);
+        }
+        send(response, 201, result, requestTraceId);
+        return;
+      }
       const codeMatch = url.pathname.match(new RegExp(`^${API_PREFIX}/plots/([^/]+)$`));
       const plotCode = codeMatch?.[1];
       const historyMatch = url.pathname.match(new RegExp(`^${API_PREFIX}/plots/([^/]+)/history$`));
@@ -665,7 +731,10 @@ export function createPlotHttpServer(
       send(response, 404, null, requestTraceId, "接口不存在");
     } catch (error) {
       const message = error instanceof Error ? error.message : "请求处理失败";
-      send(response, message.includes("不存在") ? 404 : 400, null, requestTraceId, message);
+      // BizError 自带 httpStatus（400/404/409），优先按它回状态码；
+      // 其余裸 Error（如 JSON 解析失败）维持旧口径按文案猜，兼容既有断言。
+      const status = error instanceof BizError ? error.httpStatus : message.includes("不存在") ? 404 : 400;
+      send(response, status, null, requestTraceId, message);
     }
   });
 }

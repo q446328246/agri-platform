@@ -140,8 +140,8 @@ export type InfraLineType = 'IRRIGATION_PIPE' | 'FERTILIZATION_PIPE' | 'ELECTRIC
 /** 种植季状态：计划中 / 种植中 / 已采收 */
 export type CropSeasonStatus = 'planned' | 'growing' | 'harvested';
 
-/** 地块变更动作：建档 / 更新 / 删除 */
-export type PlotChangeAction = 'CREATE' | 'UPDATE' | 'DELETE';
+/** 地块变更动作：建档 / 更新 / 删除 / 合并生成 / 拆分生成 */
+export type PlotChangeAction = 'CREATE' | 'UPDATE' | 'DELETE' | 'MERGE' | 'SPLIT';
 
 /** 地块变更历史条目（追加式留痕） */
 export interface PlotChangeLog {

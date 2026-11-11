@@ -64,6 +64,12 @@ const routes: RouteRecordRaw[] = [
             name: 'PlotDetail',
             component: () => import('@/views/plot/Detail.vue'),
             meta: { title: '地块详情', hidden: true, permission: 'plot:read' }
+          },
+          {
+            path: 'split/:id',
+            name: 'PlotSplit',
+            component: () => import('@/views/plot/Split.vue'),
+            meta: { title: '拆分地块', hidden: true, permission: 'plot:write' }
           }
         ]
       },

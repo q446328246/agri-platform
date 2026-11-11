@@ -7,6 +7,9 @@
           <el-button @click="goBack">
             <el-icon><ArrowLeft /></el-icon>返回
           </el-button>
+          <el-button type="warning" @click="handleSplit">
+            <el-icon><Scissor /></el-icon>拆分
+          </el-button>
           <el-button type="primary" @click="handleEdit">
             <el-icon><Edit /></el-icon>编辑
           </el-button>
@@ -99,10 +102,12 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import PlotBoundaryMap from '@/components/PlotBoundaryMap.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { plotApi, operationApi } from '@/api'
 import type { Plot, PlotChangeAction, PlotChangeLog } from '@/types'
+import { parsePlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 import {
   formatDateTime, formatArea,
   getPlotStatusText, getPlotStatusType, getPlotTypeText,
@@ -130,9 +135,11 @@ const recentTasks = ref<any[]>([])
 const changeLogs = ref<PlotChangeLog[]>([])
 
 const changeActionText = (action: PlotChangeAction): string =>
-  action === 'CREATE' ? '建档' : action === 'UPDATE' ? '修改' : '删除'
-const changeActionType = (action: PlotChangeAction): 'primary' | 'warning' | 'danger' =>
-  action === 'CREATE' ? 'primary' : action === 'UPDATE' ? 'warning' : 'danger'
+  action === 'CREATE' ? '建档' : action === 'UPDATE' ? '修改'
+    : action === 'MERGE' ? '合并生成' : action === 'SPLIT' ? '拆分生成' : '删除'
+const changeActionType = (action: PlotChangeAction): 'primary' | 'success' | 'warning' | 'danger' =>
+  action === 'CREATE' ? 'primary' : action === 'UPDATE' ? 'warning'
+    : action === 'MERGE' ? 'success' : action === 'SPLIT' ? 'success' : 'danger'
 
 async function loadDetail() {
   loading.value = true
@@ -172,6 +179,16 @@ function goBack() {
 
 function handleEdit() {
   router.push(`/plot/edit/${route.params.id}`)
+}
+
+/** 拆分要逐块画边界，无边界的地块先走编辑页补全，否则拆完面积没有几何依据 */
+function handleSplit() {
+  if (!plotData.value) return
+  if (!parsePlotBoundary(plotData.value as unknown as PlotBoundarySource)) {
+    ElMessage.warning('该地块暂无边界几何，请先在编辑页补画边界再拆分')
+    return
+  }
+  router.push(`/plot/split/${plotData.value.parcelCode}`)
 }
 
 // 同一路由记录换 id 时组件会复用，只靠 onMounted 会留在上一条地块

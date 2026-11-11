@@ -11,10 +11,10 @@ import { toIsoTimestamp } from "@agri/shared";
  * 因此这里只追加。历史从启用留痕起记录，启用前的存量地块不回补（不伪造过去的操作）。
  */
 
-/** 变更动作：建档 / 更新 / 删除 */
-export type PlotChangeAction = "CREATE" | "UPDATE" | "DELETE";
+/** 变更动作：建档 / 更新 / 删除 / 合并生成 / 拆分生成 */
+export type PlotChangeAction = "CREATE" | "UPDATE" | "DELETE" | "MERGE" | "SPLIT";
 
-export const PLOT_CHANGE_ACTIONS: PlotChangeAction[] = ["CREATE", "UPDATE", "DELETE"];
+export const PLOT_CHANGE_ACTIONS: PlotChangeAction[] = ["CREATE", "UPDATE", "DELETE", "MERGE", "SPLIT"];
 
 export interface PlotChangeLog {
   id: string;

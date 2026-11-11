@@ -16,7 +16,7 @@ const basePlot = {
   createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-03-01T00:00:00.000Z",
 };
 
-function mountDetail(history: unknown, historyImpl?: (code: string) => Promise<unknown>) {
+function mountDetail(history: unknown, historyImpl?: (code: string) => Promise<unknown>, options: { parseBoundary?: () => unknown } = {}) {
   vi.stubGlobal("HTMLElement", class {});
   const apiUrl = new URL("../src/api/index.ts", import.meta.url);
   const { plotApi, operationApi } = evaluateTs(readFileSync(apiUrl, "utf8"), apiUrl.pathname, {
@@ -26,8 +26,13 @@ function mountDetail(history: unknown, historyImpl?: (code: string) => Promise<u
   vi.spyOn(plotApi, "getById").mockResolvedValue(basePlot as any);
   vi.spyOn(operationApi, "getTasks").mockResolvedValue({ items: [], total: 0, page: 1, size: 50, pages: 0 } as any);
   const getHistory = vi.spyOn(plotApi, "getHistory").mockImplementation(historyImpl ?? (() => Promise.resolve(history)));
+  const back = vi.fn();
+  const push = vi.fn();
+  const warning = vi.fn();
   const view = mountView(new URL("../src/views/plot/Detail.vue", import.meta.url), {
-    "vue-router": { useRoute: () => ({ params: { id: "internal-uuid" } }), useRouter: () => ({ back: vi.fn(), push: vi.fn() }) },
+    "vue-router": { useRoute: () => ({ params: { id: "internal-uuid" } }), useRouter: () => ({ back, push }) },
+    "element-plus": { ElMessage: { success: vi.fn(), warning, error: vi.fn() } },
+    "@/utils/geo": { parsePlotBoundary: options.parseBoundary ?? (() => null) },
     "@/api": { plotApi, operationApi },
     "@/components/PlotBoundaryMap.vue": { name: "PlotBoundaryMap", render: () => null },
     "@/utils": {
@@ -42,7 +47,7 @@ function mountDetail(history: unknown, historyImpl?: (code: string) => Promise<u
     },
   });
   cleanups.push(view.unmount);
-  return { ...view, getHistory };
+  return { ...view, getHistory, back, push, warning };
 }
 
 describe("地块详情变更历史", () => {
@@ -62,6 +67,24 @@ describe("地块详情变更历史", () => {
     expect(state.changeActionType("CREATE")).toBe("primary");
     expect(state.changeActionType("UPDATE")).toBe("warning");
     expect(state.changeActionType("DELETE")).toBe("danger");
+    // 合并/拆分留痕同样要有中文标签，不能露出原始动作码
+    expect(state.changeActionText("MERGE")).toBe("合并生成");
+    expect(state.changeActionText("SPLIT")).toBe("拆分生成");
+    expect(state.changeActionType("MERGE")).toBe("success");
+    expect(state.changeActionType("SPLIT")).toBe("success");
+  });
+
+  it("拆分入口先校验边界：无边界提示补画，有边界才跳拆分页", async () => {
+    const withoutBoundary = mountDetail([]);
+    await flushView();
+    withoutBoundary.state.handleSplit();
+    expect(withoutBoundary.warning).toHaveBeenCalledWith("该地块暂无边界几何，请先在编辑页补画边界再拆分");
+    expect(withoutBoundary.push).not.toHaveBeenCalled();
+
+    const withBoundary = mountDetail([], undefined, { parseBoundary: () => ({ rings: [] }) });
+    await flushView();
+    withBoundary.state.handleSplit();
+    expect(withBoundary.push).toHaveBeenCalledWith("/plot/split/片区/东 01");
   });
 
   it("历史接口失败时仍显示档案，历史退回空态不阻断", async () => {

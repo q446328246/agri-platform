@@ -367,6 +367,15 @@
 - **诚实边界**：`plot_outbox` 只补「建档事件可靠落库并投递到 `event_log`」这一层；`PlotCreated` 目前**仍无下游服务订阅**，`plot-service` 内存消费者只校验面积、不构成跨进程消费链路。即事件已可靠待用，尚未接出。
 - **验证**：根 `npx tsc -b` 通过；`apps/plot-service/test/sql-plot-outbox.spec.ts` 4 用例（ISO 映射、脱离事务拒绝、事务内 jsonb 落库、markPublished/markFailed）全绿；一次性临时库 `agri_verify_tmp` 应用全部迁移（含 028）后跑真实 `registerPlot → relayOnce → 读 event_log`：地块与待投递记录同事务落库、中继后 `plot_outbox` 待投清零、`event_log` 恰一条 `plot.plot.created`（`producer=plot`、`trace` 透传）、二次中继幂等不新增，随后销毁；演示库 `agri` 全程未写（`plot_outbox` 在 `agri` 中不存在，迁移仅在部署时应用）。全量 `vitest` 中 6 个前端 view-harness 用例是并行负载下的 5s 超时抖动（隔离复跑 12/12、2.7s 全绿），非回归；本轮未改前端代码，`pnpm --filter @agri/web build` 通过。
 
+### 2026-11-11：PlotCreated 接入下游消费方与地块合并/拆分
+
+- **`PlotCreated` 下游消费（#82）**：`packages/contracts` 消息模板目录新增「地块建档通知」（`EventTopic.PlotCreated` → NOTICE/INFO，标题带地块编码，正文含名称/面积/土壤类型中文映射/归属农场，`dedupeKey` 用 `主题:eventId`）；`message-service` `MessageEventConsumer` 注册 `onPlotCreated` 处理器，走通用「模板渲染 → 偏好过滤 → 落库」链路。`plot-created-closure.spec.ts` 验证跨进程契约：建档事件经（内存同构的）`event_log` 中继后恰生成一条通知、位点提交后重投不重复；`preference.spec.ts` 基线同步。`#80` 一节的「仍无下游订阅」边界自此关闭。
+- **地块合并/拆分（#83）**：`PlotService.mergePlots` 以各源地块外环顶点的**凸包**为合并边界，面积一律按合并后几何现算（`polygonAreaMu → roundAreaMu`，不是源面积求和），源地块整批软删归档，挂在其上的管线与种植季保持指向旧编码（与普通删除口径一致）；`splitPlot` 由操作人逐块提交子地块边界（≥2 块、面积为正、单块不超过原地块台账面积 +0.01 亩容忍），每块面积按各自边界现算，源地块默认归档（可 `keepSource` 保留）。**已知口径**：选中互不相邻地块时凸包会框进中间空地，接口不回显源面积和、前端弹窗如实提示合并后须到编辑页复核边界。
+  - HTTP：`POST /api/v1/plots/merge`、`POST /api/v1/plots/split`（静态前缀路由置于 `/plots/:code` 之前）；建档/归档同事务写 `PlotCreated` 与变更留痕，异常改由 `BizError.httpStatus` 决定 400/404/409。
+  - 留痕：动作枚举扩为 `CREATE/UPDATE/DELETE/MERGE/SPLIT`（迁移 `029_plot_change_log_actions.sql` 放宽 027 的 CHECK，不产生失效历史行），源地块记「已合并至/已拆分为」、目标/子地块记「合并生成/拆分生成（按边界现算）」。
+  - 前端：`plot/List.vue` 勾选 ≥2 块弹「合并地块」对话框（源清单与面积、凸包警示）；`plot/Detail.vue` 新增「拆分」入口（无边界先提示补画）；新页 `plot/Split.vue`（路由 `/plot/split/:id`，`plot:write`）逐块绘制子边界——单编辑器实例按块切换、参考边界按原地块预填、合计超台账即时警示、确认弹窗列出将归档的源地块。
+- **验证**：根 `npx tsc -b`、`pnpm --filter @agri/web exec vue-tsc -b --force`、`pnpm --filter @agri/web build` 通过；`merge-split.spec.ts` 6 用例（凸包面积口径、源归档、留痕文案、空更新不落库、越权面积拒绝且无半成品写入、租户内新编码唯一）与 `plot-service` 全套 34/34 绿；前端 `plot-split-view.spec.ts` 6 用例（参考边界预填、面积预检、提交闭合环 GeoJSON、`plotApi.merge/split` 线格式）与 `plot-detail-history.spec.ts` 4 用例绿；全量 `vitest` 497 passed（5 个失败用例均为并行负载超时抖动，隔离复跑全绿）。一次性临时库 `agri_verify_tmp` 应用 `025`–`029` 后跑真实 SQL 往返：合并落库（目标在库、双源软删、MERGE 留痕含源编码与 actor）、拆分落库（子地块按几何面积、SPLIT/DELETE 留痕、029 CHECK 放行新动作）、超面积子地块 400 且零写入，验证后即销毁；**演示库 `agri` 全程未执行任何真实合并/拆分**。
+
 ## 下一步（中断后从这里继续）
 
 首版业务链路已闭环，剩余工作是业务子项补齐与外部依赖对接：
@@ -392,9 +401,9 @@
    - 覆盖式路径规划、真实农机调度：现有点到点导航不含地块全覆盖作业规划；
    - 决策侧内置图像识别模型、模型效果评审：识别仍由 `video-service` AI 事件承接，平台侧不内置/不评测模型；
    - 溯源下游环节（加工 / 物流 / 质检）：无外部系统可对接，`#77` 链条时间轴已如实标注为待接入，不编造节点；
-   - 双人复核、正式备份/恢复演练、性能与现场验收：属交付流程/现场验收项，非代码缺口；
-   - **地块合并 / 拆分**（`#79` 相关）：破坏性几何改写，需明确边界重划与历史归属口径，待用户确认后再做；
-   - **`PlotCreated` 下游消费**（`#80` 之后）：建档事件已可靠落 `plot_outbox` 并中继进 `event_log`，跨进程不再丢事件；但仍无服务订阅 `PlotCreated`，若要驱动下游需新增消费方（当前 `plot-service` 内存消费者只校验面积，不算消费链路）。
+   - 双人复核、正式备份/恢复演练、性能与现场验收：属交付流程/现场验收项，非代码缺口。
+   - ~~地块合并 / 拆分~~：`#83` 已实现（凸包合并 + 操作人逐块画界拆分，见 2026-11-11 一节）；破坏性操作只经用户在前端真实触发，不代跑演示库。
+   - ~~`PlotCreated` 下游消费~~：`#82` 已接入消息中心建档通知；`plot-service` 内存消费者仍只校验面积，属演示链路。
 
 ## 验证记录
 
@@ -701,3 +710,5 @@
 | 2026-11-07 | 首页菜单改为地图内浮层面板 | `dashboard/Index.vue`：菜单项由 `router.push` 改为 `openPanel`，右侧多标签浮层面板用 `defineAsyncComponent` 就地内嵌目标页组件（`panelComps` 映射 17 个顶级路由），支持切换/关闭/最大化/展开为完整页；菜单扩为 7 组覆盖全部页面并按 `checkPermission` 过滤 |
 | 2026-11-07 | `vue-tsc -b` + `vite build` | 均 exit 0（2314 模块，含内嵌页面异步 chunk） |
 | 2026-11-07 | 重建 edge + 产物核对 | `agri-platform-edge:local` 重建并 Recreated；`Index-*.js/css` 命中 `map-panel/ctl-cluster/panel-tabs`，`MainLayout-*.js` 命中“返回一张图”，全局一张图已部署 |
+| 2026-11-11 | `npx tsc -b` + `vue-tsc -b --force` + `vitest`（地块服务 34/34、拆分前端 6/6、详情 4/4） | 通过；全量 497 passed，5 个失败均为并行负载超时抖动（隔离复跑全绿），非回归 |
+| 2026-11-11 | 一次性库 `agri_verify_tmp` 合并/拆分 SQL 往返（迁移 025–029） | 通过：凸包合并落库+双源软删+MERGE/SPLIT 留痕+超面积 400 零写入，库随即销毁；演示库 `agri` 未执行真实合并/拆分 |

@@ -107,6 +107,19 @@ export const plotApi = {
     })
     return { succeededCodes, failedCodes }
   },
+  /**
+   * 合并地块：边界取源地块顶点凸包，面积由后端按合并边界现算；源地块整批归档。
+   * 互不相邻的地块凸包会框进中间空地，合并后请到编辑页复核边界。
+   */
+  merge(data: { parcelCodes: string[]; parcelName?: string; plotType?: PlotType; remark?: string }): Promise<{ plot: Plot; sourceCodes: string[] }> {
+    return post<{ plot: any; sourceCodes: string[] }>('/plots/merge', data)
+      .then((result) => ({ plot: normalizePlot(result.plot), sourceCodes: result.sourceCodes }))
+  },
+  /** 拆分地块：子块边界由页面绘制提交，面积各按子块几何现算；默认归档原地块 */
+  split(data: { parcelCode: string; pieces: Array<{ parcelName: string; geom: GeoPolygon }>; keepSource?: boolean }): Promise<{ plots: Plot[]; sourceCode: string; sourceRemoved: boolean; pieceAreaSum: number }> {
+    return post<{ plots: any[]; sourceCode: string; sourceRemoved: boolean; pieceAreaSum: number }>('/plots/split', data)
+      .then((result) => ({ ...result, plots: result.plots.map(normalizePlot) }))
+  },
   /** 一张图用：全量地块边界，不分页 */
   getBounds(): Promise<Array<{ parcelCode: string; parcelName: string; areaMu: number; geom: unknown }>> {
     return get('/plots/bounds')

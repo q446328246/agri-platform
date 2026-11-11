@@ -58,6 +58,9 @@
           <el-button type="danger" :disabled="!selectedCodes.length" :loading="deleting" @click="handleBatchDelete">
             <el-icon><Delete /></el-icon>批量删除
           </el-button>
+          <el-button type="warning" :disabled="selectedCodes.length < 2" @click="openMerge">
+            <el-icon><CopyDocument /></el-icon>合并地块
+          </el-button>
           <el-button :loading="exporting" @click="handleExport">
             <el-icon><Download /></el-icon>导出
           </el-button>
@@ -144,6 +147,32 @@
         />
       </div>
     </div>
+
+    <el-dialog v-model="mergeVisible" title="合并地块" width="560px">
+      <el-alert type="warning" :closable="false" show-icon class="merge-alert">
+        <template #title>合并后边界取所选地块的凸包，面积为凸包边界现算值；地块不相邻时会框进中间空地，请在合并后到编辑页复核边界。</template>
+      </el-alert>
+      <div class="merge-sources">
+        <div v-for="row in mergeRows" :key="row.parcelCode" class="merge-source">
+          <span>{{ row.name }}（{{ row.parcelCode }}）</span>
+          <span class="merge-source__area">{{ Number(row.areaMu ?? 0).toFixed(2) }} 亩</span>
+        </div>
+      </div>
+      <el-form label-width="90px">
+        <el-form-item label="合并后名称">
+          <el-input v-model="mergeForm.name" maxlength="40" :placeholder="mergeRows[0] ? `默认沿用「${mergeRows[0].name}」` : '请输入合并后名称'" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="mergeForm.remark" type="textarea" :rows="2" placeholder="可选，写入合并后地块档案" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="mergeVisible = false">取消</el-button>
+        <el-button type="warning" :loading="merging" @click="submitMerge">
+          确认合并 {{ mergeRows.length }} 块
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -317,6 +346,45 @@ function handleSelectionChange(selection: any[]) {
   selectedCodes.value = selection.map(item => item.parcelCode)
 }
 
+const mergeVisible = ref(false)
+const merging = ref(false)
+const mergeRows = ref<any[]>([])
+const mergeForm = reactive({ name: '', remark: '' })
+
+function openMerge() {
+  if (selectedRows.value.length < 2) {
+    ElMessage.warning('请至少勾选两个地块')
+    return
+  }
+  mergeRows.value = [...selectedRows.value]
+  mergeForm.name = ''
+  mergeForm.remark = ''
+  mergeVisible.value = true
+}
+
+async function submitMerge() {
+  if (merging.value) return
+  merging.value = true
+  try {
+    const codes = mergeRows.value.map((row) => row.parcelCode)
+    // 名称/备注留空即不发：合并后地块默认沿用首个源地块的档案，不发才不会被空串清掉
+    const result = await plotApi.merge({
+      parcelCodes: codes,
+      ...(mergeForm.name.trim() ? { parcelName: mergeForm.name.trim() } : {}),
+      ...(mergeForm.remark.trim() ? { remark: mergeForm.remark.trim() } : {}),
+    })
+    ElMessage.success(`已合并为「${result.plot.name}」· ${result.plot.areaMu.toFixed(2)} 亩，源地块已归档`)
+    mergeVisible.value = false
+    selectedCodes.value = []
+    selectedRows.value = []
+    await fetchList()
+  } catch (error) {
+    console.error('合并地块失败', error)
+  } finally {
+    merging.value = false
+  }
+}
+
 const exportHeaders = ['地块编码', '地块名称', '所属片区', '地块类型', '状态', '面积(亩)', '当前作物', '负责人', '创建时间']
 
 function toExportRow(plot: any) {
@@ -367,3 +435,10 @@ onMounted(() => {
   fetchList()
 })
 </script>
+
+<style scoped>
+.merge-alert { margin-bottom: 12px; }
+.merge-sources { max-height: 160px; overflow-y: auto; margin-bottom: 12px; border: 1px solid var(--el-border-color); border-radius: 4px; padding: 4px 10px; }
+.merge-source { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 13px; color: var(--el-text-color-regular); }
+.merge-source__area { font-variant-numeric: tabular-nums; }
+</style>
