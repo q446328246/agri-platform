@@ -406,7 +406,7 @@
 - **生命周期**：`QUEUED → SENT → ACKED → DONE`，任一在途状态（`QUEUED/SENT/ACKED`）都可被 `FAILED` 收口，终态不可再改。跃迁表与合法性判断放在 `control.repository.ts`（`TRANSITIONS` + `canTransition`），同态重复上报**不算跃迁**，由端点按幂等返回。
 - **迁移 `031_control_command_receipt.sql`**：重建 `status` CHECK 纳入 `ACKED/DONE`，`type` CHECK 纳入 `ESTOP`（急停与农事四类共用一条回执链路）；新增 `sent_at`/`acked_at`/`finished_at`/`receipt_message`/`result_json`/`version`；补 `receipt_order_check`（先下发、再接收、后结束，乱序时间直接拒绝）与在途部分索引 `idx_control_commands_open`（`WHERE status IN ('QUEUED','SENT','ACKED')`，终态行不参与扫描）。旧行全部落在新枚举子集内，不回填。**未应用到任何库**（按交付口径只在用户点名时迁移）。
 - **仓储双模**：`transition()` 内存与 SQL 同一套语义——SQL 侧先 `statusOf(id)` 取库内真实状态判合法（取不到行 = 非法，早退 `null`），再 `UPDATE ... WHERE id = $1 AND version = $2 RETURNING` 做乐观锁，状态列用 `CASE` 只写当前跃迁该落的时间戳，`receipt_message`/`result_json` 用 `COALESCE` 保留旧值；版本冲突返回 `null`，由 HTTP 层翻成 409。查询新增 `pending`（只看非终态）与 `pendingOverMin`（超时），SQL 用 `now() - COALESCE(acked_at, sent_at, created_at) > make_interval(mins => $n)`，内存实现同口径。
-- **超时不靠定时改状态**：`pendingMinutesOf(command, now)` 由 `COALESCE(ackedAt, sentAt, createdAt)` **现算**，HTTP 侧 `toView()` 给每条在途指令附 `pendingMin` 与 `overdue`；阈值走 `CONTROL_RECEIPT_TIMEOUT_MIN`（默认 15 分钟，`.env.example` 已登记）。这样既不虚构设备行为，也不会把演示库里的历史指令自动刷成 FAILED。031 也**不回填** `sent_at`：历史 `SENT` 行没有可信的下发时刻，宁可回退到 `created_at` 显示「已等待 N 分钟」，也不造一个假时间——因此演示库里那几条 `010` 种子的 SENT 指令会带「超时未回执」红标，这是如实反映「无人确认设备收到」，不是缺陷。
+- **超时不靠定时改状态**（`#95` 起改为「可见 + 自动收口」，口径同源不变，见下一节）：`pendingMinutesOf(command, now)` 由 `COALESCE(ackedAt, sentAt, createdAt)` **现算**，HTTP 侧 `toView()` 给每条在途指令附 `pendingMin` 与 `overdue`；阈值走 `CONTROL_RECEIPT_TIMEOUT_MIN`（默认 15 分钟，`.env.example` 已登记）。这样既不虚构设备行为，也不会把演示库里的历史指令自动刷成 FAILED。031 也**不回填** `sent_at`：历史 `SENT` 行没有可信的下发时刻，宁可回退到 `created_at` 显示「已等待 N 分钟」，也不造一个假时间——因此演示库里那几条 `010` 种子的 SENT 指令会带「超时未回执」红标，这是如实反映「无人确认设备收到」，不是缺陷。**注**：`#95` 上线后，SQL 模式的收口任务确实会把这批陈旧在途指令刷成 `FAILED`（并各推一条超时告警）——这正是「没人确认设备收到」的处置结果，不是数据损坏；不想动演示库就别启 `control-service` 的 HTTP 模式。
 - **设备通道（复用 `DEVICE_CALLBACK_TOKEN` 白名单思路）**：
   - `POST /api/v1/control/device/dispatch`：网关领取，`QUEUED → SENT`；未知指令 404，`FAILED` 后拒绝再下发 409，已推进过的幂等返回 200 现有记录（重试不用猜自己有没有领到）。
   - `POST /api/v1/control/device/receipt`：`status` 只收 `ACKED/DONE/FAILED`（想报 `SENT` → 400 并指明改用 `dispatch`）；`FAILED` 必须带 `message`；`at` 给了就必须可解析；`result` 必须是 JSON 对象；**急停 `ESTOP` 的 `DONE` 必须带 `result.confirmed === true`**，否则 400「必须带到位确认」——服务端硬约束，不靠前端勾选。非法跃迁 409 带上当前状态，版本冲突 409 提示刷新。
@@ -422,6 +422,23 @@
 - **归属来源**：HTTP 侧 `tenantOf(req)` 只认网关透传的可信 `x-tenant-id`（网关丢弃客户端自报头，见 2026-11-08 权限一节），请求体里的 `tenantId` 一律忽略；无会话身份的设备回调落到进程 `TENANT_ID`，再退演示租户。事件侧 `buildCommand` 用 `event.tenantId`——哪个租户的事件触发就记在哪个租户名下，不读进程配置。
 - **用例**：`receipt.spec.ts` 全部仓储调用改带租户，新增「跨租户 id 当作不存在」（内存：查/跃迁/分页互不串）与 HTTP「指令归属只认可信租户头，请求体自报无效」（`tenant-a` 建的指令 `tenant-b` 列表为空、下发 404，同租户下发 200）；真实库分支补「换租户跃迁不生效」且 `find("tenant-other", id)` 为 `null`；`consumer.spec.ts` 断言自动指令 `tenantId` 等于事件信封租户。测试的 POST/GET 一律显式带 `x-tenant-id`，不依赖进程环境变量。**未跑验证**（按交付口径）。
 - **口径说明**：`014_iot_devices.sql` 那句「设备域与 control_commands 一致按全局台账」自此只对**设备台账**成立，指令台账已改为按租户隔离；已在 `032` 注释里写明，不回改历史迁移。
+
+### 2026-11-12：超时未回执自动收口（`control_outbox` + `control.command.timeout`）
+
+- **问题**：`#94` 把超时做成「可见」——列表红标与 `overdue=true` 筛选，但在途指令本身永远不动。一条 `QUEUED` 可以停在「已入队」到天荒地老，看板越来越红却没有任何人被告知，急停类指令尤其危险。
+- **迁移 `033_control_outbox.sql`**：建 `control_outbox`（与 `plot_outbox`/`decision_outbox` 同构：`id/topic/payload_json/tenant_id/trace_id/producer/created_at/published_at/retry_count/last_error`）+ 待投递部分索引 `idx_control_outbox_pending`。**未应用到任何库**（按交付口径只在用户点名时迁移）。表缺失时收口事务直接报错回滚，状态不会被单改——不允许「改了状态但事件丢了」。
+- **契约**：`EventTopic.ControlCommandTimeout = "control.command.timeout"`，载荷 `CommandTimeoutPayload{commandId, parcelId, deviceId, commandType, pendingMin, timeoutMin, failedAt}`；消息模板 `commandTimeoutTemplate` 登记进 `MESSAGE_TEMPLATES`（`ALERT`；急停 `CRITICAL`、其余 `WARNING`；`dedupeKey = 主题:commandId`，同一条指令重复收口只提醒一次）。新增主题自动出现在消息中心「订阅偏好」目录里（`mergePreferences` 遍历模板），缺省启用、最低 INFO。
+- **收口任务 `apps/control-service/src/receipt-sweeper.ts`**：
+  - **口径同源**：候选来自 `ControlCommandRepository.listOverdue(timeoutMin, nowMs, limit)`，SQL 用的谓词与列表 `overdue=true` 完全一致（`status IN ('QUEUED','SENT','ACKED')` + `now() - COALESCE(acked_at, sent_at, created_at) > make_interval(mins => $n)`），内存实现复用同一个 `isOverdue()`。不存在「页面标红」和「后台收口」两套超时定义。
+  - **跨租户、按行内归属收口**：候选查询不带租户条件（否则要给定时任务配一份租户清单，与演示租户写死同源），每行按自身 `tenantId` 调 `transition(command.tenantId, …)`，与 `video-service` 的 AI 事件转发同一套路子。
+  - **同事务**：`transition(…, tx)` 与 `outbox.enqueue(tx, …)` 跑在 `client.$transaction` 里；跃迁不成立（版本被现场回执抢走）就**不入队**，不留一条没人改状态的孤儿消息。构造时缺 `withTransaction` 又给了 `outbox` 直接抛错，杜绝「状态与事件分家」的装配。
+  - **与迟到回执公平竞争**：收口走合法跃迁 + `version` 乐观锁，谁先落到终态另一边拿 409，不悄悄覆盖任何一侧的结果；「设备到底做没做」交给超时告警走人工核查。
+  - 定时器 `setInterval(...).unref()`，间隔 `CONTROL_RECEIPT_SWEEP_INTERVAL_MS`（默认 60 秒，下限 1 秒），带 `running` 锁不叠扫，单轮上限 `batchSize`（默认 50），单条失败回调 `onError` 后留给下一轮。
+- **数值全部现算**：`pendingMin` 由 `pendingMinutesOf(command, now)` 取指令时间戳算，`timeoutMin` 由 `resolveReceiptTimeoutMin()` 取阈值（HTTP 列表与收口任务共用这一个函数），`failedAt` 即跃迁时刻——没有任何一处写死分钟数。
+- **装配**：`main.ts` HTTP 模式下 SQL 分支拉起 `SqlControlOutboxStore` + `OutboxService` 中继（`CONTROL_OUTBOX_RELAY_INTERVAL_MS`，默认 1 秒）与收口任务，`SIGINT/SIGTERM` 先停收口与中继再关服务；**内存模式不装消息表**（既无事务边界、事件也出不了本进程），只收口状态不发事件，这一点在装配注释里写明。
+- **消费**：`message-service` 的 `MessageEventConsumer` 补 `@registerHandler(EventTopic.ControlCommandTimeout)`，走通用「模板渲染 → 偏好过滤 → 落库」；`EventLogConsumer` 的订阅主题由处理器注册表推导，补处理器即补订阅。
+- **用例**：`receipt-sweeper.spec.ts`（只收口超时的在途指令、未到阈值与终态不动、再扫一轮不重复、`batchSize` 截断、事件归属/追踪/载荷取自指令且时长现算、缺事务句柄拒绝装配、带事务句柄时跃迁与入队同一 `tx`、现场回执抢版本时不收口也不留事件、单条失败不影响其余且回调 `onError`、跨租户候选各按行内租户收口）；`sql-control-outbox.spec.ts`（时间列映射 ISO、`enqueue` 脱离事务拒绝、`$3::jsonb` 落库、`markPublished/markFailed` 语句，外加 `describe.runIf(DB_URL)` 的真实库收口与「入队炸了跃迁跟着回滚」，候选限定自己造的指令、`finally` 清理）；`contracts/test/message-template.spec.ts` 补超时模板断言与模板主题清单；`message-service/test/command-timeout-closure.spec.ts` 验证事件 → 告警闭环、同指令不刷屏、急停级别更高。**未跑验证**（按交付口径）。
+- **前端**：`Commands.vue` 的「超时未回执」红标自此不再是纯展示——被收口的指令会以 `FAILED` 出现在台账里，回执说明写着「超过 N 分钟未收到设备回执（已等待 M 分钟），系统自动收口为失败」，消息中心同步出现告警。
 
 ## 下一步（中断后从这里继续）
 
@@ -454,7 +471,7 @@
    - ~~地块合并 / 拆分~~：`#83` 已实现（凸包合并 + 操作人逐块画界拆分，见 2026-11-11 一节）；破坏性操作只经用户在前端真实触发，不代跑演示库。
    - ~~`PlotCreated` 下游消费~~：`#82` 已接入消息中心建档通知；`plot-service` 内存消费者仍只校验面积，属演示链路。
 11. **待决（需用户点头，未擅自处理）**：
-   - 超时未回执只做了「可见」（列表标记 + `overdue=true` 筛选），**没有**自动置 `FAILED` 或推事件——自动改状态需要 `control_outbox` 落库 + 中继（现只有 `plot_outbox`），且会覆盖现场迟到的真实回执，等用户确认策略；
+   - ~~超时未回执只做了「可见」，没有自动置 `FAILED` 或推事件~~：`#95` 已做（迁移 `033` 建 `control_outbox` + `ControlReceiptSweeper` 同事务收口推事件 + 消息中心告警，见 2026-11-12 收口一节）。「会覆盖现场迟到的真实回执」这一顾虑按**先到先得**处理：收口与回执抢同一个 `version`，谁先到终态另一边拿 409，不做覆盖式改写；
    - `EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环；
    - ~~`control_commands` 无 `tenant_id`（多租户下指令台账互通）~~：`#97` 已做（迁移 `032` + 仓储首参 + 可信头归属，见 2026-11-12 租户隔离一节）；**设备台账 `iot_devices` 仍是全局台账**，是否一并隔离待决；
    - `.qoder/repowiki/**` 每次收尾都会被自动重生成（本轮 40+ 文件 M/D/??），与功能改动分开单独征询是否提交，目前仍未入库；

@@ -12,6 +12,7 @@ export const EventTopic = {
   DecisionPrescriptionIssued: "decision.prescription.issued",
   OperationTaskCompleted: "operation.task.completed",
   ControlIrrigationFinished: "control.irrigation.finished",
+  ControlCommandTimeout: "control.command.timeout",
   FinanceCostAccrued: "finance.cost.accrued",
 } as const;
 

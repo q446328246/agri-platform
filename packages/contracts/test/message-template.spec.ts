@@ -106,6 +106,28 @@ describe("消息模板与去重键", () => {
     expect(noSoil?.content).toContain("未登记");
   });
 
+  it("指令超时按指令唯一收口，急停级别更高", () => {
+    const payload = {
+      commandId: "cmd-7", parcelId: "P-6", deviceId: "device-irri-001", commandType: "IRRIGATION" as const,
+      pendingMin: 23, timeoutMin: 15, failedAt: "2026-11-05T01:40:00.000Z",
+    };
+    const draft = buildMessageDraft(EventTopic.ControlCommandTimeout, payload, context);
+    expect(draft).toMatchObject({ type: "ALERT", level: "WARNING", plotCode: "P-6" });
+    expect(draft?.title).toBe("指令超时未回执：P-6 灌溉");
+    expect(draft?.content).toContain("设备 device-irri-001");
+    expect(draft?.content).toContain("已等待 23 分钟");
+    expect(draft?.content).toContain("超过 15 分钟");
+    expect(draft?.occurredAt).toBe("2026-11-05T01:40:00.000Z");
+
+    // 同一条指令的重复收口只提醒一次；换指令才另开一条
+    const again = buildMessageDraft(EventTopic.ControlCommandTimeout, payload, { eventId: "evt-other", occurredAt: context.occurredAt });
+    expect(again?.dedupeKey).toBe(draft?.dedupeKey);
+    const estop = buildMessageDraft(EventTopic.ControlCommandTimeout, { ...payload, commandId: "cmd-8", commandType: "ESTOP" }, context);
+    expect(estop?.level).toBe("CRITICAL");
+    expect(estop?.title).toBe("指令超时未回执：P-6 急停");
+    expect(estop?.dedupeKey).not.toBe(draft?.dedupeKey);
+  });
+
   it("未登记模板的主题不生成消息，级别权重可比较", () => {
     expect(buildMessageDraft(EventTopic.OperationTaskCompleted, {}, context)).toBeNull();
     expect(isMessageTemplateTopic(EventTopic.TelemetryThresholdBreached)).toBe(true);
@@ -115,6 +137,7 @@ describe("消息模板与去重键", () => {
       EventTopic.TelemetryPestDetected,
       EventTopic.DecisionPrescriptionIssued,
       EventTopic.PlotCreated,
+      EventTopic.ControlCommandTimeout,
     ]);
     expect(MESSAGE_LEVEL_RANK.CRITICAL).toBeGreaterThan(MESSAGE_LEVEL_RANK.WARNING);
   });

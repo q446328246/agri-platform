@@ -1,5 +1,5 @@
 import type { PageResult } from "@agri/contracts";
-import type { PrismaClientLike } from "@agri/db";
+import type { PrismaClientLike, Tx } from "@agri/db";
 import { toIsoTimestamp } from "@agri/shared";
 
 /**
@@ -115,20 +115,38 @@ export interface ControlCommandRepository {
   create(command: ControlCommand): Promise<ControlCommand | null>;
   page(tenantId: string, query: ControlCommandQuery): Promise<PageResult<ControlCommand>>;
   find(tenantId: string, id: string): Promise<ControlCommand | null>;
-  /** 沿合法跃迁表推进状态；记录不存在、不属于该租户、版本过期或跃迁非法时返回 null */
-  transition(tenantId: string, transition: CommandTransition): Promise<ControlCommand | null>;
+  /** 沿合法跃迁表推进状态；记录不存在、不属于该租户、版本过期或跃迁非法时返回 null。
+   *  传入 tx 时读写都走该事务，供「跃迁 + 事件入队」原子提交。 */
+  transition(tenantId: string, transition: CommandTransition, tx?: Tx): Promise<ControlCommand | null>;
+  /** 跨租户捞出超时未回执的在途指令，按等待时长从久到新排序；调用方按行内 tenantId 收口 */
+  listOverdue(timeoutMin: number, nowMs: number, limit: number): Promise<ControlCommand[]>;
 }
 
 function toPage(items: ControlCommand[], total: number, page: number, size: number): PageResult<ControlCommand> {
   return { items, total, page, size, pages: Math.ceil(total / size) };
 }
 
+/** 指令在途起点：最后一次状态推进时间，没有推进过就是入队时间 */
+function overdueSinceMs(command: ControlCommand): number {
+  return Date.parse(command.ackedAt ?? command.sentAt ?? command.createdAt);
+}
+
 /** 在途时长（分钟），从最后一次状态推进时间起算；已结束的指令返回 undefined */
 export function pendingMinutesOf(command: ControlCommand, nowMs: number): number | undefined {
   if (!PENDING_STATUSES.includes(command.status)) return undefined;
-  const since = Date.parse(command.ackedAt ?? command.sentAt ?? command.createdAt);
+  const since = overdueSinceMs(command);
   if (!Number.isFinite(since)) return undefined;
   return Math.max(0, Math.round((nowMs - since) / 60000));
+}
+
+/**
+ * 是否已超时未回执：在途且等待时长达到阈值。
+ * 列表筛选与定时收口必须同一个判断，否则「页面上标红」和「后台真正收口」会变成两套口径。
+ */
+function isOverdue(command: ControlCommand, nowMs: number, timeoutMin: number | undefined): boolean {
+  if (timeoutMin === undefined) return true;
+  const waited = pendingMinutesOf(command, nowMs);
+  return waited !== undefined && waited >= timeoutMin;
 }
 
 const COLUMNS =
@@ -256,13 +274,15 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     return rows[0] ? toRecord(rows[0]) : null;
   }
 
-  async transition(tenantId: string, transition: CommandTransition): Promise<ControlCommand | null> {
+  async transition(tenantId: string, transition: CommandTransition, tx?: Tx): Promise<ControlCommand | null> {
     // 跃迁合法性按库内当前状态判定，调用方拿着陈旧记录也绕不过状态机；
     // 并发写入由 UPDATE 上的 version 条件拦住，跨租户按「不存在」处理，
     // 三种失败都收敛成 null（HTTP 侧分别回 409 / 409 / 404）。
-    const current = await this.statusOf(tenantId, transition.id);
+    // 带 tx 时读写都走同一事务，状态与 outbox 事件要么同时成功要么同时回滚。
+    const executor = tx ?? this.client;
+    const current = await this.statusOf(tenantId, transition.id, executor);
     if (current === null || !canTransition(current, transition.status)) return null;
-    const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
+    const rows = await executor.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `UPDATE control_commands
           SET status = $4,
               version = version + 1,
@@ -284,14 +304,30 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     return rows[0] ? toRecord(rows[0]) : null;
   }
 
-  private async statusOf(tenantId: string, id: string): Promise<ControlCommandStatus | null> {
-    const rows = await this.client.$queryRawUnsafe<Array<{ status: string }>>(
+  private async statusOf(tenantId: string, id: string, executor: PrismaClientLike | Tx = this.client): Promise<ControlCommandStatus | null> {
+    const rows = await executor.$queryRawUnsafe<Array<{ status: string }>>(
       "SELECT status FROM control_commands WHERE tenant_id = $1 AND id = $2",
       tenantId,
       id,
     );
     const status = rows[0]?.status;
     return status && (CONTROL_STATUSES as readonly string[]).includes(status) ? (status as ControlCommandStatus) : null;
+  }
+
+  async listOverdue(timeoutMin: number, nowMs: number, limit: number): Promise<ControlCommand[]> {
+    // 与列表筛选 overdue=true 同一个 SQL 口径，只是跨租户、且只取本轮要收口的那么几条；
+    // 排序按在途起点（最后一次状态推进时间）从久到新，最该收口的先处理。
+    const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
+      `SELECT ${COLUMNS}
+       FROM control_commands
+       WHERE status IN ('QUEUED', 'SENT', 'ACKED')
+         AND now() - COALESCE(acked_at, sent_at, created_at) > make_interval(mins => $1::int)
+       ORDER BY COALESCE(acked_at, sent_at, created_at), id
+       LIMIT $2`,
+      timeoutMin,
+      limit,
+    );
+    return rows.map(toRecord);
   }
 }
 
@@ -325,11 +361,7 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
       .filter((row) => (query.from ? row.createdAt >= query.from : true))
       .filter((row) => (query.to ? row.createdAt <= query.to : true))
       .filter((row) => (query.pending ? PENDING_STATUSES.includes(row.status) : true))
-      .filter((row) => {
-        if (query.pendingOverMin === undefined) return true;
-        const waited = pendingMinutesOf(row, nowMs);
-        return waited !== undefined && waited >= query.pendingOverMin;
-      });
+      .filter((row) => isOverdue(row, nowMs, query.pendingOverMin));
     const start = (query.page - 1) * query.size;
     return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
   }
@@ -339,7 +371,7 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     return row ? structuredClone(row) : null;
   }
 
-  async transition(tenantId: string, transition: CommandTransition): Promise<ControlCommand | null> {
+  async transition(tenantId: string, transition: CommandTransition, _tx?: Tx): Promise<ControlCommand | null> {
     const row = this.rows.find((item) => item.tenantId === tenantId && item.id === transition.id);
     if (!row || row.version !== transition.version || !canTransition(row.status, transition.status)) return null;
     row.status = transition.status;
@@ -350,6 +382,15 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     if (transition.message !== undefined) row.receiptMessage = transition.message;
     if (transition.result !== undefined) row.result = structuredClone(transition.result);
     return structuredClone(row);
+  }
+
+  async listOverdue(timeoutMin: number, nowMs: number, limit: number): Promise<ControlCommand[]> {
+    return this.rows
+      .filter((row) => PENDING_STATUSES.includes(row.status))
+      .filter((row) => isOverdue(row, nowMs, timeoutMin))
+      .sort((a, b) => overdueSinceMs(a) - overdueSinceMs(b) || a.id.localeCompare(b.id))
+      .slice(0, limit)
+      .map((row) => structuredClone(row));
   }
 
   /** 全部指令，供测试断言 */

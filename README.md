@@ -233,10 +233,11 @@ agri-platform-nodejs-scaffold/
   也校验合计不超过原地块 + `0.01 × 子块数`**（`PlotService.splitPlot`，超限在事务前拒绝、零写入）。拆分页只把原边界
   预填进第 1 块子地块作参照，其余块从零画起：逐块复制整份原边界会让「只改一块」的切法把原面积重复计入，
   演示库曾因此多计 61.5 亩；合计超限时前端红字提示并禁用提交，与服务端同口径。
-- **事件不丢也不重**：决策 / 遥测 / 农事 / 地块服务把业务数据与待投递事件写入同一事务（各自 `*_outbox` 表），
+- **事件不丢也不重**：决策 / 遥测 / 农事 / 地块 / 控制服务把业务数据与待投递事件写入同一事务（各自 `*_outbox` 表），
   事务提交后由中继投递；消费侧用 `eventId` 幂等去重，重试按指数退避，超出次数转死信。
   地块建档走 `plot_outbox`（迁移 028），SQL 模式 HTTP 启动后周期性中继把 `PlotCreated` 写入共享 `event_log`，
   跨进程可靠；`message-service` 已订阅 `PlotCreated` 生成「地块建档通知」（模板渲染 → 偏好过滤 → 落库，按 `eventId` 幂等）。
+  控制指令的超时收口走同一套 `control_outbox`（迁移 033）：收口任务在事务内改状态并入队，中继再投递。
 - **跨进程事件靠事件日志**：`event_log` 按主题递增位点，`event_log_offsets` 记录消费者组位点；
   生产侧用 `EventLogPublisher`，消费侧用 `EventLogConsumer` 轮询，便于横向扩容与重放。
 - **处方要能被调优**：处方执行后必须回写实际效果，`evaluateOutcome` 给出阈值建议，
@@ -255,9 +256,13 @@ agri-platform-nodejs-scaffold/
   领取、`POST /control/device/receipt` 回执（迁移 031 补时间戳、结果快照与时序 CHECK）。该通道与遥测、视频 AI
   回调共用 `DEVICE_CALLBACK_TOKEN`，路径特意做成扁平的 `/device/*` 而非挂在 `/commands` 下——白名单匹配是
   前缀式的，挂上去等于把建指令的写权限一起交给设备令牌。急停（`ESTOP`）的 `DONE` **必须**带
-  `result.confirmed=true`，服务端拒绝「没人确认设备真停了」就结单。超时未回执只做**可见**不做**自动置败**：
+  `result.confirmed=true`，服务端拒绝「没人确认设备真停了」就结单。超时未回执**既可见、也会被自动收口**：
   `pendingMin`/`overdue` 由 `COALESCE(acked_at, sent_at, created_at)` 与 `CONTROL_RECEIPT_TIMEOUT_MIN`（默认 15 分钟）
-  现算，定时刷 FAILED 会覆盖现场迟到的真实回执，需要 `control_outbox` 与事件推送配合，属待决项。
+  现算，`ControlReceiptSweeper` 每 `CONTROL_RECEIPT_SWEEP_INTERVAL_MS`（默认 60 秒）用**同一个** SQL 谓词跨租户捞出
+  在途超时指令，走合法跃迁置 `FAILED`，并**在同一事务**写 `control_outbox`（迁移 033）；中继按
+  `CONTROL_OUTBOX_RELAY_INTERVAL_MS` 把 `control.command.timeout` 投进共享事件日志，消息中心据此生成告警
+  （急停为 CRITICAL，其余 WARNING，按指令 id 聚合不刷屏）。收口与迟到的真实回执抢同一个 `version`，
+  先到先得：谁先落到终态另一边拿 409，不悄悄覆盖任何一侧的结果，「设备到底做没做」交给超时告警去人工确认。
 - **指令台账按租户隔离**：迁移 `032` 给 `control_commands` 补 `tenant_id`（`DEFAULT 'tenant-demo'`，存量行含
   `010` 种子全部属演示租户，常量默认值不重写表）。仓储的读、写、跃迁都以 `tenantId` 为首参，跨租户的 id
   一律当作不存在——查不到 404、跃不动返回 `null` 翻成 409，与 `operation_tasks`/`video_ptz_commands` 同口径。

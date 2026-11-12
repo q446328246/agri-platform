@@ -56,6 +56,12 @@ export class MessageEventConsumer {
     await this.deliver(event);
   }
 
+  /** 指令超时收口：生成告警消息，提示人工核查设备到底做没做 */
+  @registerHandler(EventTopic.ControlCommandTimeout)
+  async onCommandTimeout(event: DomainEvent<unknown>): Promise<void> {
+    await this.deliver(event);
+  }
+
   /**
    * 通用投递：模板渲染 → 偏好过滤 → 落库。
    * 未登记模板的主题直接跳过，便于后续扩展主题时先加模板再加订阅。

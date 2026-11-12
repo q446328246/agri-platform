@@ -1,4 +1,4 @@
-import type { PestDetectedPayload, PlotCreatedPayload, PrescriptionIssuedPayload, ThresholdBreachedPayload } from "../events/payload.js";
+import type { CommandTimeoutPayload, PestDetectedPayload, PlotCreatedPayload, PrescriptionIssuedPayload, ThresholdBreachedPayload } from "../events/payload.js";
 import { EventTopic } from "../events/topic.js";
 
 /**
@@ -180,12 +180,48 @@ const plotCreatedTemplate: MessageTemplate<PlotCreatedPayload> = {
   },
 };
 
+/** 指令类型中文名，缺省回落到类型编码 */
+const COMMAND_TYPE_LABELS: Record<CommandTimeoutPayload["commandType"], string> = {
+  SEEDING: "播种",
+  IRRIGATION: "灌溉",
+  WEEDING: "除草",
+  FERTILIZATION: "施肥",
+  ESTOP: "急停",
+};
+
+/**
+ * 指令超时未回执：系统将指令收口为失败，提示人工核查。
+ * 去重按指令唯一——FAILED 是终态，同一指令不会被收口两次。
+ */
+const commandTimeoutTemplate: MessageTemplate<CommandTimeoutPayload> = {
+  topic: EventTopic.ControlCommandTimeout,
+  label: "指令超时未回执",
+  type: "ALERT",
+  render(payload, context) {
+    const plotCode = payload.parcelId || "未绑定地块";
+    const type = COMMAND_TYPE_LABELS[payload.commandType] ?? payload.commandType;
+    return {
+      type: "ALERT",
+      // 急停收口意味着「没人确认设备停下来」，级别高于普通作业指令
+      level: payload.commandType === "ESTOP" ? "CRITICAL" : "WARNING",
+      title: `指令超时未回执：${plotCode} ${type}`,
+      content:
+        `设备 ${payload.deviceId} 的${type}指令已等待 ${payload.pendingMin} 分钟，超过 ${payload.timeoutMin} 分钟未收到回执，系统已收口为失败。` +
+        `请现场确认设备是否实际执行，必要时人工重新下发。`,
+      plotCode: payload.parcelId,
+      occurredAt: payload.failedAt || context.occurredAt,
+      dedupeKey: `${EventTopic.ControlCommandTimeout}:${payload.commandId}`,
+    };
+  },
+};
+
 /** 主题到模板的映射，新增消费主题时在这里登记 */
 export const MESSAGE_TEMPLATES = {
   [EventTopic.TelemetryThresholdBreached]: thresholdTemplate,
   [EventTopic.TelemetryPestDetected]: pestDetectedTemplate,
   [EventTopic.DecisionPrescriptionIssued]: prescriptionTemplate,
   [EventTopic.PlotCreated]: plotCreatedTemplate,
+  [EventTopic.ControlCommandTimeout]: commandTimeoutTemplate,
 } as const;
 
 /** 已登记模板的主题 */

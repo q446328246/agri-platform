@@ -111,6 +111,22 @@ export interface IrrigationFinishedPayload {
   finishedAt: string;
 }
 
+/** control.command.timeout —— 指令超时未回执，系统自动收口为失败 */
+export interface CommandTimeoutPayload {
+  commandId: string;
+  /** 指令归属地块，未绑定地块的指令为空串 */
+  parcelId: string;
+  deviceId: string;
+  /** 指令类型，与下发时的 ControlCommandType 同一口径 */
+  commandType: "SEEDING" | "IRRIGATION" | "WEEDING" | "FERTILIZATION" | "ESTOP";
+  /** 从最后一次状态推进到收口的等待时长，单位：分钟（现算，不写死） */
+  pendingMin: number;
+  /** 判定超时所用的阈值，单位：分钟 */
+  timeoutMin: number;
+  /** 收口时间 */
+  failedAt: string;
+}
+
 /** finance.cost.accrued —— 成本归集 */
 export interface CostAccruedPayload {
   parcelId: string;

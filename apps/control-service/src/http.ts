@@ -29,10 +29,18 @@ const COMMAND_TYPES: ControlCommandType[] = ["SEEDING", "IRRIGATION", "WEEDING",
 const RECEIPT_STATUSES: ControlCommandStatus[] = ["ACKED", "DONE", "FAILED"];
 
 /** 超时未回执的默认阈值（分钟），可用 CONTROL_RECEIPT_TIMEOUT_MIN 调整 */
-const DEFAULT_RECEIPT_TIMEOUT_MIN = 15;
+export const DEFAULT_RECEIPT_TIMEOUT_MIN = 15;
 
 /** 未配置 TENANT_ID 且请求没有可信租户头时的归属租户，与全仓演示租户同字面量 */
-const DEFAULT_TENANT = "tenant-demo";
+export const DEFAULT_TENANT = "tenant-demo";
+
+/**
+ * 超时阈值（分钟）：调用方给的覆盖值优先，其次环境变量，最后默认值。
+ * 列表标记与定时收口共用这一个函数，避免「页面标红」和「后台改状态」两套口径。
+ */
+export function resolveReceiptTimeoutMin(override?: number): number {
+  return Math.max(1, Number(override ?? process.env.CONTROL_RECEIPT_TIMEOUT_MIN ?? DEFAULT_RECEIPT_TIMEOUT_MIN) || DEFAULT_RECEIPT_TIMEOUT_MIN);
+}
 
 /** 列表与回执响应附带的在途信息 */
 type CommandView = ControlCommand & { pendingMin?: number; overdue: boolean };
@@ -150,7 +158,7 @@ export function createControlHttpServer(
   repository: ControlCommandRepository = new InMemoryControlCommandRepository(),
   options: { receiptTimeoutMin?: number } = {},
 ): Server {
-  const timeoutMin = Math.max(1, Number(options.receiptTimeoutMin ?? process.env.CONTROL_RECEIPT_TIMEOUT_MIN ?? DEFAULT_RECEIPT_TIMEOUT_MIN) || DEFAULT_RECEIPT_TIMEOUT_MIN);
+  const timeoutMin = resolveReceiptTimeoutMin(options.receiptTimeoutMin);
   return createServer(async (req, res) => {
     const traceId = trace(req);
     const url = new URL(req.url ?? "/", "http://localhost");
