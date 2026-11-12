@@ -285,7 +285,9 @@ export class FieldGateway {
     const on = !spec.stopOnly;
     await client.writeCoil(profile.switchCoil, on);
     if (await this.isFaulted(client, profile)) {
-      await this.channel.receipt(command.id, "FAILED", `设备故障输入置位（${hex(profile.faultInput)}）`);
+      // 刚写下去就撞上故障输入：先把线圈收回位再报失败，别让阀门挂在打开状态等人来关
+      await client.writeCoil(profile.switchCoil, false).catch(() => undefined);
+      await this.channel.receipt(command.id, "FAILED", `设备故障输入置位（${hex(profile.faultInput)}），已关线圈止损`);
       return;
     }
     this.jobs.set(command.id, {

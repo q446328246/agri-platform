@@ -6,7 +6,7 @@ import { authorizeRequest } from "@agri/shared";
 
 import { DEVICE_STATUSES, DEVICE_TYPES, DEFAULT_TENANT, InMemoryDeviceRepository } from "./device.repository.js";
 import type { Device, DeviceRepository, DeviceStatus, DeviceType, UpdateDeviceInput } from "./device.repository.js";
-import { DEFAULT_DEVICE_PROTOCOL, DEVICE_PROTOCOLS, normalizeBinding } from "./device-binding.js";
+import { DEFAULT_DEVICE_PROTOCOL, DEVICE_PROTOCOLS, fieldAccessCatalogue, normalizeBinding } from "./device-binding.js";
 import type { DeviceProtocol } from "./device-binding.js";
 
 /**
@@ -107,6 +107,12 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
           ...(binding ? { binding } : {}),
         });
         send(res, 201, created, traceId);
+        return;
+      }
+
+      // 现场接入目录：协议、剖面与缺省值只有服务端一份定义，配置弹窗按它渲染，不在前端复写点位与常量
+      if (req.method === "GET" && url.pathname === "/api/v1/devices/field-access") {
+        send(res, 200, fieldAccessCatalogue(), traceId);
         return;
       }
 

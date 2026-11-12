@@ -30,6 +30,7 @@
     "smoke:events": "pnpm run build && node scripts/smoke-events.mjs",
     "smoke:consumers": "pnpm run build && node scripts/smoke-consumers.mjs",
     "smoke:receipt": "pnpm run build && node scripts/smoke-command-receipt.mjs",
+    "smoke:protocol": "pnpm run build && node scripts/smoke-device-protocol.mjs",
     "smoke:messages": "pnpm run build && node scripts/smoke-message-preferences.mjs",
     "smoke:authz": "pnpm run build && node scripts/smoke-authz.mjs",
     "smoke:identity": "pnpm run build && node scripts/smoke-identity.mjs",

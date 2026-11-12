@@ -4,6 +4,7 @@ import type {
   CropSeason, CropSeasonStatus,
   PlotChangeLog,
   Device, DeviceRealtimeData,
+  DeviceFieldAccess, DeviceModbusBinding,
   FarmTask, FarmTaskQuery,
   DashboardStats,
   PageResult, LoginParams, LoginResult,
@@ -360,19 +361,23 @@ export const dashboardApi = {
 }
 
 export const iotApi = {
-  /** 设备台账：关键词命中名称/编号，类型、状态、地块精确筛选，分页真实生效 */
-  getDevices(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; type?: string | undefined; status?: string | undefined; plotCode?: string | undefined }): Promise<PageResult<any>> {
+  /** 设备台账：关键词命中名称/编号，类型、状态、地块、接入协议精确筛选，分页真实生效 */
+  getDevices(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; type?: string | undefined; status?: string | undefined; plotCode?: string | undefined; protocol?: string | undefined }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/devices', cleanParams(params))
   },
   getDevice(id: string): Promise<any> {
     return get<any>(`/devices/${encodeURIComponent(id)}`)
   },
+  /** 现场接入目录：协议、剖面与端口/单元标识/超时缺省值由服务端给出，前端不复制这些常量 */
+  getFieldAccess(): Promise<DeviceFieldAccess> {
+    return get<DeviceFieldAccess>('/devices/field-access')
+  },
   /** 登记新设备：deviceNo 台账内唯一，type/status 取值见 utils/device.ts；返回的 lastSeenAt 为 null 表示尚未上报 */
-  createDevice(data: { deviceNo: string; name: string; type: string; status: 'ONLINE' | 'OFFLINE'; plotCode?: string | undefined }): Promise<any> {
+  createDevice(data: { deviceNo: string; name: string; type: string; status: 'ONLINE' | 'OFFLINE'; plotCode?: string | undefined; protocol?: string | undefined; binding?: DeviceModbusBinding | undefined }): Promise<any> {
     return post<any>('/devices', data)
   },
   /** 台账配置编辑：字段省略即不改，plotCode 传空串表示解绑地块；设备编号不可改 */
-  updateDevice(id: string, data: { name?: string; type?: string; status?: 'ONLINE' | 'OFFLINE'; plotCode?: string }): Promise<any> {
+  updateDevice(id: string, data: { name?: string; type?: string; status?: 'ONLINE' | 'OFFLINE'; plotCode?: string; protocol?: string; binding?: DeviceModbusBinding | null }): Promise<any> {
     return put<any>(`/devices/${encodeURIComponent(id)}`, data)
   }
 }

@@ -20,6 +20,7 @@ function mountDeviceList(query: Record<string, string>) {
     "@/types": types,
   });
   const getDevices = vi.spyOn(iotApi, "getDevices").mockResolvedValue({ items: [], total: 0 } as any);
+  vi.spyOn(iotApi, "getFieldAccess").mockResolvedValue({ protocols: [], defaultProtocol: "HTTP", profiles: [], defaults: { port: 0, unitId: 0, timeoutMs: 0 } } as any);
   vi.spyOn(plotApi, "getList").mockResolvedValue({ items: [], total: 0 } as any);
   const view = mountView(new URL("../src/views/device/List.vue", import.meta.url), {
     "vue-router": { useRoute: () => ({ query, params: {} }) },

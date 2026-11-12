@@ -286,6 +286,20 @@ agri-platform-nodejs-scaffold/
   处方下发的指令会把 `prescriptionId` 一路带进结单事件，`decision-service` 据此把实际用量回流到
   `decision_prescription_executions`（`GET /api/v1/decision/executions?prescriptionId=` 可查，按指令 id 幂等）；
   人工指令没有处方标识，回流直接跳过，效果评估（`POST /prescriptions/:id/outcome`）仍由人工在拿到复测墒情后触发。
+- **现场设备由平台侧网关下发**：泵、阀、水肥机讲的是 Modbus TCP——主站问、从站答，从站永远不主动连平台，
+  所以「等设备回调」这条老路对它们不成立。`apps/iot-service/src/modbus-tcp.ts` 把主站一侧做实（MBAP 组帧、
+  FC02 读离散输入、FC03 读保持寄存器、FC05 写线圈、异常响应与粘包定界），`field-gateway.ts` 的 `FieldGateway`
+  按台账轮询 `GET /control/device/pending`，领取后写线圈、回读运行/故障反馈，**回执仍走设备回调那两条接口**，
+  因此人工回填、超时收口、结单事件不必为它另开口径（`FIELD_GATEWAY_ENABLED=1` 才启动，默认关）。
+  协议与接入点位入台账（迁移 `038`）：`devices.protocol` + `binding` JSONB，CHECK 与仓储校验保证**协议与绑定同生同灭**
+  （改成回调式必须清掉绑定，改成现场协议必须给地址与剖面，剖面与设备类型不匹配直接 400）；线圈/反馈/故障/计量寄存器、
+  32 位字序与倍率都在 `MODBUS_PROFILES` 里按剖面定义，不散落在设备地址或前端文案。
+  **点位与缺省值只有一份**：`GET /api/v1/devices/field-access` 由服务端给出协议（含 `requiresBinding`）、剖面
+  （含 `applicableTypes` 与计量单位）和端口/单元标识/超时缺省，前端配置弹窗只渲染这份目录（留空即由服务端补缺省），
+  冒烟脚本的假从站也从同一张剖面表取点位。「开多久、开到多少」只认指令里 `parameters.plan`（入队时控制侧按分区
+  面积与灌水定额现算）或显式 `parameters.durationMin`；两个都没有就在碰硬件之前判 `FAILED`——把阀门开到一个没人
+  规定的时刻再收比拒绝执行更危险，处方自动指令的参数里没有分区，因此现场网关不执行它。有累计寄存器时按计划量提前
+  收口并上报**作业期间的增量**（不是表计读数），故障输入置位则先把线圈收回位再报失败，不给现场留一个挂在打开位的阀门。
 - **台账按租户隔离**：迁移 `032` 给 `control_commands` 补 `tenant_id`、迁移 `035` 给 `devices` 补 `tenant_id`
   （都取 `DEFAULT 'tenant-demo'`，存量行含 `010`/`014` 种子全部属演示租户，常量默认值不重写表）。仓储的读、写、
   跃迁都以 `tenantId` 为首参，跨租户的 id 一律当作不存在——查不到 404、跃不动返回 `null` 翻成 409，与
@@ -323,7 +337,9 @@ agri-platform-nodejs-scaffold/
 ## 五、已验证结果
 
 在本机 Node.js 24.16.0 / pnpm 12.16.1 环境下实际执行；2026-11-05 按交付清单完成全量复验
-（build、test、web build、9 个冒烟脚本与业务增强冒烟全部通过）：
+（build、test、web build、9 个冒烟脚本与业务增强冒烟全部通过）；2026-11-12 回执链路与现场硬件协议
+批次另做全量复验（`pnpm run build`、`npx vitest run` 651 passed / 0 失败、`vue-tsc -b --force`、
+`smoke:receipt` / `smoke:events` / `smoke:consumers` / `smoke:protocol` 四条冒烟全 PASS，演示库无残留）：
 
 | 验证项 | 命令 | 结果 |
 | --- | --- | --- |
@@ -343,6 +359,8 @@ agri-platform-nodejs-scaffold/
 | 演示数据逐页校验 | `pnpm smoke:demo` | 通过：37 项全 PASS（迁移 011 与条件查询改造后无回归） |
 | 条件查询冒烟 | `pnpm smoke:filters` | 通过：38 项全 PASS——地块类型/状态/土壤/作物/面积/非法枚举 400、设备类型/状态/地块/分页、任务与指令枚举+时间区间、核算筛选+汇总联动、溯源、视频、四情（指标/级别/虫情/总览联动）、消息级别与时间区间 |
 | 气象服务冒烟 | `pnpm smoke:weather` | 通过：13 项全 PASS——五日预报、作业提示+适宜性、逐小时 24 时次、days=2、预警、非法 level 400、实时气象站、农事建议、要素目录、历史曲线、非法 metric 400、决策处方 rainProbabilitySource=weather |
+| 回执链路冒烟 | `pnpm smoke:receipt` | 通过：下发确认 → 设备领取 → ACKED → DONE（急停靠 `confirmed` 到位）→ 结单事件入 `control_outbox` 与 `event_log` → 超时收口 |
+| 现场硬件协议冒烟 | `pnpm smoke:protocol` | 通过：独立实现的假 Modbus 从站 + 真实 TCP + 真实演示库——接入目录（协议/剖面/缺省值）→ 现场协议建档三种 400 → 缺省值按目录补齐 → 协议⇄绑定同生同灭 → 灌溉指令由网关写到线圈并靠反馈结单（线圈「开一次关一次」，上报量为表计增量而非累计读数，`waterVolumeSource=DEVICE`）→ 无执行包络的指令不动硬件直接失败 → 急停靠反馈消失到位 → 故障输入置位先关线圈止损 → 回调式设备网关不接管 |
 | 示例服务 | `pnpm run start:plot` | 建档、中继、消费、幂等链路跑通，输出如下 |
 
 ```json

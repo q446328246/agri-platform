@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Server } from "node:http";
 
 import { createIotHttpServer } from "../src/http.js";
-import { DEFAULT_TENANT, InMemoryDeviceRepository, demoDevices } from "../src/device.repository.js";
+import { DEFAULT_TENANT, DEVICE_TYPES, InMemoryDeviceRepository, demoDevices } from "../src/device.repository.js";
+import { DEFAULT_DEVICE_PROTOCOL, MODBUS_DEFAULT_UNIT_ID, DEVICE_PROTOCOLS } from "../src/device-binding.js";
+import { MODBUS_TCP_DEFAULT_PORT, MODBUS_TCP_DEFAULT_TIMEOUT_MS } from "../src/modbus-tcp.js";
 
 /**
  * 设备台账接口验证：列表筛选与分页、新增设备的校验与编号在租户内唯一、
@@ -324,5 +326,48 @@ describe("设备现场接入绑定", () => {
     expect(stillModbus.message).toContain("绑定");
     // 被拒的这次不改协议
     expect((await jsonOf(await fetch(`${base}/api/v1/devices/device-station-002`))).data.protocol).toBe("HTTP");
+  });
+
+  it("现场接入目录给出协议、剖面与缺省值，照它填的表单必然建得了档", async () => {
+    const base = await start(createIotHttpServer());
+    const catalogue = (await jsonOf(await fetch(`${base}/api/v1/devices/field-access`))).data;
+
+    expect(catalogue.protocols.map((item: { value: string }) => item.value)).toEqual([...DEVICE_PROTOCOLS]);
+    expect(catalogue.protocols.every((item: { label: string }) => item.label.length > 0)).toBe(true);
+    expect(catalogue.defaultProtocol).toBe(DEFAULT_DEVICE_PROTOCOL);
+    // 端口、单元标识、超时由协议侧常量给出：前端写死就等于允许界面和网关按两套口径连设备
+    expect(catalogue.defaults).toEqual({ port: MODBUS_TCP_DEFAULT_PORT, unitId: MODBUS_DEFAULT_UNIT_ID, timeoutMs: MODBUS_TCP_DEFAULT_TIMEOUT_MS });
+
+    for (const profile of catalogue.profiles) {
+      // 目录里每个剖面都要能按它的适用类型建成功：选项与校验同源，否则前端能选出一个后端拒绝的组合
+      const created = await fetch(`${base}/api/v1/devices`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          deviceNo: `DZ-CAT-${profile.key}`,
+          name: `目录校验用 ${profile.label}`,
+          type: profile.applicableTypes[0],
+          protocol: "MODBUS_TCP",
+          binding: { host: "10.9.9.9", profile: profile.key },
+        }),
+      });
+      expect(created.status).toBe(201);
+      // 表单只填地址与剖面时，缺省项按目录给的值补齐
+      expect((await jsonOf(created)).data.binding).toMatchObject({
+        port: catalogue.defaults.port,
+        unitId: catalogue.defaults.unitId,
+        timeoutMs: catalogue.defaults.timeoutMs,
+      });
+      // 计量剖面要把倍率、单位与字序展示出来：字序选错读回来的量完全不相干
+      if (profile.meter) {
+        expect(profile.meter).toMatchObject({ wordOrderLabel: expect.any(String), unit: expect.any(String) });
+        expect(profile.meter.scale).toBeGreaterThan(0);
+      }
+    }
+
+    // 目录只收执行类设备：表计没有可写线圈，配剖面等于对着墒情站下令
+    const profiledTypes: string[] = catalogue.profiles.flatMap((profile: { applicableTypes: string[] }) => profile.applicableTypes);
+    expect(profiledTypes.some((type) => ["WEATHER_STATION", "SOIL_SENSOR", "INTEGRATED_STATION", "REMOTE_SENSE"].includes(type))).toBe(false);
+    expect(DEVICE_TYPES.some((type) => !profiledTypes.includes(type))).toBe(true);
   });
 });

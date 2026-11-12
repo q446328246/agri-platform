@@ -81,6 +81,10 @@
         <el-descriptions-item label="类型">{{ deviceTypeLabel(selectedDevice.type) }}</el-descriptions-item>
         <el-descriptions-item label="状态">{{ getDeviceStatusText(selectedDevice.status) }}</el-descriptions-item>
         <el-descriptions-item label="所属地块">{{ selectedDevice.plotCode || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="接入方式">{{ protocolLabel(selectedDevice.protocol) }}</el-descriptions-item>
+        <el-descriptions-item v-if="selectedDevice.binding" label="现场接入">
+          {{ bindingSummary(selectedDevice.binding) }}
+        </el-descriptions-item>
         <el-descriptions-item label="最后在线">{{ formatDateTime(selectedDevice.lastSeenAt) }}</el-descriptions-item>
       </el-descriptions>
     </el-dialog>
@@ -149,6 +153,74 @@
             <el-radio v-for="item in deviceStatusOptions" :key="item.value" :value="item.value">{{ item.label }}</el-radio>
           </el-radio-group>
         </el-form-item>
+        <el-form-item label="接入协议" prop="protocol">
+          <el-select v-model="configForm.protocol" placeholder="请选择接入协议" style="width: 100%">
+            <el-option
+              v-for="item in protocolOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+              :disabled="item.unsupported"
+            />
+          </el-select>
+          <span class="form-hint">{{ protocolHint }}</span>
+        </el-form-item>
+        <template v-if="needsBinding">
+          <el-form-item label="寄存器剖面" prop="profile">
+            <el-select v-model="configForm.profile" placeholder="请选择现场剖面" style="width: 100%">
+              <el-option v-for="item in profileOptions" :key="item.key" :label="item.label" :value="item.key" />
+            </el-select>
+            <span v-if="selectedProfile" class="form-hint">
+              <template v-if="selectedProfile.meter">
+                累计量读保持寄存器 {{ hex(selectedProfile.meter.register) }}（{{ selectedProfile.meter.wordOrderLabel }}，每计数 {{ selectedProfile.meter.scale }} {{ selectedProfile.meter.unit }}），结单作业量按前后两次读数之差上报
+              </template>
+              <template v-else>无累计计量，结单只报到位与时长，不报作业量</template>
+            </span>
+          </el-form-item>
+          <el-form-item label="接入地址" prop="host">
+            <el-input v-model="configForm.host" placeholder="从站或现场网关地址，如 10.0.0.9" maxlength="64" />
+            <span class="form-hint">现场从站不会主动回调平台，网关按这个地址主动连过去写线圈、读反馈</span>
+          </el-form-item>
+          <el-form-item label="端口">
+            <el-input-number
+              v-model="configForm.port"
+              :min="1"
+              :max="65535"
+              :step="1"
+              :value-on-clear="null"
+              controls-position="right"
+              :placeholder="`${fieldAccess?.defaults.port ?? ''}`"
+              style="width: 100%"
+            />
+            <span class="form-hint">留空则用目录缺省端口 {{ fieldAccess?.defaults.port ?? '—' }}</span>
+          </el-form-item>
+          <el-form-item label="单元标识">
+            <el-input-number
+              v-model="configForm.unitId"
+              :min="0"
+              :max="255"
+              :step="1"
+              :value-on-clear="null"
+              controls-position="right"
+              :placeholder="`${fieldAccess?.defaults.unitId ?? ''}`"
+              style="width: 100%"
+            />
+            <span class="form-hint">直连从站一般为 {{ fieldAccess?.defaults.unitId ?? '—' }}，串口服务器下挂多台时逐台不同；留空取缺省</span>
+          </el-form-item>
+          <el-form-item label="事务超时">
+            <el-input-number
+              v-model="configForm.timeoutMs"
+              :min="100"
+              :max="60000"
+              :step="100"
+              :value-on-clear="null"
+              controls-position="right"
+              :placeholder="`${fieldAccess?.defaults.timeoutMs ?? ''}`"
+              style="width: 100%"
+            />
+            <span class="form-hint">单次 Modbus 事务的等待毫秒数，留空取缺省 {{ fieldAccess?.defaults.timeoutMs ?? '—' }}</span>
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="configVisible = false">取消</el-button>
@@ -242,10 +314,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import type { DeviceQuery } from '@/types'
+import type { DeviceFieldAccess, DeviceModbusBinding, DeviceQuery } from '@/types'
 import { formatDateTime, getControlTypeText, getDeviceStatusText, getDeviceStatusType } from '@/utils'
 import { deviceStatusOptions, deviceTypeLabel, deviceTypeOptions } from '@/utils/device'
 import { controlApi, iotApi, plotApi, type IrrigationPlan } from '@/api'
@@ -391,6 +463,39 @@ async function ensurePlotOptions() {
   }
 }
 
+/* ---------------- 现场接入目录 ---------------- */
+
+const fieldAccess = ref<DeviceFieldAccess | null>(null)
+
+/**
+ * 协议、剖面与缺省端口都由 iot-service 的接入绑定模块给，界面不抄第二份清单。
+ * 新增剖面或改缺省值时这里自动跟上，前端不会和网关按两套口径连设备。
+ */
+async function ensureFieldAccess() {
+  if (fieldAccess.value) return
+  try {
+    fieldAccess.value = await iotApi.getFieldAccess()
+  } catch (error) {
+    console.error('现场接入目录加载失败', error)
+  }
+}
+
+/** 寄存器地址在剖面表里是十进制，现场手册写十六进制，展示时统一成 0x 前缀 */
+function hex(value: number) {
+  return `0x${value.toString(16).toUpperCase().padStart(4, '0')}`
+}
+
+function protocolLabel(protocol?: string) {
+  if (!protocol) return '—'
+  return fieldAccess.value?.protocols.find((item) => item.value === protocol)?.label ?? protocol
+}
+
+/** 详情里的现场接入一行：地址、端口、单元标识与剖面名，缺一即说明台账没配全 */
+function bindingSummary(binding: DeviceModbusBinding) {
+  const profile = fieldAccess.value?.profiles.find((item) => item.key === binding.profile)
+  return `${binding.host}:${binding.port} · 单元标识 ${binding.unitId} · 剖面 ${profile?.label ?? binding.profile}`
+}
+
 /* ---------------- 台账配置 ---------------- */
 
 const configVisible = ref(false)
@@ -403,23 +508,87 @@ const configForm = reactive({
   name: '',
   type: '',
   plotCode: '' as string | undefined,
-  status: 'OFFLINE' as 'ONLINE' | 'OFFLINE'
+  status: 'OFFLINE' as 'ONLINE' | 'OFFLINE',
+  protocol: '',
+  // 绑定摊平成表单字段：留空的端口、单元标识与超时不发出去，由服务端按目录缺省补齐
+  host: '',
+  port: null as number | null,
+  unitId: null as number | null,
+  profile: '',
+  timeoutMs: null as number | null
 })
 
-const configRules: FormRules = {
+/** 要不要填绑定，问目录里该协议的 requiresBinding——服务端建档校验用的是同一个判定 */
+const needsBinding = computed(() => fieldAccess.value?.protocols.find((item) => item.value === configForm.protocol)?.requiresBinding ?? false)
+
+/** 剖面按设备类型过滤：给墒情站配启停剖面等于对着表计下令，服务端也会拒 */
+const profileOptions = computed(() => {
+  const catalogue = fieldAccess.value
+  if (!catalogue) return []
+  return catalogue.profiles.filter((item) => !configForm.type || item.applicableTypes.includes(configForm.type))
+})
+
+const protocolOptions = computed(() => {
+  const catalogue = fieldAccess.value
+  if (!catalogue) return []
+  return catalogue.protocols.map((item) => ({ ...item, unsupported: item.requiresBinding && profileOptions.value.length === 0 }))
+})
+
+const selectedProfile = computed(() => fieldAccess.value?.profiles.find((item) => item.key === configForm.profile) ?? null)
+
+const protocolHint = computed(() => {
+  if (!fieldAccess.value) return '现场接入目录加载中'
+  if (!needsBinding.value) return '设备自己把遥测与回执回调给平台，平台不主动连设备，无需填接入地址'
+  if (profileOptions.value.length === 0) return `设备类型 ${deviceTypeLabel(configForm.type)} 不是可执行设备，没有能下发的现场剖面，请先改设备类型`
+  return '平台侧现场网关按台账主动轮询：写启停线圈、读故障与运行反馈，再把回执收回指令队列'
+})
+
+// 类型改了原剖面就可能不再适用，清空让用户重选，而不是留一个服务端必拒的组合
+watch(() => configForm.type, () => {
+  if (configForm.profile && !profileOptions.value.some((item) => item.key === configForm.profile)) configForm.profile = ''
+})
+
+const configRules = computed<FormRules>(() => ({
   name: [{ required: true, message: '请输入设备名称', trigger: 'blur' }],
   type: [{ required: true, message: '请选择设备类型', trigger: 'change' }],
-  status: [{ required: true, message: '请选择在线状态', trigger: 'change' }]
-}
+  status: [{ required: true, message: '请选择在线状态', trigger: 'change' }],
+  protocol: [{ required: true, message: '请选择接入协议', trigger: 'change' }],
+  ...(needsBinding.value
+    ? {
+        host: [
+          { required: true, message: '请填写接入地址', trigger: 'blur' },
+          { pattern: /^\S+$/, message: '接入地址不能含空格', trigger: 'blur' }
+        ],
+        profile: [
+          {
+            validator: (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+              if (!value) callback(new Error('请选择现场剖面'))
+              else if (!profileOptions.value.some((item) => item.key === value)) callback(new Error(`剖面 ${value} 与设备类型 ${deviceTypeLabel(configForm.type)} 不匹配`))
+              else callback()
+            },
+            trigger: 'change'
+          }
+        ]
+      }
+    : {})
+}))
 
 async function openConfig(row: any) {
+  await ensureFieldAccess()
+  const binding = row.binding as DeviceModbusBinding | undefined
   Object.assign(configForm, {
     id: row.id,
     deviceNo: row.deviceNo,
     name: row.name,
     type: row.type,
     plotCode: row.plotCode || '',
-    status: row.status === 'ONLINE' ? 'ONLINE' : 'OFFLINE'
+    status: row.status === 'ONLINE' ? 'ONLINE' : 'OFFLINE',
+    protocol: row.protocol || fieldAccess.value?.defaultProtocol || '',
+    host: binding?.host ?? '',
+    port: binding?.port ?? null,
+    unitId: binding?.unitId ?? null,
+    profile: binding?.profile ?? '',
+    timeoutMs: binding?.timeoutMs ?? null
   })
   configFormRef.value?.clearValidate()
   configVisible.value = true
@@ -436,7 +605,19 @@ async function submitConfig() {
       type: configForm.type,
       status: configForm.status,
       // 空串是「解绑地块」的明确语义，必须原样发出去，不能转成 undefined
-      plotCode: (configForm.plotCode ?? '').trim()
+      plotCode: (configForm.plotCode ?? '').trim(),
+      protocol: configForm.protocol,
+      // 服务端口径：改了协议就必须配套给绑定，回调式则显式传 null 清掉历史地址，
+      // 否则网关会继续连一台已经改回回调的设备
+      binding: needsBinding.value
+        ? {
+            host: configForm.host.trim(),
+            profile: configForm.profile,
+            ...(configForm.port === null ? {} : { port: configForm.port }),
+            ...(configForm.unitId === null ? {} : { unitId: configForm.unitId }),
+            ...(configForm.timeoutMs === null ? {} : { timeoutMs: configForm.timeoutMs })
+          }
+        : null
     })
     const index = tableData.value.findIndex((item) => item.id === configForm.id)
     if (index >= 0) tableData.value[index] = toRow(updated)
@@ -597,6 +778,8 @@ onMounted(() => {
   // 一张图设备点位「设备台账」跳转带 plotCode 查询参数，进入即按该地块过滤
   const fromQuery = route.query.plotCode
   if (typeof fromQuery === 'string' && fromQuery) queryForm.plotCode = fromQuery
+  // 详情与配置都要按目录翻译协议、剖面，进页面先取一次，点开弹窗才不用等
+  void ensureFieldAccess()
   fetchList()
 })
 </script>

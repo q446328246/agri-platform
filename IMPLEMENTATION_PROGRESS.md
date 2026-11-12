@@ -561,7 +561,20 @@
 - **前端**：`farm/Task.vue` 操作列补真实「删除」按钮（确认框写清是归档、台账里仍可回查），走新增的 `operationApi.deleteTask`；`request.ts` 拦截器负责失败提示，页面只在 404 分支刷新列表让对方视角的结果呈现。
 - **迁移与验证**：`037_operation_task_soft_delete.sql`（加列 + 与 `plot_records` 同口径的部分索引 `WHERE deleted_at IS NULL`）已应用到演示库；`tsc -b apps/operation-service` 通过，内存模式 `http.spec.ts` 18 项（新增 3 项：归档语义、租户隔离、不重写完成事件）与关键词逐字段全绿，`DB_URL` 下 `sql-task-repository.spec.ts` 2 项全绿（SQL 侧新增归档后读不到 / 行仍在库里且 `status`、`version` 未变 / 重复归档与跃迁均拒 / 关键词逐字段）。
 
+### 2026-11-12：现场硬件协议（Modbus TCP 主站 + 台账绑定 + 网关闭环 + `pnpm smoke:protocol`）
+
+- **问题**：`#94` 之后回执链路是通的，但整条链路只有一个方向——平台等设备来 `POST /control/device/dispatch|receipt`。现场真正在用的泵阀与水肥机是 Modbus TCP 从站：主站问、从站答，从站不会主动连平台，也不会自己回调。于是「真实设备闭环」的缺口不在回执语义上，而在**没人开口问设备**（`#110` 的「7 添加真实硬件协议」）。本轮把主站这一侧做实，从协议编解码一直做到端到端冒烟。
+- **`#111` 协议层**（`apps/iot-service/src/modbus-tcp.ts`）：MBAP 头（事务 2 + 协议标识 2 + 长度 2 + 单元标识 1）组帧与定界，FC01/FC02 位读、FC03/FC04 寄存器读、FC05/FC06/FC0F/FC10 写，异常响应（`功能码|0x80` + 异常码）转 `ModbusException`；长度字段都不写死，寄存器/线圈数量与字节数按请求现算，32 位量由两个 16 位寄存器按剖面字序（HIGH_FIRST=ABCD / LOW_FIRST=CDAB）拼。`ModbusTcpClient` 是**长连接**：一个接入地址一条 socket，事务标识递增复用，超时/断连只断开这一条并让下次请求重连，且每个待决事务记住自己发在哪条连接上——旧连接的 `close` 事件不会误伤重连后的新事务。连接建立本身也有超时（现场常见「IP 通但端口没人听」，SYN 石沉大海不能把整轮网关挂住）。
+- **`#112` 台账**（迁移 `038` + `device-binding.ts`）：`devices` 补 `protocol` 与 `binding` JSONB，CHECK 保证协议与绑定**同生同灭**；点位表 `MODBUS_PROFILES`（启停线圈、运行/故障离散输入、累计计量寄存器 + 字序 + 倍率 + 单位）按设备类型划定适用范围。**反馈读 FC02 离散输入而不是 FC01 线圈**：刚写下去的线圈镜像会被当成「设备动了」，只读端子侧的独立输入才判得出真实到位。
+- **`#113` 队列**：`GET /api/v1/control/device/pending?deviceId=` 按「最老优先」返回该设备的在途指令，走的是设备通道同一套身份口径（`DEVICE_CALLBACK_TOKEN` 或可信头），网关不新增特权路径。
+- **`#114` 网关**（`field-gateway.ts`，`FIELD_GATEWAY_ENABLED=1` 才启动，默认关）：轮询现场协议设备 → 领指令 → 写线圈 → 读故障输入 → 报 `ACKED`；下一轮起按执行包络判收口，够了关线圈、读末次表计并结单，`result` 里带上实测作业量。三条硬口径：① 「开多久、开到多少」只认入队时控制侧按分区现算的 `parameters.plan` 或显式 `durationMin`，两者都算不出就在**领取之前**判 `FAILED`（把阀门开到一个没人规定的时刻再收更危险），所以处方自动指令（参数是 `items`、没有分区）目前现场网关不执行；② 有累计寄存器时上报**作业期间的增量**，网关重启丢掉基线就只报时长，绝不拿累计读数冒充本轮用量；③ 故障输入置位先把线圈收回位再报失败（`startJob` 这一分支是冒烟时发现的真缺口——原来只报 `FAILED` 不关线圈，等于给现场留一个挂在打开位的阀门）。急停反过来：只写停线圈，**运行反馈消失**才允许 `DONE` 且带 `confirmed: true`。
+- **`#115` 接入目录**（`GET /api/v1/devices/field-access`）：协议清单（含 `requiresBinding`）、剖面清单（含 `applicableTypes`、计量单位与寄存器）、端口/单元标识/超时缺省值由服务端一份目录给出，前端配置弹窗只渲染它——设备管理页此前把 Modbus 常量抄了一份，目录一改就会漂移。弹窗按目录出下拉、按设备类型过滤剖面、端口等三项留空就交回服务端补缺省（提交时直接不带键），协议切回回调式时把绑定清成 `null`；`requiresBinding` 读目录字段，不再在前端按协议名猜。路由顺序上这条固定路径必须排在 `devices/([^/]+)` 之前，否则被当成设备 id。
+- **`#116` 端到端冒烟**（`scripts/smoke-device-protocol.mjs` + `pnpm smoke:protocol`）：单测里的网关用的是注入的假客户端，报文帧、socket、长连接与「主站问、从站答」的时序都验不到。冒烟另起一个**独立实现**的假从站（自己按 MBAP/PDU 组帧，不复用平台侧编解码，否则两边同错就测不出来；点位地址与字序仍取自服务端剖面表，避免脚本抄一份点位表），真实 TCP、真实两个服务进程、真实演示库跑八段：目录形状与缺省协议是回调式（存量台账不受影响）→ 缺绑定/空地址/剖面不匹配三种 400 → 只给地址与剖面时端口·单元标识·超时按目录补齐 → 协议⇄绑定同生同灭 → 灌溉指令 `QUEUED→SENT→ACKED→DONE`（线圈恰好「开一次关一次」、单元标识到位、回执量与从站寄存器读数差逐位相等且远小于累计读数、`result_json` 与时间列落库、`control.irrigation.finished` 带 `waterVolumeSource: "DEVICE"` 进 `control_outbox` 与 `event_log`）→ 无包络指令 `FAILED` 且**零**线圈写入 → 急停靠反馈消失结单且全链零结单事件 → 故障输入 `FAILED` 且最后一次写入是关线圈 → 回调式设备的指令留在队列、从站零写入。收尾只允许可识别的那一条非终态指令（回调设备那条本来就该等它自己认领）。
+- **冒烟自身的两个坑**（都是真缺陷，不是脚本噪声）：`try` 开头第一段就问目录接口，而服务是在目录断言之后才 spawn——顺序改为先起服务再问目录；缺省值用例与回调用例复用了同一个设备编号，第二个 `POST` 会 409，拆成 `DZ-SMOKE-PROTOCOL-DEFAULTS` 并纳入清理清单。另一处挂死：从站 `server.close()` 的回调要等所有连接结束，而网关是长连接、脚本 `finally` 因此永远 await——改为先停止接听再掐断在用的 socket，并把「杀服务进程」提到关从站之前。
+
 ## 下一步（中断后从这里继续）
+
+
 
 > **交付口径（2026-11-11 起，用户长期要求）**：改完直接 `git commit` + `git push`，**不再**跑单元测试 / `tsc -b` / `pnpm build` / `smoke-*` 冒烟 / 浏览器实操验证，**不再**重建或重新部署 `app`、`edge` 镜像。迁移文件照常编写，只在用户点名时才应用到库；风险较高的改动收工时注明「未跑验证」即可。
 
@@ -584,7 +597,7 @@
 8. **已完成**：管理员强制同步接口 `POST /api/v1/weather/sync-now`，需 `weather:sync` 权限（网关与服务双侧拦截）；bypass `dailyCallLimit`不走上限判定；前端 `views/weather/Index.vue` 顶部同步条仅管理员可见。单测新增 4 个端点用例 + 1 个 force bypass 用例 + 1 个网关路由用例（共 +6）。
 9. **已完成**：和风 WebAPI v7→v1 接口迁移（`QWeatherMapper` 抽象、`createQWeatherClientV1`、经纬度参数、`X-QW-Api-Key`/JWT 认证、16 方位中文映射、severity/color 三向映射）；v1 无专属 Host 时自动不启动同步器，适配本地开发；旧接口可通过 `QWEATHER_API_VERSION=v7` 过渡。单测 +11（基线 216 → 227），冒烟 88 项全 PASS。
 10. **未完成 / 外部依赖（需外部条件或用户确认，未擅自伪造）**：
-   - 真实设备闭环：**平台侧的回执链路已补齐**（`#94`：`/control/device/dispatch` 领取 + `/control/device/receipt` 回执 + 急停到位确认 + 超时未回执标记，见 2026-11-12 一节）。仍缺的是**现场硬件与协议对接**——`dispatch`/`receipt` 的调用方（农机 T-Box、水肥机控制器、云台网关）需按此契约接入，平台不代替设备自发回执；
+   - 真实设备闭环：**平台侧两侧都补齐了**——回执侧（`#94`：`/control/device/dispatch` 领取 + `/control/device/receipt` 回执 + 急停到位确认 + 超时未回执标记）与**主动下发侧**（`#111`~`#116`：Modbus TCP 主站、台账协议/绑定、现场网关、端到端冒烟，见 2026-11-12「现场硬件协议」一节）。仍缺的是**现场设备本体**：真泵阀/水肥机的 Modbus 点位表（线圈、反馈、故障、计量寄存器与字序倍率）要与 `MODBUS_PROFILES` 对齐或新增剖面，农机 T-Box 与云台网关仍按 `dispatch`/`receipt` 契约自行回调，平台不代替设备自发回执；本轮**没有真实设备可连**，报文时序由独立实现的假从站验证，协议规范（Modbus V1.1b3）在本环境无外网，未逐条对照原文复核；
    - ~~覆盖式路径规划~~：`#92/#93` 已实现牛耕式全地块布带（见 2026-11-12 一节）；**真实农机调度**仍需现场硬件与协议对接，方案目前只落到「可叠加地图的连续路径 + 里程/耗时」，不下发到车；
    - 决策侧内置图像识别模型、模型效果评审：识别仍由 `video-service` AI 事件承接，平台侧不内置/不评测模型；
    - 溯源下游环节（加工 / 物流 / 质检）：无外部系统可对接，`#77` 链条时间轴已如实标注为待接入，不编造节点；
@@ -600,6 +613,7 @@
    - ~~合并的凸包口径：选中互不相邻地块会框进中间空地，是否改为要求相邻校验或允许手工改边界~~：已改为服务端硬校验（`merge.geometry.ts` + `PLOT-409-003` + `PLOT_MERGE_ADJACENCY_M`，见 2026-11-12「地块合并要求相邻」一节）。**仍待决**：连成一片但整体呈凹形的地块，凸包照样会吞中间空地——现在只在留痕里给出合并后面积，没有回显「凸包比源面积和多出多少」，也没给手工改边界的入口；
    - 演示库 `control_commands` 里还有 22 条 `036` 范围之外的陈旧 `QUEUED`（`id` 不带 `cmd-demo-` 前缀，2026-11-05 起人工/事件下发与冒烟残留，回执链路 `031` 上线前根本没法回执）。`control-service` 的 HTTP 模式只要跑满一个扫描周期（60 秒），收口任务就会把它们刷成 `FAILED` 并各推一条 `control.command.timeout` 告警。要么再来一次按「早于 `031` 建档」划范围的数据收口迁移（不推事件），要么认下「运行时收口 + 22 条告警」这个结果。
    - ~~`operation_tasks` 无软删列，删除语义与地块/片区口径不一致（历史行硬删后无法辨别）~~：已抹平（迁移 `037` + `TaskRepository.remove` + `DELETE /api/v1/farm-tasks/:id` + `farm/Task.vue` 真实删除按钮，见 2026-11-12「农事任务软删除」一节）。归档只盖 `deleted_at`，不改 `status`/`version`、不校验状态；**仍待决**：任务侧没有地块那样的变更历史表，归档行只能直连库回查，前端也没有「已归档」筛选入口。
+   - 现场网关的三条已知边界（`#114`，都是「宁缺不造」的结果，不是漏实现，见 2026-11-12「现场硬件协议」一节）：**① 处方自动指令不执行**——阈值/处方下发的指令参数是 `items`、没有分区，`executionPlanOf` 算不出 `plan`，网关就在领取之前判 `FAILED`。要么给处方侧补分区面积口径（`decision` 侧现在只有亩数与定额，未必等于泵阀分区的 `areaMu`），要么承认「自动处方只能生成人工待确认的指令」；**② 施肥量仍按方案（`PLAN`）**——`FERTILIZER_L` 剖面量出的是出液升数，换算千克需要料液密度，平台没有这个权威值，因此回执只报 `fertilizerLiters`，千克数仍由配方千克/亩 × 面积现算；**③ 网关默认关**（`FIELD_GATEWAY_ENABLED` 未设即不启动），部署编排里 `app` 容器目前没打开它——要不要在 compose 里给现场环境加这个开关，等真实设备到位再定。
 
 ## 验证记录
 
@@ -911,4 +925,6 @@
 | 2026-11-11 | 重建 `app`+`edge` 后经网关提交超限切法（92.25 亩地块，两块各 69.94 / 合计 139.88） | 400「子地块合计 139.88 亩超过原地块 92.25 亩」，演示库基线前后逐项相同（23 块 / 1271.07 亩、留痕 15、事件 26）→ 拒绝路径零写入；edge 产物含 `Split-CJcjH4nz.js` |
 | 2026-11-11 | 迁移 `030` 一次性库全量应用 + 演示库应用 + 冒烟复跑 | 8 行 / 6 类型 / 4 状态，016 CHECK 零违规，重放 `INSERT 0 0` 幂等；`agri` 基线仅任务数 0→8（地块 23 / 1271.07 亩、消息 35、留痕 15、事件 26 未动）；`smoke:demo` 37/37、`smoke:filters` 38/38 全 PASS（此前「农事任务 ≥8」与任务筛选两项 FAIL 转绿） |
 | 2026-11-12 | 覆盖式作业规划（`coverage.ts` + 两条 HTTP 路由 + 导航页双模式 + `coverage.spec.ts`） | **未跑验证**（按 2026-11-11 起的交付口径：不跑测试 / 不做 `tsc`、`build`，不重建镜像），仅静态核对字段口径与面积常数一致；风险点：新算法的条数/里程断言未经实际执行，前端未经浏览器操作确认 |
-| 2026-11-12 | 控制指令回执状态机（迁移 `031` + `control.repository.ts` 跃迁/乐观锁 + `/control/device/dispatch\|receipt` + 网关两条回调路由 + `Commands.vue` 生命周期列与回执弹窗 + `receipt.spec.ts`） | **未跑验证**，迁移也未应用到任何库。静态核对项：`SENT/ACKED/DONE`  CHECK 与 `PENDING_STATUSES`/`TRANSITIONS` 一致、`create` 的两处调用方（`http.ts`/`consumer.ts`）都补了必填 `version: 1`、`canTransition` 对未知状态返回 false、`callbackPaths` 用扁平 `/device` 不与 `/commands` 构成前缀关系、`smoke-consumers`/`smoke-gateway` 仍断言 `QUEUED` 未受影响、超时分钟数按 `COALESCE(acked,sent,created)` 手算复核（40/2/30 与终态四条 → overdue 命中 `cmd-old`+`cmd-sent`）。风险点：SQL 侧 `transition` 的 `CASE`/`COALESCE` 参数序（$1 id / $2 version / $3 status / $4 at / $5 message / $6 result）未经真实库执行；前端未经浏览器操作确认 |
+| 2026-11-12 | 控制指令回执状态机（迁移 `031` + `control.repository.ts` 跃迁/乐观锁 + `/control/device/dispatch\|receipt` + 网关两条回调路由 + `Commands.vue` 生命周期列与回执弹窗 + `receipt.spec.ts`） | 当时**未跑验证**（按 2026-11-11 起的交付口径），迁移也未应用。静态核对项：`SENT/ACKED/DONE`  CHECK 与 `PENDING_STATUSES`/`TRANSITIONS` 一致、`create` 的两处调用方（`http.ts`/`consumer.ts`）都补了必填 `version: 1`、`canTransition` 对未知状态返回 false、`callbackPaths` 用扁平 `/device` 不与 `/commands` 构成前缀关系、`smoke-consumers`/`smoke-gateway` 仍断言 `QUEUED` 未受影响、超时分钟数按 `COALESCE(acked,sent,created)` 手算复核（40/2/30 与终态四条 → overdue 命中 `cmd-old`+`cmd-sent`）。~~风险点：SQL 侧 `transition` 的 `CASE`/`COALESCE` 参数序未经真实库执行~~（本轮已按「2 验证」跑全量并落库复验，见下面两行） |
+| 2026-11-12 | 本轮（现场硬件协议）批量验证：`pnpm run build` + `npx vitest run` 全量 + `vue-tsc -b --force` | **用户临时恢复验证**（长期口径仍是「不跑测试」，仅本批次有效）：`tsc -b` exit 0；全量 vitest **90 passed / 9 skipped 文件，651 passed / 18 skipped 用例，0 失败**（含 iot 网关 10 项、`http.spec.ts` 14 项、新增前端 `device-field-access.spec.ts` 6 项）；`vue-tsc -b --force` exit 0 |
+| 2026-11-12 | `node scripts/smoke-device-protocol.mjs`（新 `pnpm smoke:protocol`）+ 复跑 `smoke-command-receipt` / `smoke-events` / `smoke-consumers` | 现场协议冒烟 **SMOKE PASS**（8.3 秒，独立假从站 + 真实 TCP + 真实演示库八段闭环）；三条既有冒烟同轮全 PASS，回执链路未因网关闭环回归。**演示库零残留**：`devices` 无 `DZ-SMOKE%` 行、`P-SMOKE-PROTOCOL` 指令与 `control_outbox` 均为 0，基线未动（地块 23 / 1271.07 亩、事件 46、指令 28、任务 8）。未做：镜像重建与部署（长期口径保持不变） |

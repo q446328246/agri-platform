@@ -20,6 +20,17 @@ export type DeviceProtocol = (typeof DEVICE_PROTOCOLS)[number];
 /** 缺省协议：既有台账与存量行都是回调式接入，不因为本迁移改变行为 */
 export const DEFAULT_DEVICE_PROTOCOL: DeviceProtocol = "HTTP";
 
+/**
+ * 这个协议是否需要现场接入绑定。
+ *
+ * 回调式（缺省协议）由设备自己把遥测和回执 POST 回来，平台没有要连的地址；
+ * 其余协议由平台侧网关主动连过去，必须给出地址与剖面。
+ * 建档校验、错误文案与前端表单都问这一个函数，避免「后端要不要绑定」和「界面显示不显示绑定」各判一次。
+ */
+export function protocolRequiresBinding(protocol: DeviceProtocol): boolean {
+  return protocol !== DEFAULT_DEVICE_PROTOCOL;
+}
+
 /** Modbus 单元标识缺省值：直连从站时手册常写 1，串口网关下挂多台时逐台不同 */
 export const MODBUS_DEFAULT_UNIT_ID = 1;
 
@@ -91,11 +102,54 @@ export const MODBUS_PROFILES: Record<string, ModbusProfile> = {
 
 export const MODBUS_PROFILE_KEYS = Object.keys(MODBUS_PROFILES);
 
+/** 接入协议的可读名字：配置弹窗与网关日志说同一套话，不在前端再抄一份清单 */
+export const DEVICE_PROTOCOL_LABELS: Record<DeviceProtocol, string> = {
+  HTTP: "设备回调（设备自己上报）",
+  MODBUS_TCP: "现场总线 Modbus TCP（平台主动轮询）",
+};
+
+/** 字序的可读名字：剖面里的计数拼法只有两种，但选错会把用量读成完全不相干的数 */
+export const MODBUS_WORD_ORDER_LABELS: Record<ModbusWordOrder, string> = {
+  HIGH_FIRST: "高字在前（ABCD）",
+  LOW_FIRST: "低字在前（CDAB）",
+};
+
 /** 按 key 取剖面：未知 key 直接报错，不让网关拿着 undefined 去写线圈 */
 export function getModbusProfile(key: string): ModbusProfile {
   const profile = MODBUS_PROFILES[key];
   if (!profile) throw new Error(`现场剖面 ${key} 未定义，可用取值：${MODBUS_PROFILE_KEYS.join("/")}`);
   return profile;
+}
+
+/**
+ * 现场接入目录：表单要渲染的协议、剖面与缺省值全部由这里给。
+ *
+ * 端口、单元标识、超时、剖面点位都只有服务端一份权威定义，前端写死就等于允许界面
+ * 与网关按两套口径连设备；新增剖面时前端不用改。
+ */
+export function fieldAccessCatalogue(): FieldAccessCatalogue {
+  return {
+    protocols: DEVICE_PROTOCOLS.map((value) => ({ value, label: DEVICE_PROTOCOL_LABELS[value], requiresBinding: protocolRequiresBinding(value) })),
+    defaultProtocol: DEFAULT_DEVICE_PROTOCOL,
+    profiles: MODBUS_PROFILE_KEYS.map((key) => {
+      const profile = getModbusProfile(key);
+      return {
+        key,
+        label: profile.label,
+        applicableTypes: profile.applicableTypes,
+        meter: profile.meter === null ? null : { ...profile.meter, wordOrderLabel: MODBUS_WORD_ORDER_LABELS[profile.meter.wordOrder] },
+      };
+    }),
+    defaults: { port: MODBUS_TCP_DEFAULT_PORT, unitId: MODBUS_DEFAULT_UNIT_ID, timeoutMs: MODBUS_TCP_DEFAULT_TIMEOUT_MS },
+  };
+}
+
+/** 现场接入目录的形状 */
+export interface FieldAccessCatalogue {
+  protocols: Array<{ value: DeviceProtocol; label: string; requiresBinding: boolean }>;
+  defaultProtocol: DeviceProtocol;
+  profiles: Array<{ key: string; label: string; applicableTypes: DeviceType[]; meter: (ModbusMeter & { wordOrderLabel: string }) | null }>;
+  defaults: { port: number; unitId: number; timeoutMs: number };
 }
 
 /** MODBUS_TCP 设备的接入绑定 */
@@ -141,13 +195,13 @@ export function parseModbusBinding(raw: unknown, deviceType?: DeviceType): Modbu
   return { host, port, unitId, profile, timeoutMs };
 }
 
-/** 把绑定按协议收成待落库的形状；HTTP 设备恒为空 */
+/** 把绑定按协议收成待落库的形状；回调式接入恒为空 */
 export function normalizeBinding(protocol: DeviceProtocol, raw: unknown, deviceType?: DeviceType): ModbusBinding | null {
-  if (protocol === "HTTP") {
-    if (raw !== undefined && raw !== null) throw new Error("HTTP 回调式接入没有现场绑定，请先把接入协议改成 MODBUS_TCP");
+  if (!protocolRequiresBinding(protocol)) {
+    if (raw !== undefined && raw !== null) throw new Error(`${protocol} 回调式接入没有现场绑定，请先把接入协议改成 ${DEVICE_PROTOCOLS.filter(protocolRequiresBinding).join("/")}`);
     return null;
   }
-  if (raw === undefined || raw === null) throw new Error("MODBUS_TCP 接入必须给出绑定（host / port / unitId / profile）");
+  if (raw === undefined || raw === null) throw new Error(`${protocol} 接入必须给出绑定（host / port / unitId / profile）`);
   return parseModbusBinding(raw, deviceType);
 }
 

@@ -303,10 +303,10 @@ describe("现场协议网关", () => {
     startModbus.inputs.set(0x0001, true);
     const startGateway = new FieldGateway({ devices: ledgerOf([pump]), fetchImpl: startChannel.fetchImpl, clientFor: () => startModbus, now: startChannel.now });
     await startGateway.tick();
-    // 线圈已经写下去了，但读到故障输入就不再假装设备正常接住了指令
-    expect(startModbus.writes).toEqual([{ address: 0x0000, on: true }]);
+    // 线圈写下去了但读到故障输入：先收回线圈再报失败，不给现场留一个挂在打开位的阀门
+    expect(startModbus.writes).toEqual([{ address: 0x0000, on: true }, { address: 0x0000, on: false }]);
     expect(startChannel.receipt(faultAtStart.id)).toMatchObject({ status: "FAILED" });
-    expect(startChannel.receipt(faultAtStart.id)?.message).toContain("故障");
+    expect(startChannel.receipt(faultAtStart.id)?.message).toContain("止损");
 
     const faultRunning = command({ id: "cmd-fault-running", deviceId: pump.id, status: "ACKED" });
     const runningChannel = makeChannel([faultRunning]);

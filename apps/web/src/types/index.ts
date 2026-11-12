@@ -223,6 +223,38 @@ export interface DeviceQuery {
   type?: string | undefined;
   /** 所属地块编码，精确匹配 */
   plotCode?: string | undefined;
+  /** 接入协议：HTTP 为设备回调，MODBUS_TCP 由平台侧现场网关主动轮询 */
+  protocol?: string | undefined;
+}
+
+/**
+ * 现场接入绑定（Modbus TCP）。
+ *
+ * 端口、单元标识、超时都可以省略，服务端按 `DeviceFieldAccess.defaults` 补齐——
+ * 前端不写这些数，才不会和网关各按一份口径连设备。
+ */
+export interface DeviceModbusBinding {
+  host: string;
+  port?: number;
+  unitId?: number;
+  /** 寄存器剖面 key，取值见 DeviceFieldAccess.profiles */
+  profile: string;
+  timeoutMs?: number;
+}
+
+/** 现场接入目录：由 iot-service 的接入绑定模块直接给出，配置弹窗按它渲染选项 */
+export interface DeviceFieldAccess {
+  /** requiresBinding 由服务端判定：界面按它决定显不显示地址与剖面，不在前端再认一次协议名 */
+  protocols: Array<{ value: string; label: string; requiresBinding: boolean }>;
+  defaultProtocol: string;
+  profiles: Array<{
+    key: string;
+    label: string;
+    /** 可配用的台账类型：只有执行类设备能被网关写线圈 */
+    applicableTypes: string[];
+    meter: { register: number; wordOrder: string; wordOrderLabel: string; scale: number; unit: string } | null;
+  }>;
+  defaults: { port: number; unitId: number; timeoutMs: number };
 }
 export interface DeviceRealtimeData {
   deviceId: string;
