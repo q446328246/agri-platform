@@ -1,4 +1,4 @@
-现在我已经收集了足够的信息来更新API集成文档。基于分析，我发现了新增的覆盖规划API端点 `/api/v1/operations/coverage-plan` 和 `/api/v1/operations/coverage-plans`，这些是用于全地块覆盖式作业规划的接口。让我更新现有的文档：
+基于我的分析，我现在了解了更新的内容。让我更新API集成文档以反映smoke testing脚本的undefined字段处理和TypeScript编译修复：
 
 # API集成
 
@@ -19,20 +19,24 @@
 - [apps/iot-service/src/http.ts](file://apps/iot-service/src/http.ts)
 - [apps/iot-service/src/device.repository.ts](file://apps/iot-service/src/device.repository.ts)
 - [packages/shared/src/authz.ts](file://packages/shared/src/authz.ts)
+- [packages/shared/src/utils.ts](file://packages/shared/src/utils.ts)
 - [packages/contracts/src/dto/geo.dto.ts](file://packages/contracts/src/dto/geo.dto.ts)
 - [packages/contracts/src/messages/message-template.ts](file://packages/contracts/src/messages/message-template.ts)
 - [packages/contracts/src/index.ts](file://packages/contracts/src/index.ts)
+- [packages/tsconfig/base.json](file://packages/tsconfig/base.json)
+- [scripts/smoke-command-receipt.mjs](file://scripts/smoke-command-receipt.mjs)
+- [scripts/smoke-consumers.mjs](file://scripts/smoke-consumers.mjs)
 - [README.md](file://README.md)
 - [infra/postgres/migrations/014_iot_devices.sql](file://infra/postgres/migrations/014_iot_devices.sql)
 </cite>
 
 ## 更新摘要
 **变更内容**   
-- 新增覆盖规划API接口（POST /api/v1/operations/coverage-plan），支持全地块覆盖式作业规划，自动计算牛耕式作业带路径
-- 新增覆盖规划历史查询接口（GET /api/v1/operations/coverage-plans），返回最近20条覆盖方案记录
-- 扩展Web API客户端，添加planCoverage()和getCoveragePlans()方法，提供类型安全的覆盖规划操作
-- 完善覆盖规划业务逻辑，实现等距布带、蛇形往返、内环跳洞、方向自动挑选等核心算法
-- 增强参数验证机制，确保幅宽、重叠、坐标等参数的合法性
+- 增强了smoke测试脚本对undefined字段的处理，改进了控制指令回执链路的健壮性
+- 优化了TypeScript编译配置，启用更严格的类型检查选项（noUncheckedIndexedAccess、exactOptionalPropertyTypes）
+- 完善了服务间的undefined字段安全访问机制，避免运行时错误
+- 改进了命令回执状态机的时间字段处理，确保pendingMin和overdue字段的正确性
+- 增强了数据验证逻辑，对可选字段进行更安全的前端和后端处理
 
 ## 目录
 1. [简介](#简介)
@@ -57,7 +61,7 @@
 
 本项目采用前后端分离架构：前端基于Vue3 + Element Plus，通过Axios统一发起HTTP请求；网关服务负责路由转发；认证服务提供登录、鉴权与会话管理；业务服务（如地块服务、IoT设备服务、操作服务）实现领域接口。公共契约包集中定义跨端共享的类型与响应信封。
 
-**更新** 新增了覆盖规划API、完善的Web API客户端方法和增强的业务逻辑处理。
+**更新** 新增了smoke测试脚本的undefined字段处理增强和TypeScript编译配置优化，提升了系统的类型安全性和运行稳定性。
 
 ## 项目结构
 从API集成视角，关键目录与职责如下：
@@ -69,6 +73,8 @@
 - apps/operation-service：操作服务，提供导航规划和农事任务管理，新增覆盖规划功能
 - packages/contracts：公共契约包，定义跨端共享的响应信封、枚举、Geo DTOs和消息模板
 - packages/shared：共享工具包，提供权限验证、身份透传等通用功能
+- scripts：冒烟测试脚本，用于端到端功能验证
+- packages/tsconfig：TypeScript编译配置基座
 
 ```mermaid
 graph TB
@@ -81,6 +87,8 @@ GW --> OTHER["其他业务服务..."]
 FE --> TYPES["类型契约<br/>apps/web/src/types/index.ts"]
 SERVICES --> CONTRACTS["公共契约包<br/>packages/contracts/src/index.ts"]
 IOT --> SHARED["共享工具包<br/>packages/shared/src/authz.ts"]
+TESTING --> SMOKE["冒烟测试脚本<br/>scripts/*.mjs"]
+TS_CONFIG["TypeScript配置<br/>packages/tsconfig/base.json"]
 ```
 
 **图示来源**
@@ -91,6 +99,7 @@ IOT --> SHARED["共享工具包<br/>packages/shared/src/authz.ts"]
 - [apps/iot-service/src/http.ts:39-136](file://apps/iot-service/src/http.ts#L39-L136)
 - [apps/operation-service/src/http.ts:44-55](file://apps/operation-service/src/http.ts#L44-L55)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
+- [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)
 
 **章节来源**
 - [README.md:58-84](file://README.md#L58-L84)
@@ -108,8 +117,10 @@ IOT --> SHARED["共享工具包<br/>packages/shared/src/authz.ts"]
 - 消息模板系统：多主题模板、去重键生成、级别过滤
 - 类型契约：ApiResponse/PageResult等通用类型，以及领域模型与枚举
 - 权限验证：服务侧权限守卫、身份头透传、路径级权限覆盖
+- **TypeScript编译配置**：严格模式、空值检查、模块解析等编译选项
+- **冒烟测试脚本**：端到端功能验证，包含undefined字段处理增强
 
-**更新** 新增了覆盖规划服务的核心组件。
+**更新** 新增了TypeScript编译配置和冒烟测试脚本相关组件。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:5-109](file://apps/web/src/utils/request.ts#L5-L109)
@@ -123,9 +134,11 @@ IOT --> SHARED["共享工具包<br/>packages/shared/src/authz.ts"]
 - [apps/operation-service/src/navigation.ts:16-56](file://apps/operation-service/src/navigation.ts#L16-L56)
 - [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
 - [packages/shared/src/authz.ts:66-80](file://packages/shared/src/authz.ts#L66-L80)
+- [packages/shared/src/utils.ts:29-34](file://packages/shared/src/utils.ts#L29-L34)
 - [packages/contracts/src/messages/message-template.ts:62-81](file://packages/contracts/src/messages/message-template.ts#L62-L81)
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
+- [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)
 
 ## 架构总览
 下图展示一次典型API调用的端到端流程：前端通过Axios发起请求，携带Authorization与X-Request-Id；网关根据路径前缀转发到对应服务；认证服务负责鉴权与会话；业务服务返回统一响应信封。
@@ -621,6 +634,61 @@ PermissionCheck --> |是| Allow
 **章节来源**
 - [packages/shared/src/authz.ts:1-81](file://packages/shared/src/authz.ts#L1-L81)
 
+### TypeScript编译配置与类型安全
+- **严格模式**：启用strict选项，确保代码质量
+- **空值检查**：noUncheckedIndexedAccess防止数组索引访问时的undefined
+- **精确可选属性**：exactOptionalPropertyTypes确保可选属性的精确类型
+- **未知捕获变量**：useUnknownInCatchVariables提升错误处理安全性
+- **跳过库检查**：skipLibCheck提升编译性能
+- **ES模块支持**：module和moduleResolution设置为NodeNext
+- **断言工具**：assertDefined函数提供安全的字段验证
+
+```mermaid
+flowchart TD
+TSConfig["TypeScript配置"] --> Strict["strict: true"]
+TSConfig --> NoUnchecked["noUncheckedIndexedAccess: true"]
+TSConfig --> ExactOpt["exactOptionalPropertyTypes: true"]
+TSConfig --> UnknownCatch["useUnknownInCatchVariables: true"]
+TSConfig --> SkipLib["skipLibCheck: true"]
+Strict --> TypeSafety["类型安全保障"]
+NoUnchecked --> SafeAccess["安全访问"]
+ExactOpt --> PreciseTypes["精确类型"]
+UnknownCatch --> SafeErrors["安全错误处理"]
+SkipLib --> FastCompile["快速编译"]
+```
+
+**图示来源**
+- [packages/tsconfig/base.json:4-21](file://packages/tsconfig/base.json#L4-L21)
+- [packages/shared/src/utils.ts:29-34](file://packages/shared/src/utils.ts#L29-L34)
+
+**章节来源**
+- [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)
+- [packages/shared/src/utils.ts:29-34](file://packages/shared/src/utils.ts#L29-L34)
+
+### 冒烟测试脚本与undefined字段处理
+- **控制指令回执链路**：验证设备回执、结单事件、档案/消息/处方执行回流
+- **undefined字段安全处理**：改进receiptText和receiptResult函数的undefined处理
+- **时间字段验证**：确保pendingMin和overdue字段的正确性和一致性
+- **幂等性保证**：重复操作不会产生副作用
+- **数据清理**：测试结束后自动清理临时数据
+
+```mermaid
+flowchart TD
+SmokeTest["冒烟测试"] --> CommandReceipt["控制指令回执"]
+CommandReceipt --> UndefinedCheck["undefined字段检查"]
+UndefinedCheck --> TimeValidation["时间字段验证"]
+TimeValidation --> Idempotency["幂等性验证"]
+Idempotency --> DataCleanup["数据清理"]
+```
+
+**图示来源**
+- [scripts/smoke-command-receipt.mjs:123-133](file://scripts/smoke-command-receipt.mjs#L123-L133)
+- [scripts/smoke-consumers.mjs:88-104](file://scripts/smoke-consumers.mjs#L88-L104)
+
+**章节来源**
+- [scripts/smoke-command-receipt.mjs:1-439](file://scripts/smoke-command-receipt.mjs#L1-L439)
+- [scripts/smoke-consumers.mjs:1-200](file://scripts/smoke-consumers.mjs#L1-L200)
+
 ### 类型安全与Mock数据支持
 - 类型契约：ApiResponse、PageResult、领域模型与枚举在前端types中集中定义
 - 类型安全：Axios泛型T确保返回值类型正确
@@ -718,8 +786,10 @@ array warnings
 - **覆盖规划服务依赖几何计算库和数学算法**，用于牛耕式作业带计算
 - 公共契约包仅导出类型与枚举，不依赖能力包，便于前后端共享
 - 权限验证依赖合约包的权限解析函数
+- **TypeScript编译配置**：所有服务继承统一的tsconfig基座，确保编译一致性
+- **冒烟测试脚本**：依赖PostgreSQL数据库和服务间HTTP通信
 
-**更新** 新增了覆盖规划服务的几何计算和数学算法依赖关系。
+**更新** 新增了TypeScript编译配置和冒烟测试脚本的依赖关系。
 
 ```mermaid
 graph LR
@@ -736,6 +806,9 @@ CONTRACTS --> MESSAGES["消息模板"]
 TYPES --> CONTRACTS
 AUTHZ --> CONTRACTS
 COVERAGE --> GEOMETRY["几何计算库"]
+SMOKE["冒烟测试"] --> DB["PostgreSQL"]
+SMOKE --> SERVICES["微服务HTTP"]
+TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 ```
 
 **图示来源**
@@ -748,6 +821,8 @@ COVERAGE --> GEOMETRY["几何计算库"]
 - [apps/operation-service/src/coverage.ts:1-3](file://apps/operation-service/src/coverage.ts#L1-L3)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
 - [packages/shared/src/authz.ts:1-3](file://packages/shared/src/authz.ts#L1-L3)
+- [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)
+- [scripts/smoke-command-receipt.mjs:1-6](file://scripts/smoke-command-receipt.mjs#L1-L6)
 
 **章节来源**
 - [apps/web/src/utils/request.ts:1-11](file://apps/web/src/utils/request.ts#L1-L11)
@@ -759,6 +834,7 @@ COVERAGE --> GEOMETRY["几何计算库"]
 - [apps/operation-service/src/coverage.ts:1-3](file://apps/operation-service/src/coverage.ts#L1-L3)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
 - [packages/shared/src/authz.ts:1-3](file://packages/shared/src/authz.ts#L1-L3)
+- [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)
 
 ## 性能与优化
 - 请求合并：可在Axios层引入轻量队列，将短时间内的重复请求合并，减少带宽与后端压力
@@ -772,8 +848,10 @@ COVERAGE --> GEOMETRY["几何计算库"]
 - 设备查询优化：设备列表支持多维度筛选，减少前端过滤开销
 - 几何计算优化：管线长度自动计算，避免前端重复计算
 - **覆盖规划优化**：等距圆柱平面坐标转换，避免经纬度直接计算的精度损失；自动方向选择算法优化总里程；作业带间距自适应调整
+- **TypeScript编译优化**：skipLibCheck提升编译速度，isolatedModules支持并行编译
+- **测试优化**：冒烟测试使用独立端口和数据隔离，支持并发执行
 
-**更新** 新增了覆盖规划相关的优化考虑。
+**更新** 新增了TypeScript编译优化和测试优化相关的考虑。
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -791,8 +869,11 @@ COVERAGE --> GEOMETRY["几何计算库"]
 - **覆盖规划参数错误**：plotCode不能为空，boundary需为有效的Polygon几何，implementWidthM需在0~50米之间
 - **覆盖规划几何错误**：地块边界顶点不足3个，无法铺作业带；作业带间距不为正；按给定幅宽铺不出任何作业带
 - **覆盖规划算法错误**：作业带超过2000条上限；地块边界退化导致无法计算
+- **TypeScript编译错误**：检查strictNullChecks和noUncheckedIndexedAccess相关的类型安全问题
+- **undefined字段错误**：使用assertDefined函数进行字段验证，避免运行时undefined访问
+- **冒烟测试失败**：检查数据库连接、服务端口配置和依赖服务可用性
 
-**更新** 新增了覆盖规划相关的故障排查指导。
+**更新** 新增了TypeScript编译错误、undefined字段错误和冒烟测试失败的故障排查指导。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:37-86](file://apps/web/src/utils/request.ts#L37-L86)
@@ -801,11 +882,13 @@ COVERAGE --> GEOMETRY["几何计算库"]
 - [apps/iot-service/src/http.ts:72-76](file://apps/iot-service/src/http.ts#L72-L76)
 - [apps/operation-service/src/navigation.ts:400-447](file://apps/operation-service/src/navigation.ts#L400-L447)
 - [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
+- [packages/shared/src/utils.ts:29-34](file://packages/shared/src/utils.ts#L29-L34)
+- [packages/tsconfig/base.json:4-21](file://packages/tsconfig/base.json#L4-L21)
 
 ## 结论
-本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、设备管理、片区管理、基础设施管线、导航规划、覆盖规划和消息模板等基本功能；**新增的覆盖规划功能进一步增强了农事作业的智能化水平**。后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
+本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、设备管理、片区管理、基础设施管线、导航规划、覆盖规划和消息模板等基本功能；**新增的TypeScript编译配置优化和冒烟测试脚本增强进一步提升了系统的类型安全性和测试可靠性**。后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
 
-**更新** 新增了覆盖规划API、完善的Web API客户端方法和增强的业务逻辑处理，进一步完善了智慧农业平台的能力体系。
+**更新** 新增了TypeScript编译配置优化和冒烟测试脚本的undefined字段处理增强，进一步完善了智慧农业平台的质量保障体系。
 
 [本节为总结性内容，不直接分析具体文件]
 
@@ -1032,3 +1115,13 @@ COVERAGE --> GEOMETRY["几何计算库"]
 **章节来源**
 - [apps/operation-service/src/coverage.ts:24-82](file://apps/operation-service/src/coverage.ts#L24-L82)
 - [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
+
+### TypeScript编译配置类型
+- BaseConfig：基础编译配置，包含target、lib、module等核心选项
+- StrictOptions：严格模式选项，包含strict、noUncheckedIndexedAccess等
+- ModuleOptions：模块解析选项，包含moduleResolution、esModuleInterop等
+
+**更新** 新增TypeScript编译配置相关类型定义。
+
+**章节来源**
+- [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)

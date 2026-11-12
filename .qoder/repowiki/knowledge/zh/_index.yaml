@@ -3,7 +3,7 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-11-12T02:17:46Z"
+exported_at: "2026-11-12T08:50:06Z"
 modules:
     "":
         dir_name: 无人农场 AI 平台 Monorepo 根编排
@@ -54,8 +54,8 @@ modules:
         depends_on: []
         related_to: []
     scripts:
-        dir_name: 微服务生命周期与冒烟测试脚本集
-        title: 微服务生命周期与冒烟测试脚本集
+        dir_name: Agri Platform 运维与冒烟测试脚本集
+        title: Agri Platform 运维与冒烟测试脚本集
         scope:
             - scripts/
         source_files: []
@@ -64,8 +64,8 @@ modules:
         related_to:
             - path: infrastructure
     shared_packages:
-        dir_name: '@agri-platform 共享依赖包集合'
-        title: '@agri-platform 共享依赖包集合'
+        dir_name: '@agri-platform 共享包集合'
+        title: '@agri-platform 共享包集合'
         scope:
             - packages/
         source_files: []

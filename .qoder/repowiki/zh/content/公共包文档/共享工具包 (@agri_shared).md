@@ -1,3 +1,5 @@
+基于我的分析，现在我可以更新共享工具包文档。新增了两个重要的工具函数：`likePattern()` 用于SQL LIKE模式转义，`keywordHits()` 用于字段级关键词匹配。让我更新文档：
+
 # 共享工具包 (@agri/shared)
 
 <cite>
@@ -14,7 +16,15 @@
 - [packages/shared/test/shared.spec.ts](file://packages/shared/test/shared.spec.ts)
 - [apps/web/test/geo.spec.ts](file://apps/web/test/geo.spec.ts)
 - [apps/web/src/utils/geo.ts](file://apps/web/src/utils/geo.ts)
+- [apps/auth-service/src/user.repository.ts](file://apps/auth-service/src/user.repository.ts)
 </cite>
+
+## 更新摘要
+**变更内容**   
+- 新增搜索工具函数：`likePattern()` 和 `keywordHits()`
+- 增强搜索逻辑一致性：确保 SQL 和内存实现产生相同结果
+- 完善单元测试覆盖：新增搜索相关测试用例
+- 更新使用示例：展示新的搜索工具函数用法
 
 ## 目录
 1. [简介](#简介)
@@ -29,9 +39,9 @@
 10. [附录：使用示例与测试覆盖](#附录使用示例与测试覆盖)
 
 ## 简介
-@agri/shared 是农服平台的全局共享工具包，提供跨服务复用的通用能力，包括异常框架、日期时间处理、面积单位换算、多边形面积计算、分页结果组装、标识生成以及常用纯函数工具。该包遵循纯函数设计与无副作用原则，对外暴露稳定的 API，避免在业务代码中散落重复实现，降低一致性风险。
+@agri/shared 是农服平台的全局共享工具包，提供跨服务复用的通用能力，包括异常框架、日期时间处理、面积单位换算、多边形面积计算、分页结果组装、标识生成以及常用纯函数工具。**最新增强了搜索功能**，新增了 `likePattern()` 和 `keywordHits()` 工具函数，用于统一的 SQL LIKE 模式转义和字段级关键词匹配，确保数据库查询与内存过滤的一致性。该包遵循纯函数设计与无副作用原则，对外暴露稳定的 API，避免在业务代码中散落重复实现，降低一致性风险。
 
-包说明强调其职责边界：异常基类、时间、单位换算、面积计算、分页、标识生成等通用能力集中管理；下游模块仅通过主入口导入，不感知内部文件组织。
+包说明强调其职责边界：异常基类、时间、单位换算、面积计算、分页、标识生成、搜索工具等通用能力集中管理；下游模块仅通过主入口导入，不感知内部文件组织。
 
 **章节来源**
 - [packages/shared/package.json:1-23](file://packages/shared/package.json#L1-L23)
@@ -50,7 +60,7 @@ unit["unit.ts<br/>面积单位换算"]
 area["area.ts<br/>多边形面积计算"]
 paging["paging.ts<br/>分页结果组装"]
 id["id.ts<br/>ULID 与雪花 ID"]
-utils["utils.ts<br/>空值判断/断言/分片/等待"]
+utils["utils.ts<br/>空值判断/断言/分片/等待/搜索工具"]
 test["test/shared.spec.ts<br/>契约测试"]
 shared --> index
 index --> errors
@@ -77,6 +87,7 @@ test --> index
 - 面积计算：实现标准化的多边形面积计算算法，确保前后端计算结果一致性，支持环面积和多边形面积计算。
 - 分页：定义 PageInput/PageResult 接口并提供 toPageResult 组装器，自动计算 pages 并修正 page/size 边界。
 - 标识生成：提供 ULID（事件/请求）与雪花算法主键（业务 ID），保证有序性与唯一性。
+- **搜索工具**：**新增** likePattern() 用于 SQL LIKE 模式转义，keywordHits() 用于字段级关键词匹配，确保 SQL 和内存实现产生相同结果。
 - 通用工具：isNil、omitUndefined、assertDefined、chunk、sleep 等纯函数，用于参数校验、对象清理、批量操作与异步等待。
 
 **章节来源**
@@ -86,7 +97,7 @@ test --> index
 - [packages/shared/src/area.ts:1-74](file://packages/shared/src/area.ts#L1-L74)
 - [packages/shared/src/paging.ts:1-42](file://packages/shared/src/paging.ts#L1-L42)
 - [packages/shared/src/id.ts:1-70](file://packages/shared/src/id.ts#L1-L70)
-- [packages/shared/src/utils.ts:1-62](file://packages/shared/src/utils.ts#L1-L62)
+- [packages/shared/src/utils.ts:1-81](file://packages/shared/src/utils.ts#L1-L81)
 
 ## 架构总览
 共享工具包作为横切能力层，被各微服务与前端应用通过 @agri/shared 主入口引入。它不反向依赖业务契约包，但保持与契约包的数据结构一致，确保跨进程调用时的类型兼容。
@@ -298,6 +309,69 @@ Snow-->>Caller : 十进制字符串 ID
 **章节来源**
 - [packages/shared/src/id.ts:1-70](file://packages/shared/src/id.ts#L1-L70)
 
+### 搜索工具函数
+**新增** 搜索工具函数提供了统一的 SQL LIKE 模式转义和字段级关键词匹配功能，确保数据库查询与内存过滤产生相同的结果。
+
+#### likePattern() - SQL LIKE 模式转义
+likePattern() 函数对用户输入的关键词进行 SQL LIKE 模式转义，正确处理通配符 `%` 和下划线 `_`，防止 SQL 注入和意外匹配。
+
+```mermaid
+flowchart TD
+Input["用户关键词"] --> Escape["转义特殊字符<br/>% → \\%, _ → \\_, \\ → \\\\"]
+Escape --> Wrap["包裹 % 通配符<br/>% + escaped + %"]
+Wrap --> Output["返回 ILIKE 模式"]
+```
+
+**图表来源**
+- [packages/shared/src/utils.ts:58-60](file://packages/shared/src/utils.ts#L58-L60)
+
+关键特性
+- 自动转义 SQL LIKE 通配符：`%`、`_`、`\`
+- 返回标准的 ILIKE 模式字符串
+- 防止 SQL 注入攻击
+- 与内存实现的 keywordHits() 保持一致的匹配语义
+
+#### keywordHits() - 字段级关键词匹配
+keywordHits() 函数实现与 SQL ILIKE 查询相同的字段级匹配逻辑，对每个字段单独进行大小写不敏感的字面量子串匹配。
+
+```mermaid
+flowchart TD
+Input["关键词 + 字段数组"] --> Lowercase["关键词转小写"]
+Lowercase --> CheckFields["遍历字段数组"]
+CheckFields --> Filter["过滤 undefined 字段"]
+Filter --> Match["检查字段包含关键词"]
+Match --> AnyTrue{"任一字段匹配?"}
+AnyTrue --> |是| ReturnTrue["返回 true"]
+AnyTrue --> |否| ReturnFalse["返回 false"]
+```
+
+**图表来源**
+- [packages/shared/src/utils.ts:67-70](file://packages/shared/src/utils.ts#L67-L70)
+
+关键特性
+- 字段级匹配：每个字段单独匹配，避免跨字段假命中
+- 大小写不敏感：与 SQL ILIKE 行为一致
+- 忽略 undefined 字段：只匹配非空字段
+- 内存优化：使用 some() 方法短路求值
+
+#### 使用示例
+以下示例展示了如何在业务服务中使用这些搜索工具：
+
+```typescript
+// SQL 查询中使用 likePattern
+const pattern = likePattern(query.keyword);
+conditions.push(`(username ILIKE $${values.length} OR name ILIKE $${values.length})`);
+values.push(pattern);
+
+// 内存过滤中使用 keywordHits
+const filtered = records.filter(record => 
+  keywordHits(keyword, [record.username, record.name])
+);
+```
+
+**章节来源**
+- [packages/shared/src/utils.ts:53-70](file://packages/shared/src/utils.ts#L53-L70)
+
 ### 通用工具函数
 utils.ts 提供一组纯函数，强调无副作用与明确边界：
 - isNil：仅 null 与 undefined 视为空。
@@ -313,10 +387,10 @@ B --> C["返回新对象/数组或 Promise"]
 ```
 
 **图表来源**
-- [packages/shared/src/utils.ts:1-62](file://packages/shared/src/utils.ts#L1-L62)
+- [packages/shared/src/utils.ts:1-81](file://packages/shared/src/utils.ts#L1-L81)
 
 **章节来源**
-- [packages/shared/src/utils.ts:1-62](file://packages/shared/src/utils.ts#L1-L62)
+- [packages/shared/src/utils.ts:1-81](file://packages/shared/src/utils.ts#L1-L81)
 
 ## 依赖关系分析
 - 入口文件 index.ts 聚合导出所有子模块，下游只依赖入口，不感知内部文件。
@@ -324,6 +398,7 @@ B --> C["返回新对象/数组或 Promise"]
 - paging.ts 声明与 @agri/contracts 一致的 PageResult 结构，但不反向依赖契约包，保持包的独立性。
 - id.ts 依赖 Node.js crypto 模块生成随机字节。
 - area.ts 作为独立的面积计算模块，不依赖其他共享模块，保持算法的纯粹性。
+- **搜索工具**：**新增** likePattern() 和 keywordHits() 被多个业务服务广泛使用，确保搜索逻辑的一致性。
 
 ```mermaid
 graph LR
@@ -337,6 +412,9 @@ index --> utils["utils.ts"]
 utils --> errors
 id --> crypto["node:crypto"]
 area -.-> web_geo["apps/web/src/utils/geo.ts<br/>一致性对照"]
+utils -.-> auth_service["apps/auth-service<br/>user.repository.ts"]
+utils -.-> iot_service["apps/iot-service<br/>device.repository.ts"]
+utils -.-> message_service["apps/message-service<br/>message.repository.ts"]
 ```
 
 **图表来源**
@@ -344,6 +422,7 @@ area -.-> web_geo["apps/web/src/utils/geo.ts<br/>一致性对照"]
 - [packages/shared/src/utils.ts:1-2](file://packages/shared/src/utils.ts#L1-L2)
 - [packages/shared/src/id.ts:1-1](file://packages/shared/src/id.ts#L1-L1)
 - [packages/shared/src/area.ts:4-7](file://packages/shared/src/area.ts#L4-L7)
+- [apps/auth-service/src/user.repository.ts:3](file://apps/auth-service/src/user.repository.ts#L3)
 
 **章节来源**
 - [packages/shared/src/index.ts:1-13](file://packages/shared/src/index.ts#L1-L13)
@@ -358,6 +437,7 @@ area -.-> web_geo["apps/web/src/utils/geo.ts<br/>一致性对照"]
 - 面积计算：等距圆柱投影鞋带公式，O(n) 时间复杂度，内存占用 O(1)，通过重心平移避免数值溢出。
 - 分页计算：O(1) 计算 pages，边界修正避免无效页。
 - 标识生成：ULID 与雪花 ID 均具备高吞吐与低碰撞概率；雪花 ID 处理时钟回拨与序列号回绕。
+- **搜索工具**：**新增** likePattern() 使用正则表达式高效转义，keywordHits() 使用 some() 短路求值优化性能。
 - 内存友好：omitUndefined、chunk 返回新对象/数组，避免原地修改带来的副作用。
 - 一致性保障：面积计算算法通过前端、后端、数据库三处实现的对比测试确保计算结果完全一致。
 
@@ -372,6 +452,8 @@ area -.-> web_geo["apps/web/src/utils/geo.ts<br/>一致性对照"]
 - 面积计算不一致：如果前后端面积计算结果不一致，检查是否使用了不同的算法实现，参考 apps/web/test/geo.spec.ts 中的对比测试。
 - 标识冲突：ULID 应保证时间单调；雪花 ID 若出现重复，检查时钟回拨与 sequence 回绕逻辑。
 - 校验失败：assertDefined 抛出 ValidationError，查看 field 与 reason 定位字段级问题。
+- **搜索匹配异常**：**新增** 检查 likePattern() 是否正确转义特殊字符，确认 keywordHits() 的字段数组不包含 undefined 值。
+- **搜索结果不一致**：**新增** 确保 SQL 查询和内存过滤都使用相同的搜索工具函数，避免手动实现不同的匹配逻辑。
 
 **章节来源**
 - [packages/shared/src/datetime.ts:16-22](file://packages/shared/src/datetime.ts#L16-L22)
@@ -381,9 +463,10 @@ area -.-> web_geo["apps/web/src/utils/geo.ts<br/>一致性对照"]
 - [packages/shared/src/area.ts:37-61](file://packages/shared/src/area.ts#L37-L61)
 - [packages/shared/src/id.ts:25-69](file://packages/shared/src/id.ts#L25-L69)
 - [packages/shared/src/utils.ts:29-50](file://packages/shared/src/utils.ts#L29-L50)
+- [packages/shared/src/utils.ts:58-70](file://packages/shared/src/utils.ts#L58-L70)
 
 ## 结论
-@agri/shared 通过清晰的模块划分与纯函数设计，为平台提供了稳定可靠的通用能力。异常框架统一了错误处理语义，日期时间与单位换算保证了数据一致性，新增的多边形面积计算库确保了前后端计算结果的精确一致，分页与标识生成提升了可扩展性与可观测性。建议在业务服务中严格使用该包，避免重复实现与口径不一致。
+@agri/shared 通过清晰的模块划分与纯函数设计，为平台提供了稳定可靠的通用能力。异常框架统一了错误处理语义，日期时间与单位换算保证了数据一致性，新增的多边形面积计算库确保了前后端计算结果的精确一致，分页与标识生成提升了可扩展性与可观测性。**最新的搜索工具函数进一步增强了平台的搜索一致性**，通过 likePattern() 和 keywordHits() 确保 SQL 查询与内存过滤产生相同的结果，避免了因实现差异导致的数据不一致问题。建议在业务服务中严格使用该包，避免重复实现与口径不一致。
 
 [本节为总结性内容，不直接分析具体文件]
 
@@ -409,11 +492,15 @@ area -.-> web_geo["apps/web/src/utils/geo.ts<br/>一致性对照"]
 - 标识生成
   - 生成 ULID：参考 [packages/shared/src/id.ts:25-45](file://packages/shared/src/id.ts#L25-L45)
   - 生成雪花 ID：参考 [packages/shared/src/id.ts:51-69](file://packages/shared/src/id.ts#L51-L69)
+- **搜索工具**：**新增**
+  - SQL LIKE 模式转义：参考 [packages/shared/src/utils.ts:58-60](file://packages/shared/src/utils.ts#L58-L60)
+  - 字段级关键词匹配：参考 [packages/shared/src/utils.ts:67-70](file://packages/shared/src/utils.ts#L67-L70)
+  - 业务服务使用示例：参考 [apps/auth-service/src/user.repository.ts:72](file://apps/auth-service/src/user.repository.ts#L72)、[apps/auth-service/src/user.repository.ts:204](file://apps/auth-service/src/user.repository.ts#L204)
 - 通用工具
   - 空值判定与断言：参考 [packages/shared/src/utils.ts:3-6](file://packages/shared/src/utils.ts#L3-L6)、[packages/shared/src/utils.ts:29-34](file://packages/shared/src/utils.ts#L29-L34)
   - 剔除 undefined 字段：参考 [packages/shared/src/utils.ts:13-21](file://packages/shared/src/utils.ts#L13-L21)
   - 数组分片：参考 [packages/shared/src/utils.ts:42-51](file://packages/shared/src/utils.ts#L42-L51)
-  - 异步等待：参考 [packages/shared/src/utils.ts:57-61](file://packages/shared/src/utils.ts#L57-L61)
+  - 异步等待：参考 [packages/shared/src/utils.ts:76-80](file://packages/shared/src/utils.ts#L76-L80)
 
 ### 单元测试覆盖情况
 测试文件 shared.spec.ts 覆盖了以下关键场景：
@@ -423,6 +510,7 @@ area -.-> web_geo["apps/web/src/utils/geo.ts<br/>一致性对照"]
 - ULID 长度与唯一性、雪花 ID 十进制字符串与正值
 - 工具函数在边界输入下的行为（chunk、omitUndefined、assertDefined）
 - 业务异常携带错误码与状态码，以及字段级详情
+- **搜索工具测试**：**新增** likePattern() 正确转义通配符、keywordHits() 字段级匹配逻辑、大小写不敏感匹配、undefined 字段处理
 
 新增的面积计算库通过 apps/web/test/geo.spec.ts 进行一致性测试，确保：
 - 前端实现与 @agri/shared 实现逐位相同
@@ -432,15 +520,15 @@ area -.-> web_geo["apps/web/src/utils/geo.ts<br/>一致性对照"]
 
 ```mermaid
 flowchart TD
-Test["shared.spec.ts + geo.spec.ts"] --> Cases["分页/单位/时间/标识/工具/异常/面积计算"]
+Test["shared.spec.ts + geo.spec.ts"] --> Cases["分页/单位/时间/标识/工具/异常/面积计算/搜索工具"]
 Cases --> Verify["断言期望行为"]
 Verify --> Pass["通过"]
 ```
 
 **图表来源**
-- [packages/shared/test/shared.spec.ts:1-84](file://packages/shared/test/shared.spec.ts#L1-L84)
+- [packages/shared/test/shared.spec.ts:1-101](file://packages/shared/test/shared.spec.ts#L1-L101)
 - [apps/web/test/geo.spec.ts:1-117](file://apps/web/test/geo.spec.ts#L1-L117)
 
 **章节来源**
-- [packages/shared/test/shared.spec.ts:1-84](file://packages/shared/test/shared.spec.ts#L1-L84)
+- [packages/shared/test/shared.spec.ts:1-101](file://packages/shared/test/shared.spec.ts#L1-L101)
 - [apps/web/test/geo.spec.ts:1-117](file://apps/web/test/geo.spec.ts#L1-L117)
