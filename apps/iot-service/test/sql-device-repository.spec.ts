@@ -165,7 +165,13 @@ describe("SqlDeviceRepository", () => {
     // create 走 INSERT，租户写在 VALUES 的参数里而不是 WHERE
     const scoped = calls.filter((call) => !call.query.includes("INSERT INTO devices"));
     expect(scoped).toHaveLength(5);
-    expect(scoped.every((call) => call.query.includes("tenant_id = $1") && call.params[0] === DEFAULT_TENANT)).toBe(true);
+    // 占位符序号从语句里现取：update 的 SET 子句在前，租户落在 $6 而不是 $1
+    expect(
+      scoped.map((call) => {
+        const placeholder = /tenant_id = \$(\d+)/.exec(call.query)?.[1];
+        return placeholder === undefined ? undefined : call.params[Number(placeholder) - 1];
+      }),
+    ).toEqual(scoped.map(() => DEFAULT_TENANT));
     expect(calls.find((call) => call.query.includes("INSERT INTO devices"))!.params[1]).toBe(DEFAULT_TENANT);
   });
 

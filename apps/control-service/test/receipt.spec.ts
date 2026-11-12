@@ -223,6 +223,10 @@ describe("设备通道：下发确认与执行回执", () => {
     expect(noReason.status).toBe(400);
     expect((await noReason.json() as { message: string }).message).toContain("失败原因");
 
+    // 以下三条都在 probe ACKED 回执，先把指令推到 SENT：QUEUED → ACKED 本就非法，
+    // 否则「报文不合法」会被状态机的 409 盖掉
+    expect((await postJson(base, "/api/v1/control/device/dispatch", { commandId: created.id })).status).toBe(200);
+
     const badTime = await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "ACKED", at: "昨天下午" });
     expect(badTime.status).toBe(400);
     expect((await badTime.json() as { message: string }).message).toContain("at");
@@ -303,19 +307,24 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 回执列（真实库�
     try {
       await repository.create(command({ id, createdAt: new Date().toISOString() }));
 
-      const sent = await repository.transition(TENANT, { id, status: "SENT", at: "2026-11-12T00:01:00.000Z", version: 1 });
-      expect(sent).toMatchObject({ id, status: "SENT", version: 2, tenantId: TENANT });
-      expect(sent?.sentAt?.startsWith("2026-11-12T00:01:00")).toBe(true);
+      // 下发/回执时刻由当前时钟派生：写死某个瞬间会让「刚回执」在时钟越过该瞬间后变成
+      // 「陈旧在途」，pendingOverMin 的断言就跟着翻脸。
+      const sentAt = new Date(Date.now() - 4 * 60_000).toISOString();
+      const ackedAt = new Date(Date.now() - 2 * 60_000).toISOString();
 
-      expect(await repository.transition(TENANT, { id, status: "ACKED", at: "2026-11-12T00:02:00.000Z", version: 1 })).toBeNull();
+      const sent = await repository.transition(TENANT, { id, status: "SENT", at: sentAt, version: 1 });
+      expect(sent).toMatchObject({ id, status: "SENT", version: 2, tenantId: TENANT });
+      expect(sent?.sentAt).toBe(sentAt);
+
+      expect(await repository.transition(TENANT, { id, status: "ACKED", at: ackedAt, version: 1 })).toBeNull();
       // 换租户拿同一个 id 跃迁：库里有记录也不许推进别人的指令
-      expect(await repository.transition("tenant-other", { id, status: "ACKED", at: "2026-11-12T00:02:00.000Z", version: 2 })).toBeNull();
-      expect(await repository.transition(TENANT, { id, status: "QUEUED", at: "2026-11-12T00:02:00.000Z", version: 2 })).toBeNull();
+      expect(await repository.transition("tenant-other", { id, status: "ACKED", at: ackedAt, version: 2 })).toBeNull();
+      expect(await repository.transition(TENANT, { id, status: "QUEUED", at: ackedAt, version: 2 })).toBeNull();
 
       const acked = await repository.transition(TENANT, {
         id,
         status: "ACKED",
-        at: "2026-11-12T00:02:00.000Z",
+        at: ackedAt,
         version: 2,
         message: "设备已接收",
         result: { rssi: 9 },
@@ -325,11 +334,13 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 回执列（真实库�
 
       const found = await repository.find(TENANT, id);
       expect(found?.version).toBe(3);
-      expect(found?.ackedAt?.startsWith("2026-11-12T00:02:00")).toBe(true);
+      expect(found?.ackedAt).toBe(ackedAt);
       expect(await repository.find("tenant-other", id)).toBeNull();
       expect((await repository.page(TENANT, { page: 1, size: 200, pending: true })).items.map((item) => item.id)).toContain(id);
       expect((await repository.page("tenant-other", { page: 1, size: 200, pending: true })).items.map((item) => item.id)).not.toContain(id);
+      // 在途才 2 分钟：阈值 60 分钟不该捞出来，阈值 1 分钟必须捞出来，两个方向都要堵
       expect((await repository.page(TENANT, { page: 1, size: 200, pending: true, pendingOverMin: 60 })).items.map((item) => item.id)).not.toContain(id);
+      expect((await repository.page(TENANT, { page: 1, size: 200, pending: true, pendingOverMin: 1 })).items.map((item) => item.id)).toContain(id);
     } finally {
       await client.$executeRawUnsafe("DELETE FROM control_commands WHERE id = $1", id);
       await client.$disconnect();

@@ -73,10 +73,10 @@ function setup(prescriptionIds = ["presc-1"]) {
   const executions = new InMemoryExecutionRepository();
   const prescriptions = new InMemoryPrescriptionRepository(prescriptionIds.map((id) => prescriptionRecord(id)));
   const publisher = new EventLogPublisher(store, { tenantId: "tenant-demo", traceId: "control-finished", producer: "control" });
-  const failures: Array<{ topic: string; message: string }> = [];
+  const failures: Array<{ topic: string; message: string; attempt: number }> = [];
   const { consumer } = createDecisionEventConsumer(executions, prescriptions, store, {
     pollIntervalMs: 20,
-    onError: (topic, _eventId, error) => failures.push({ topic, message: error.message }),
+    onError: (topic, _eventId, error, attempt) => failures.push({ topic, message: error.message, attempt }),
   });
   return { store, executions, prescriptions, publisher, consumer, failures };
 }
@@ -183,9 +183,10 @@ describe("处方执行回流消费", () => {
     expect(await consumer.pollOnce()).toBe(1);
 
     expect(executions.all()).toHaveLength(0);
-    expect(failures).toHaveLength(1);
-    expect(failures[0]?.topic).toBe(EventTopic.ControlIrrigationFinished);
-    expect(failures[0]?.message).toContain("presc-missing");
+    // 分发器按 maxAttempts 重试，每次失败都回调；断言重试次数从 1 连续排开，不把阈值抄进用例
+    expect(failures.map((failure) => failure.attempt)).toEqual(failures.map((_, index) => index + 1));
+    expect(new Set(failures.map((failure) => failure.topic))).toEqual(new Set([EventTopic.ControlIrrigationFinished]));
+    expect(failures.every((failure) => failure.message.includes("presc-missing"))).toBe(true);
   });
 
   it("载荷字段非法同样失败，脏数据不进留痕", async () => {

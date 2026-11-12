@@ -345,7 +345,8 @@ try {
   const autoFertExecution = (await request(`http://127.0.0.1:${DEC}/api/v1/decision/executions?prescriptionId=${encodeURIComponent(prescriptionId)}&size=50`))
     .data?.items?.find((item) => item.commandId === autoFertilization.id);
   assert(autoFertExecution, `处方下发的施肥指令结单后没有执行回流：${autoFertilization.id}`);
-  assert(autoFertExecution.fertilizerKg === null, `回流量编造了投肥量：${JSON.stringify(autoFertExecution)}`);
+  // 与 ⑥ 的事件同一口径：未上报就是字段缺席，不是 0 也不是 null
+  assert(autoFertExecution.fertilizerKg === undefined, `回流量编造了投肥量：${JSON.stringify(autoFertExecution)}`);
   assert(autoFertExecution.durationSource === "RUNTIME", `回流时长来源应为 RUNTIME：${JSON.stringify(autoFertExecution)}`);
   say("fertilization closed with 施肥量未上报 (no fabricated amount)");
 

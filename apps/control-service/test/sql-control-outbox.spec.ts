@@ -263,6 +263,10 @@ describe.runIf(databaseUrl)("超时收口真实库链路", () => {
         const id = `cmd-${item.type.toLowerCase()}-finish-${stamp}`;
         const traceId = `control-finished:${id}`;
         created.push({ id, traceId });
+        // 入队时刻比结单早 20 分钟，下发时刻早 19 分钟；两条时间戳都走真实状态机落库，
+        // 否则 SQL 模式的 create 只会写默认版本，内存模式却照单全收，两套口径对不上。
+        const createdAt = new Date(Date.now() - 20 * 60_000).toISOString();
+        const sentAt = new Date(Date.now() - 19 * 60_000).toISOString();
         expect(await commands.create({
           id,
           tenantId: TENANT,
@@ -271,13 +275,17 @@ describe.runIf(databaseUrl)("超时收口真实库链路", () => {
           operatorId: "user-admin",
           type: item.type,
           parameters: item.parameters,
-          status: "SENT",
+          status: "QUEUED",
           origin: "MANUAL",
           reason: "作业完成事件冒烟",
-          version: 2,
-          createdAt: new Date(Date.now() - 20 * 60_000).toISOString(),
-          sentAt: new Date(Date.now() - 19 * 60_000).toISOString(),
+          version: 1,
+          createdAt,
         })).not.toBeNull();
+        expect(await commands.transition(TENANT, { id, status: "SENT", at: sentAt, version: 1 })).toMatchObject({
+          status: "SENT",
+          version: 2,
+          sentAt,
+        });
 
         const response = await fetch(`${base}/api/v1/control/device/receipt`, {
           method: "POST",

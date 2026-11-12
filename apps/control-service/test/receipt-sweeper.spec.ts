@@ -141,6 +141,7 @@ describe("ControlReceiptSweeper 超时收口", () => {
     const repository = new InMemoryControlCommandRepository([
       command({ id: "cmd-tx", createdAt: new Date(nowMs - 40 * MINUTE).toISOString() }),
     ]);
+    const tx = fakeTx;
     const calls: Array<"transition" | "enqueue"> = [];
     const transitionTx: Array<Tx | undefined> = [];
     const stub = {
@@ -180,13 +181,13 @@ describe("ControlReceiptSweeper 超时收口", () => {
     const stale = (await repository.listOverdue(15, nowMs, 10))[0]!;
     expect(await repository.transition("tenant-demo", { id: stale.id, status: "DONE", at: new Date(nowMs).toISOString(), version: stale.version })).not.toBeNull();
 
-    const { store, outbox } = makeRelay();
+    const { store, outbox, withTransaction } = makeRelay();
     const stub = {
       listOverdue: async () => [stale],
       transition: (tenantId: string, transition: Parameters<ControlCommandRepository["transition"]>[1], tx?: Tx) =>
         repository.transition(tenantId, transition, tx),
     } as unknown as ControlCommandRepository;
-    const sweeper = new ControlReceiptSweeper(stub, { timeoutMin: 15, outbox });
+    const sweeper = new ControlReceiptSweeper(stub, { timeoutMin: 15, outbox, withTransaction });
 
     expect(await sweeper.sweepOnce(nowMs)).toBe(0);
     expect(store.all()).toHaveLength(0);
@@ -218,13 +219,13 @@ describe("ControlReceiptSweeper 超时收口", () => {
       command({ id: "cmd-t1", tenantId: "tenant-one", createdAt: new Date(nowMs - 40 * MINUTE).toISOString() }),
       command({ id: "cmd-t2", tenantId: "tenant-two", createdAt: new Date(nowMs - 60 * MINUTE).toISOString() }),
     ]);
-    const { store, outbox } = makeRelay();
-    const sweeper = new ControlReceiptSweeper(repository, { timeoutMin: 15, outbox });
+    const { store, outbox, withTransaction } = makeRelay();
+    const sweeper = new ControlReceiptSweeper(repository, { timeoutMin: 15, outbox, withTransaction });
 
     expect(await sweeper.sweepOnce(nowMs)).toBe(2);
     expect((await repository.find("tenant-one", "cmd-t1"))?.status).toBe("FAILED");
     expect((await repository.find("tenant-two", "cmd-t2"))?.status).toBe("FAILED");
     expect(store.all().map((record) => record.tenantId).sort()).toEqual(["tenant-one", "tenant-two"]);
-    // 内存仓储没有事务边界，这一轮的 withTransaction 交给 run(undefined) 兜住
+    // 内存仓储不吃事务句柄，withTransaction 只是满足「消息表 + 事务」成对装配的口径
   });
 });
