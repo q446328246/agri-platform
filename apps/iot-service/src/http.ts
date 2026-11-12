@@ -112,7 +112,9 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
       }
       if (id && !match?.[2] && req.method === "GET") {
         const device = await devices.find(tenantId, id);
-        send(res, 200, device ?? null, traceId, device ? "" : "设备不存在");
+        // 与同文件的 PUT/commands 一个口径：不在本租户台账里就是不存在，不返回 200 + null
+        if (!device) { send(res, 404, null, traceId, "设备不存在"); return; }
+        send(res, 200, device, traceId);
         return;
       }
       // 台账配置编辑：只改台账字段，编号、归属租户与最后上报时间不接受手工写入

@@ -283,6 +283,8 @@ export function createControlHttpServer(
         }
         const message = receiptText(body.message, "message");
         const result = receiptResult(body.result);
+        // 报文本身先验完再查状态机：`at` 不合法属于请求体错误，不该因为指令恰好在别的状态被报成 409
+        const at = receiptAt(body.at);
         if (status === "FAILED" && message === undefined) throw new Error("FAILED 回执必须说明失败原因（message）");
         const target = await repository.find(tenantId, requiredText(body.commandId, "commandId"));
         if (!target) { send(res, 404, null, traceId, "指令不存在"); return; }
@@ -296,7 +298,6 @@ export function createControlHttpServer(
           send(res, 409, null, traceId, `指令当前状态为 ${target.status}，不接受 ${status} 回执`);
           return;
         }
-        const at = receiptAt(body.at);
         const transition = {
           id: target.id,
           status,

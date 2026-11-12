@@ -231,6 +231,6 @@ describe("iot HTTP API", () => {
 
     const renamed = await fetch(`${base}/api/v1/devices/${created.data.id}`, { method: "PUT", headers: { "content-type": "application/json", ...beta }, body: JSON.stringify({ status: "ONLINE" }) });
     expect((await jsonOf(renamed)).data).toMatchObject({ id: created.data.id, status: "ONLINE" });
-    expect((await jsonOf(await fetch(`${base}/api/v1/devices/${created.data.id}`))).data).toBeNull();
+    expect((await fetch(`${base}/api/v1/devices/${created.data.id}`)).status).toBe(404);
   });
 });

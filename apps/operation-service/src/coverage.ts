@@ -264,8 +264,13 @@ function normalizeHeading(deg: number): number {
 }
 
 export function planCoverage(input: CoverageInput): CoveragePlan {
-  const rings = input.boundary.coordinates.filter((ring) => Array.isArray(ring) && ring.length >= 3);
-  if (rings.length === 0) throw new CoverageError("地块边界顶点不足 3 个，无法铺作业带");
+  // 顶点不足的环直接拒算而不是悄悄丢掉：内环被丢掉等于让拖拉机从塘里开过去
+  const malformed = input.boundary.coordinates.find((ring) => !Array.isArray(ring) || ring.length < 3);
+  if (malformed !== undefined || input.boundary.coordinates.length === 0) {
+    throw new CoverageError("地块边界含顶点不足 3 个的环，无法铺作业带");
+  }
+  const rings = input.boundary.coordinates;
+  if (!(polygonAreaMu(rings[0]!) > 0)) throw new CoverageError("地块边界退化成一条线（面积为 0），铺不出作业带");
   const plane = planeOf(rings);
   const spacing = input.implementWidthM - (input.overlapM ?? 0);
   if (spacing <= 0) throw new CoverageError("幅宽减去重叠必须为正，否则作业带没有间距");
@@ -379,10 +384,12 @@ export function parseCoverageRequest(body: Record<string, unknown>): CoveragePar
     errors.push('boundary 需为 { type: "Polygon", coordinates: [[[经度, 纬度]…]] }');
   } else {
     const rings = rawBoundary.coordinates
-      .map((ring) => (ring ?? []).map((point) => [Number(point?.[0]), Number(point?.[1])]))
-      .filter((ring) => ring.length >= 3);
+      .map((ring) => (ring ?? []).map((point): [number, number] => [Number(point?.[0]), Number(point?.[1])]))
+      .filter((ring) => ring.length > 0);
     if (rings.length === 0) errors.push("boundary 外环顶点少于 3 个");
+    else if (rings.some((ring) => ring.length < 3)) errors.push("boundary 含顶点不足 3 个的环，内环也要闭合");
     else if (!rings[0]!.every(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat) && lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90)) errors.push("boundary 含非法坐标");
+    else if (!(polygonAreaMu(rings[0]!) > 0)) errors.push("boundary 外环退化成一条线（面积为 0），铺不出作业带");
     else boundary = { type: "Polygon", coordinates: rings, srid: Number(rawBoundary.srid ?? 4490) };
   }
 
