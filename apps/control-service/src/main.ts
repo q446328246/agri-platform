@@ -8,6 +8,7 @@ import { createControlEventConsumer } from "./consumer.js";
 import { InMemoryControlCommandRepository, SqlControlCommandRepository } from "./control.repository.js";
 import type { ControlCommandRepository } from "./control.repository.js";
 import { createControlHttpServer, DEFAULT_TENANT, resolveReceiptTimeoutMin } from "./http.js";
+import type { ControlHttpOptions } from "./http.js";
 import { SqlControlOutboxStore } from "./outbox.repository.js";
 import { ControlReceiptSweeper } from "./receipt-sweeper.js";
 
@@ -66,7 +67,9 @@ async function bootstrap(): Promise<void> {
   const relay = db ? new OutboxService(new SqlControlOutboxStore(db), new EventLogPublisher(store, relayContext), relayContext) : undefined;
   relay?.start(Number(process.env.CONTROL_OUTBOX_RELAY_INTERVAL_MS ?? 1000));
   // 消息表与事务句柄成对装配：收口任务与结单接口用的是同一条 outbox
-  const eventDeps = db && relay ? { outbox: relay, withTransaction: (run) => db.$transaction(run) } : {};
+  const eventDeps: Pick<ControlHttpOptions, "outbox" | "withTransaction"> = db && relay
+    ? { outbox: relay, withTransaction: (run) => db.$transaction(run) }
+    : {};
 
   const timeoutMin = resolveReceiptTimeoutMin();
   const sweepIntervalMs = Number(process.env.CONTROL_RECEIPT_SWEEP_INTERVAL_MS ?? 60_000);

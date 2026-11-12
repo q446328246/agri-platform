@@ -2,7 +2,8 @@
   "extends": "@agri/tsconfig/base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    "experimentalDecorators": true
   },
   "include": ["src/**/*"],
   "references": [
