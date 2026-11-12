@@ -459,6 +459,13 @@
 - **用例**：`apps/control-service/test/irrigation-finished.spec.ts`（分区方案水量按 `waterVolumeOf` 现算断言、不写死立方米数；设备实测覆盖方案值且来源随之变 `DEVICE`；重复 DONE 不再入队；`traceId`/`producer`；FERTILIZATION 与 ESTOP 不推事件；无消息表时照常结单；缺事务句柄构造期抛错；陈旧版本 409 且 outbox 为空）；`sql-control-outbox.spec.ts` 增 `describe.runIf(DB_URL)` 的「DONE 与事件同一事务落库」（断言状态/版本、`control_outbox` 恰一条、`durationMin` 落在预期区间而非硬编码、重复 DONE 不翻倍，`finally` 按 trace_id 清理）；`trace-service/test/consumer.spec.ts`（入档字段、换 `eventId` 重投不重复建档、处方与结单并存）与 `http-chain.spec.ts`（人工补录 400 且列表为空）；`message-service/test/irrigation-finished-closure.spec.ts` 新文件 5 例（生成通知、实测与推算文案分开、未上报口径、按指令聚合、换指令另开 + 关闭偏好不落库）；`contracts/test/message-template.spec.ts` 补灌溉完成模板与主题清单第 6 项。**按交付口径未跑验证。**
 - **仍留作待决**：施肥作业的实际用量回流（需要另一条载荷口径）；决策侧消费该事件做处方效果回流（`evaluateOutcome` 目前仍由调用方手工触发）；未新增 `smoke-irrigation-finished` 脚本（演示库无真实设备，脚本只能自造回执）。
 
+### 2026-11-12：控制指令页挂载测试（`views/device/Commands.vue`）
+
+- **问题**：`#94`/`#95` 把回执状态机、超时收口、结单事件都落了服务端用例，但前端这张页一直是「只改不测」——下发/回执的二次确认、急停必须勾到位确认、`FAILED` 必填原因这三条与服务端同口径的拦截，全靠手工点。
+- **新增 `apps/web/test/control-commands-view.spec.ts`**（真实 SFC 编译 + 真实 Vue 调度，走 `view-harness`）：默认分页取数、条件只在有值时下发（取消勾选后 `overdue` 键不出现）、重置清条件并回第一页、生命周期只铺已发生节点且失败收口写「失败」、标记下发走二次确认后重查、取消确认不发请求、接口失败不留忙态、回执默认状态跟随当前状态、急停未勾确认时 `receiptValid` 为假且 `submitReceipt` 不发请求（勾选后带 `result: { confirmed: true }`）、`FAILED` 空说明被拦下且说明文字去空格上送、无 `device:control` 时 `canControl` 为假。
+- **顺手去重**：`trace-chain.spec.ts` 原先手抄了一份事件标签与配色映射（`IRRIGATION_FINISHED` 一加就漏），改为与页面同源——用 `evaluateTs` 取真实 `@/utils`。
+- **口径说明**：harness 的 Element Plus 桩不渲染 `el-table-column` 的默认插槽，因此断言落在 `state`（computed 解包后的值）与被调用的 `controlApi` 上，不断言 DOM 文本；`@/utils` 一律取真实模块，不在测试里复制第二份映射。**按交付口径未跑验证。**
+
 ## 下一步（中断后从这里继续）
 
 > **交付口径（2026-11-11 起，用户长期要求）**：改完直接 `git commit` + `git push`，**不再**跑单元测试 / `tsc -b` / `pnpm build` / `smoke-*` 冒烟 / 浏览器实操验证，**不再**重建或重新部署 `app`、`edge` 镜像。迁移文件照常编写，只在用户点名时才应用到库；风险较高的改动收工时注明「未跑验证」即可。

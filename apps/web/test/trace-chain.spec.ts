@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import dayjs from "dayjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as types from "../src/types/index.js";
 import { evaluateTs, flushView, mountView } from "./view-harness.js";
@@ -10,12 +11,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// @/utils 为聚合 barrel（内部依赖 dayjs 与 @/types 别名），测试内以真实口径直接注入被 SFC 使用的函数
-const utils = {
-  formatDateTime: (value: string | Date | undefined | null) => (value ? String(value) : '-'),
-  getTraceEventText: (event: string) => ({ PRESCRIPTION_ISSUED: '处方生成', FARM_OPERATION: '农事作业', OPERATION_COMPLETED: '作业完成', INPUT_MATERIAL: '投入品领用', SOWING: '播种', HARVEST: '采收' }[event] || event || '-'),
-  getTraceEventType: (event: string): 'success' | 'warning' | 'info' => (event === 'PRESCRIPTION_ISSUED' || event === 'HARVEST' ? 'success' : event === 'OPERATION_COMPLETED' ? 'warning' : 'info'),
-};
+// 事件标签与配色的唯一来源是 @/utils，测试取真实模块，不手抄一份映射（抄一份就会漏掉新事件）
+const utilsUrl = new URL("../src/utils/index.ts", import.meta.url);
+const utils = evaluateTs(readFileSync(utilsUrl, "utf8"), utilsUrl.pathname, { dayjs, "@/types": types });
 
 const chainFixture = [
   { id: "c1", traceCode: "TR-a", batchCode: "BT-CHAIN", plotCode: "P-1", event: "FARM_OPERATION", detail: "整地", operator: "张伟", createdAt: "2026-01-01T00:00:00.000Z" },
