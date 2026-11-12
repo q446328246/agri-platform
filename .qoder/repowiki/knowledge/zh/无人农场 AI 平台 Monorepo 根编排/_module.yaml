@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: ""
-title: 无人农场 AI 平台 Monorepo 根
+title: 无人农场 AI 平台 Monorepo 根编排
 scope:
     - README.md
     - IMPLEMENTATION_PROGRESS.md

@@ -7,10 +7,13 @@
 - [packages/shared/src/errors.ts](file://packages/shared/src/errors.ts)
 - [packages/shared/src/datetime.ts](file://packages/shared/src/datetime.ts)
 - [packages/shared/src/unit.ts](file://packages/shared/src/unit.ts)
+- [packages/shared/src/area.ts](file://packages/shared/src/area.ts)
 - [packages/shared/src/paging.ts](file://packages/shared/src/paging.ts)
 - [packages/shared/src/id.ts](file://packages/shared/src/id.ts)
 - [packages/shared/src/utils.ts](file://packages/shared/src/utils.ts)
 - [packages/shared/test/shared.spec.ts](file://packages/shared/test/shared.spec.ts)
+- [apps/web/test/geo.spec.ts](file://apps/web/test/geo.spec.ts)
+- [apps/web/src/utils/geo.ts](file://apps/web/src/utils/geo.ts)
 </cite>
 
 ## 目录
@@ -26,13 +29,13 @@
 10. [附录：使用示例与测试覆盖](#附录使用示例与测试覆盖)
 
 ## 简介
-@agri/shared 是农服平台的全局共享工具包，提供跨服务复用的通用能力，包括异常框架、日期时间处理、面积单位换算、分页结果组装、标识生成以及常用纯函数工具。该包遵循纯函数设计与无副作用原则，对外暴露稳定的 API，避免在业务代码中散落重复实现，降低一致性风险。
+@agri/shared 是农服平台的全局共享工具包，提供跨服务复用的通用能力，包括异常框架、日期时间处理、面积单位换算、多边形面积计算、分页结果组装、标识生成以及常用纯函数工具。该包遵循纯函数设计与无副作用原则，对外暴露稳定的 API，避免在业务代码中散落重复实现，降低一致性风险。
 
-包说明强调其职责边界：异常基类、时间、单位换算、分页、标识生成等通用能力集中管理；下游模块仅通过主入口导入，不感知内部文件组织。
+包说明强调其职责边界：异常基类、时间、单位换算、面积计算、分页、标识生成等通用能力集中管理；下游模块仅通过主入口导入，不感知内部文件组织。
 
 **章节来源**
 - [packages/shared/package.json:1-23](file://packages/shared/package.json#L1-L23)
-- [packages/shared/src/index.ts:1-11](file://packages/shared/src/index.ts#L1-L11)
+- [packages/shared/src/index.ts:1-13](file://packages/shared/src/index.ts#L1-L13)
 
 ## 项目结构
 共享工具包采用按功能域拆分的扁平结构，每个文件聚焦单一职责，便于独立维护与测试。
@@ -44,6 +47,7 @@ index["index.ts<br/>统一导出入口"]
 errors["errors.ts<br/>异常基类与类型"]
 datetime["datetime.ts<br/>日期时间工具"]
 unit["unit.ts<br/>面积单位换算"]
+area["area.ts<br/>多边形面积计算"]
 paging["paging.ts<br/>分页结果组装"]
 id["id.ts<br/>ULID 与雪花 ID"]
 utils["utils.ts<br/>空值判断/断言/分片/等待"]
@@ -52,6 +56,7 @@ shared --> index
 index --> errors
 index --> datetime
 index --> unit
+index --> area
 index --> paging
 index --> id
 index --> utils
@@ -59,16 +64,17 @@ test --> index
 ```
 
 **图表来源**
-- [packages/shared/src/index.ts:1-11](file://packages/shared/src/index.ts#L1-L11)
+- [packages/shared/src/index.ts:1-13](file://packages/shared/src/index.ts#L1-L13)
 - [packages/shared/test/shared.spec.ts:1-17](file://packages/shared/test/shared.spec.ts#L1-L17)
 
 **章节来源**
-- [packages/shared/src/index.ts:1-11](file://packages/shared/src/index.ts#L1-L11)
+- [packages/shared/src/index.ts:1-13](file://packages/shared/src/index.ts#L1-L13)
 
 ## 核心组件
 - 异常框架：定义 BizError 基类及 ValidationError、NotFoundError、ConflictError 等具体异常，附带错误码与 HTTP 状态码，便于全局过滤器统一处理。
 - 日期时间：以 ISO 8601 UTC 字符串为系统内时间表示，提供 toUtcIso、parseDate、dayRange 等工具，默认业务日按东八区划分。
 - 单位换算：集中管理亩、平方米、公顷之间的换算，避免业务侧手写系数导致精度不一致。
+- 面积计算：实现标准化的多边形面积计算算法，确保前后端计算结果一致性，支持环面积和多边形面积计算。
 - 分页：定义 PageInput/PageResult 接口并提供 toPageResult 组装器，自动计算 pages 并修正 page/size 边界。
 - 标识生成：提供 ULID（事件/请求）与雪花算法主键（业务 ID），保证有序性与唯一性。
 - 通用工具：isNil、omitUndefined、assertDefined、chunk、sleep 等纯函数，用于参数校验、对象清理、批量操作与异步等待。
@@ -77,6 +83,7 @@ test --> index
 - [packages/shared/src/errors.ts:1-53](file://packages/shared/src/errors.ts#L1-L53)
 - [packages/shared/src/datetime.ts:1-99](file://packages/shared/src/datetime.ts#L1-L99)
 - [packages/shared/src/unit.ts:1-41](file://packages/shared/src/unit.ts#L1-L41)
+- [packages/shared/src/area.ts:1-74](file://packages/shared/src/area.ts#L1-L74)
 - [packages/shared/src/paging.ts:1-42](file://packages/shared/src/paging.ts#L1-L42)
 - [packages/shared/src/id.ts:1-70](file://packages/shared/src/id.ts#L1-L70)
 - [packages/shared/src/utils.ts:1-62](file://packages/shared/src/utils.ts#L1-L62)
@@ -100,7 +107,7 @@ shared -.-> contracts
 ```
 
 **图表来源**
-- [packages/shared/src/index.ts:1-11](file://packages/shared/src/index.ts#L1-L11)
+- [packages/shared/src/index.ts:1-13](file://packages/shared/src/index.ts#L1-L13)
 - [packages/shared/src/paging.ts:1-7](file://packages/shared/src/paging.ts#L1-L7)
 
 **章节来源**
@@ -142,7 +149,7 @@ BizError <|-- ConflictError
 
 设计要点
 - 统一基类减少分支判断，提升全局异常处理效率。
-- 错误码规范建议采用“SYS-XXX-YYY”形式，便于分类与定位。
+- 错误码规范建议采用"SYS-XXX-YYY"形式，便于分类与定位。
 - 字段级校验明细利于前端展示与问题回溯。
 
 **章节来源**
@@ -180,7 +187,7 @@ Range --> End2(["结束"])
 - [packages/shared/src/datetime.ts:1-99](file://packages/shared/src/datetime.ts#L1-L99)
 
 ### 面积单位换算
-面积换算集中在 unit.ts，统一使用“亩”作为对外单位，仅在空间计算与遥感分析环节使用平方米与公顷。换算函数避免业务侧手写系数，防止不同报表出现几十平方米的差异。
+面积换算集中在 unit.ts，统一使用"亩"作为对外单位，仅在空间计算与遥感分析环节使用平方米与公顷。换算函数避免业务侧手写系数，防止不同报表出现几十平方米的差异。
 
 ```mermaid
 flowchart TD
@@ -206,6 +213,43 @@ ToMuHa --> Result3["输出亩数"]
 
 **章节来源**
 - [packages/shared/src/unit.ts:1-41](file://packages/shared/src/unit.ts#L1-L41)
+
+### 多边形面积计算
+新增的面积计算库实现了标准化的多边形面积计算算法，确保前后端计算结果一致性。该模块采用等距圆柱投影鞋带公式，通过顶点去重、重心平移和坐标缩放来保证计算精度。
+
+```mermaid
+flowchart TD
+Input["输入坐标点数组"] --> Clean["cleanRing()<br/>去重连续顶点与闭合点"]
+Clean --> Valid{"点数 >= 3?"}
+Valid --> |否| Zero["返回 0"]
+Valid --> |是| Center["计算环重心(lat0, lng0)"]
+Center --> Project["等距圆柱投影<br/>x = (lng - lng0) * kx<br/>y = (lat - lat0) * ky"]
+Project --> Shoelace["鞋带公式计算面积"]
+Shoelace --> Convert["平方米转亩<br/>除以 666.6667"]
+Convert --> Output["返回面积(亩)"]
+```
+
+**图表来源**
+- [packages/shared/src/area.ts:17-61](file://packages/shared/src/area.ts#L17-L61)
+
+核心函数
+- ringAreaMu：计算环面积（亩），输入为 [纬度, 经度] 顺序的坐标点数组。
+- polygonAreaMu：计算多边形面积（亩），输入为 GeoJSON 顺序 [经度, 纬度] 的坐标点数组。
+- roundAreaMu：将面积四舍五入到两位小数，与数据库存储格式保持一致。
+
+算法特点
+- 顶点去重：去除连续重复顶点和末尾闭合点，避免影响环重心计算。
+- 重心平移：以环重心为原点进行坐标平移，消除大坐标值导致的数值溢出。
+- 等距圆柱投影：使用 cos(lat) 进行经度缩放，保证不同纬度下的面积计算精度。
+- 鞋带公式：采用标准的平面多边形面积计算公式。
+
+一致性保证
+- 与前端 apps/web/src/utils/geo.ts 中的实现完全一致。
+- 与数据库迁移脚本 infra/postgres/migrations/015_plot_area_from_boundary.sql 保持同步。
+- 通过 apps/web/test/geo.spec.ts 中的对比测试确保三处实现逐位相同。
+
+**章节来源**
+- [packages/shared/src/area.ts:1-74](file://packages/shared/src/area.ts#L1-L74)
 
 ### 分页结果组装
 分页模块定义 PageInput 与 PageResult 接口，结构与 @agri/contracts 保持一致，但不反向依赖契约包。toPageResult 自动计算 pages，并对 page 与 size 做边界修正。
@@ -276,39 +320,46 @@ B --> C["返回新对象/数组或 Promise"]
 
 ## 依赖关系分析
 - 入口文件 index.ts 聚合导出所有子模块，下游只依赖入口，不感知内部文件。
-- utils.ts 依赖 errors.ts 中的 ValidationError，体现“工具函数与异常框架”的单向依赖。
+- utils.ts 依赖 errors.ts 中的 ValidationError，体现"工具函数与异常框架"的单向依赖。
 - paging.ts 声明与 @agri/contracts 一致的 PageResult 结构，但不反向依赖契约包，保持包的独立性。
 - id.ts 依赖 Node.js crypto 模块生成随机字节。
+- area.ts 作为独立的面积计算模块，不依赖其他共享模块，保持算法的纯粹性。
 
 ```mermaid
 graph LR
 index["index.ts"] --> errors["errors.ts"]
 index --> datetime["datetime.ts"]
 index --> unit["unit.ts"]
+index --> area["area.ts"]
 index --> paging["paging.ts"]
 index --> id["id.ts"]
 index --> utils["utils.ts"]
 utils --> errors
 id --> crypto["node:crypto"]
+area -.-> web_geo["apps/web/src/utils/geo.ts<br/>一致性对照"]
 ```
 
 **图表来源**
-- [packages/shared/src/index.ts:1-11](file://packages/shared/src/index.ts#L1-L11)
+- [packages/shared/src/index.ts:1-13](file://packages/shared/src/index.ts#L1-L13)
 - [packages/shared/src/utils.ts:1-2](file://packages/shared/src/utils.ts#L1-L2)
 - [packages/shared/src/id.ts:1-1](file://packages/shared/src/id.ts#L1-L1)
+- [packages/shared/src/area.ts:4-7](file://packages/shared/src/area.ts#L4-L7)
 
 **章节来源**
-- [packages/shared/src/index.ts:1-11](file://packages/shared/src/index.ts#L1-L11)
+- [packages/shared/src/index.ts:1-13](file://packages/shared/src/index.ts#L1-L13)
 - [packages/shared/src/utils.ts:1-2](file://packages/shared/src/utils.ts#L1-L2)
 - [packages/shared/src/id.ts:1-1](file://packages/shared/src/id.ts#L1-L1)
+- [packages/shared/src/area.ts:4-7](file://packages/shared/src/area.ts#L4-L7)
 
 ## 性能与可靠性
 - 纯函数设计：所有工具函数不修改外部状态，便于缓存与并行执行。
 - 时间处理：UTC 字符串传输减少跨服务歧义；Intl.DateTimeFormat 用于时区计算，避免第三方库开销。
 - 单位换算：集中系数与精度控制，避免分散实现导致的数值漂移。
+- 面积计算：等距圆柱投影鞋带公式，O(n) 时间复杂度，内存占用 O(1)，通过重心平移避免数值溢出。
 - 分页计算：O(1) 计算 pages，边界修正避免无效页。
 - 标识生成：ULID 与雪花 ID 均具备高吞吐与低碰撞概率；雪花 ID 处理时钟回拨与序列号回绕。
 - 内存友好：omitUndefined、chunk 返回新对象/数组，避免原地修改带来的副作用。
+- 一致性保障：面积计算算法通过前端、后端、数据库三处实现的对比测试确保计算结果完全一致。
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -317,6 +368,8 @@ id --> crypto["node:crypto"]
 - 时间解析失败：toUtcIso 与 dayRange 对非法输入抛出 TypeError，检查传入字符串格式与时区参数。
 - 分页异常：确认 page 与 size 是否为正数，toPageResult 会自动修正，但业务逻辑需配合合理默认值。
 - 单位换算偏差：核对是否误用平方换算路径，优先使用 unit.ts 提供的函数，避免手写系数。
+- 面积计算异常：检查输入坐标点是否至少包含三个不共线的点，确认经纬度顺序是否符合要求。
+- 面积计算不一致：如果前后端面积计算结果不一致，检查是否使用了不同的算法实现，参考 apps/web/test/geo.spec.ts 中的对比测试。
 - 标识冲突：ULID 应保证时间单调；雪花 ID 若出现重复，检查时钟回拨与 sequence 回绕逻辑。
 - 校验失败：assertDefined 抛出 ValidationError，查看 field 与 reason 定位字段级问题。
 
@@ -325,11 +378,12 @@ id --> crypto["node:crypto"]
 - [packages/shared/src/datetime.ts:83-98](file://packages/shared/src/datetime.ts#L83-L98)
 - [packages/shared/src/paging.ts:31-41](file://packages/shared/src/paging.ts#L31-L41)
 - [packages/shared/src/unit.ts:20-40](file://packages/shared/src/unit.ts#L20-L40)
+- [packages/shared/src/area.ts:37-61](file://packages/shared/src/area.ts#L37-L61)
 - [packages/shared/src/id.ts:25-69](file://packages/shared/src/id.ts#L25-L69)
 - [packages/shared/src/utils.ts:29-50](file://packages/shared/src/utils.ts#L29-L50)
 
 ## 结论
-@agri/shared 通过清晰的模块划分与纯函数设计，为平台提供了稳定可靠的通用能力。异常框架统一了错误处理语义，日期时间与单位换算保证了数据一致性，分页与标识生成提升了可扩展性与可观测性。建议在业务服务中严格使用该包，避免重复实现与口径不一致。
+@agri/shared 通过清晰的模块划分与纯函数设计，为平台提供了稳定可靠的通用能力。异常框架统一了错误处理语义，日期时间与单位换算保证了数据一致性，新增的多边形面积计算库确保了前后端计算结果的精确一致，分页与标识生成提升了可扩展性与可观测性。建议在业务服务中严格使用该包，避免重复实现与口径不一致。
 
 [本节为总结性内容，不直接分析具体文件]
 
@@ -346,6 +400,10 @@ id --> crypto["node:crypto"]
   - 亩转平方米：参考 [packages/shared/src/unit.ts:20-22](file://packages/shared/src/unit.ts#L20-L22)
   - 平方米转亩：参考 [packages/shared/src/unit.ts:29-31](file://packages/shared/src/unit.ts#L29-L31)
   - 公顷转亩：参考 [packages/shared/src/unit.ts:38-40](file://packages/shared/src/unit.ts#L38-L40)
+- 面积计算
+  - 计算环面积（纬度, 经度顺序）：参考 [packages/shared/src/area.ts:37-61](file://packages/shared/src/area.ts#L37-L61)
+  - 计算多边形面积（经度, 纬度顺序）：参考 [packages/shared/src/area.ts:67-69](file://packages/shared/src/area.ts#L67-L69)
+  - 面积四舍五入：参考 [packages/shared/src/area.ts:72-74](file://packages/shared/src/area.ts#L72-L74)
 - 分页
   - 组装分页结果：参考 [packages/shared/src/paging.ts:31-41](file://packages/shared/src/paging.ts#L31-L41)
 - 标识生成
@@ -366,15 +424,23 @@ id --> crypto["node:crypto"]
 - 工具函数在边界输入下的行为（chunk、omitUndefined、assertDefined）
 - 业务异常携带错误码与状态码，以及字段级详情
 
+新增的面积计算库通过 apps/web/test/geo.spec.ts 进行一致性测试，确保：
+- 前端实现与 @agri/shared 实现逐位相同
+- 退化几何（空数组、两点、三点共线）返回 0
+- 面积计算不受经纬度绝对值漂移影响
+- 与球面参考面积相差不到 1%
+
 ```mermaid
 flowchart TD
-Test["shared.spec.ts"] --> Cases["分页/单位/时间/标识/工具/异常"]
+Test["shared.spec.ts + geo.spec.ts"] --> Cases["分页/单位/时间/标识/工具/异常/面积计算"]
 Cases --> Verify["断言期望行为"]
 Verify --> Pass["通过"]
 ```
 
 **图表来源**
-- [packages/shared/test/shared.spec.ts:1-70](file://packages/shared/test/shared.spec.ts#L1-L70)
+- [packages/shared/test/shared.spec.ts:1-84](file://packages/shared/test/shared.spec.ts#L1-L84)
+- [apps/web/test/geo.spec.ts:1-117](file://apps/web/test/geo.spec.ts#L1-L117)
 
 **章节来源**
-- [packages/shared/test/shared.spec.ts:1-70](file://packages/shared/test/shared.spec.ts#L1-L70)
+- [packages/shared/test/shared.spec.ts:1-84](file://packages/shared/test/shared.spec.ts#L1-L84)
+- [apps/web/test/geo.spec.ts:1-117](file://apps/web/test/geo.spec.ts#L1-L117)

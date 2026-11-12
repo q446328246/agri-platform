@@ -1,3 +1,5 @@
+现在我已经收集了足够的信息来更新API集成文档。基于分析，我发现了新增的覆盖规划API端点 `/api/v1/operations/coverage-plan` 和 `/api/v1/operations/coverage-plans`，这些是用于全地块覆盖式作业规划的接口。让我更新现有的文档：
+
 # API集成
 
 <cite>
@@ -10,7 +12,9 @@
 - [apps/plot-service/src/http.ts](file://apps/plot-service/src/http.ts)
 - [apps/plot-service/src/zone.repository.ts](file://apps/plot-service/src/zone.repository.ts)
 - [apps/plot-service/src/infra-line.repository.ts](file://apps/plot-service/src/infra-line.repository.ts)
+- [apps/plot-service/src/plot.service.ts](file://apps/plot-service/src/plot.service.ts)
 - [apps/operation-service/src/navigation.ts](file://apps/operation-service/src/navigation.ts)
+- [apps/operation-service/src/coverage.ts](file://apps/operation-service/src/coverage.ts)
 - [apps/operation-service/src/http.ts](file://apps/operation-service/src/http.ts)
 - [apps/iot-service/src/http.ts](file://apps/iot-service/src/http.ts)
 - [apps/iot-service/src/device.repository.ts](file://apps/iot-service/src/device.repository.ts)
@@ -24,11 +28,11 @@
 
 ## 更新摘要
 **变更内容**   
-- 新增设备管理API接口（GET/POST/PUT /api/v1/devices，POST /api/v1/devices/:id/commands），支持设备台账管理和控制指令下发
-- 完善基础设施管线API，增强管线CRUD操作、几何数据处理和长度自动计算
-- 增强认证授权逻辑，改进权限验证机制和身份头透传安全性
-- 扩展设备类型枚举，支持气象站、传感器、无人机等10种设备类型
-- 新增设备数据库持久化，支持SQL存储和内存存储两种模式
+- 新增覆盖规划API接口（POST /api/v1/operations/coverage-plan），支持全地块覆盖式作业规划，自动计算牛耕式作业带路径
+- 新增覆盖规划历史查询接口（GET /api/v1/operations/coverage-plans），返回最近20条覆盖方案记录
+- 扩展Web API客户端，添加planCoverage()和getCoveragePlans()方法，提供类型安全的覆盖规划操作
+- 完善覆盖规划业务逻辑，实现等距布带、蛇形往返、内环跳洞、方向自动挑选等核心算法
+- 增强参数验证机制，确保幅宽、重叠、坐标等参数的合法性
 
 ## 目录
 1. [简介](#简介)
@@ -53,7 +57,7 @@
 
 本项目采用前后端分离架构：前端基于Vue3 + Element Plus，通过Axios统一发起HTTP请求；网关服务负责路由转发；认证服务提供登录、鉴权与会话管理；业务服务（如地块服务、IoT设备服务、操作服务）实现领域接口。公共契约包集中定义跨端共享的类型与响应信封。
 
-**更新** 新增了设备管理API、完善的基础设施管线API和增强的认证授权逻辑。
+**更新** 新增了覆盖规划API、完善的Web API客户端方法和增强的业务逻辑处理。
 
 ## 项目结构
 从API集成视角，关键目录与职责如下：
@@ -62,7 +66,7 @@
 - apps/auth-service：认证服务，提供登录、用户信息与登出
 - apps/plot-service：地块服务，演示REST接口、分页、错误码、片区管理和基础设施管线
 - apps/iot-service：IoT设备服务，提供设备台账管理、控制指令和状态监控
-- apps/operation-service：操作服务，提供导航规划和农事任务管理
+- apps/operation-service：操作服务，提供导航规划和农事任务管理，新增覆盖规划功能
 - packages/contracts：公共契约包，定义跨端共享的响应信封、枚举、Geo DTOs和消息模板
 - packages/shared：共享工具包，提供权限验证、身份透传等通用功能
 
@@ -99,12 +103,13 @@ IOT --> SHARED["共享工具包<br/>packages/shared/src/authz.ts"]
 - 业务服务（以地块为例）：统计、边界、CRUD、分页、错误码与traceId透传
 - 片区管理服务：片区CRUD、地块归属管理、地图视图聚合
 - 基础设施管线管理：管线CRUD、类型分类、几何数据处理、长度自动计算
+- **覆盖规划服务**：全地块覆盖式作业规划，自动计算牛耕式作业带路径
 - 导航规划服务：路径优化、里程计算、路网吸附
 - 消息模板系统：多主题模板、去重键生成、级别过滤
 - 类型契约：ApiResponse/PageResult等通用类型，以及领域模型与枚举
 - 权限验证：服务侧权限守卫、身份头透传、路径级权限覆盖
 
-**更新** 新增了IoT设备服务、增强的权限验证和相关组件。
+**更新** 新增了覆盖规划服务的核心组件。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:5-109](file://apps/web/src/utils/request.ts#L5-L109)
@@ -112,9 +117,11 @@ IOT --> SHARED["共享工具包<br/>packages/shared/src/authz.ts"]
 - [apps/auth-service/src/http.ts:6-20](file://apps/auth-service/src/http.ts#L6-L20)
 - [apps/iot-service/src/http.ts:39-136](file://apps/iot-service/src/http.ts#L39-L136)
 - [apps/plot-service/src/http.ts:9-104](file://apps/plot-service/src/http.ts#L9-L104)
+- [apps/plot-service/src/plot.service.ts:276-411](file://apps/plot-service/src/plot.service.ts#L276-L411)
 - [apps/plot-service/src/zone.repository.ts:14-55](file://apps/plot-service/src/zone.repository.ts#L14-L55)
 - [apps/plot-service/src/infra-line.repository.ts:18-46](file://apps/plot-service/src/infra-line.repository.ts#L18-L46)
 - [apps/operation-service/src/navigation.ts:16-56](file://apps/operation-service/src/navigation.ts#L16-L56)
+- [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
 - [packages/shared/src/authz.ts:66-80](file://packages/shared/src/authz.ts#L66-L80)
 - [packages/contracts/src/messages/message-template.ts:62-81](file://packages/contracts/src/messages/message-template.ts#L62-L81)
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
@@ -330,6 +337,131 @@ PlotHttpServer --> PageResult : "返回"
 **章节来源**
 - [apps/plot-service/src/http.ts:9-104](file://apps/plot-service/src/http.ts#L9-L104)
 
+### 覆盖规划API
+- **覆盖规划接口**：/api/v1/operations/coverage-plan POST，支持全地块覆盖式作业规划
+  - 请求体：{ plotCode, boundary, implementWidthM, overlapM?, headingDeg?, speedKmh?, turnSpeedKmh?, start?, areaMu? }
+  - 响应：{ planId, plotCode, headingDeg, headingAuto, implementWidthM, overlapM, laneSpacingM, laneCount, turnCount, lanes[], workDistanceM, transferDistanceM, totalDistanceM, durationMin, areaMu, coverageRatio, path, warnings }
+  - 业务逻辑：等距布带、蛇形往返、内环跳洞、方向自动挑选、入场里程计算
+- **覆盖规划历史接口**：/api/v1/operations/coverage-plans GET，返回最近20条覆盖方案
+  - 响应：CoveragePlan[]，按租户隔离存储
+
+```mermaid
+flowchart TD
+CoverageRequest["覆盖规划请求"] --> Validate["参数验证"]
+Validate --> PlaneCalc["平面坐标转换"]
+PlaneCalc --> DirectionCheck{"指定方向?"}
+DirectionCheck --> |否| AutoSelect["自动选择最优方向"]
+DirectionCheck --> |是| UseSpecified["使用指定方向"]
+AutoSelect --> ScanLines["扫描线生成"]
+UseSpecified --> ScanLines
+ScanLines --> SnakePattern["蛇形往返模式"]
+SnakePattern --> LaneGeneration["作业带生成"]
+LaneGeneration --> PathConstruction["路径构建"]
+PathConstruction --> Statistics["统计计算"]
+Statistics --> Result["返回规划结果"]
+```
+
+**图示来源**
+- [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
+- [apps/operation-service/src/http.ts:134-141](file://apps/operation-service/src/http.ts#L134-L141)
+
+**章节来源**
+- [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
+- [apps/operation-service/src/http.ts:134-141](file://apps/operation-service/src/http.ts#L134-L141)
+
+### Web API客户端扩展
+- **覆盖规划方法**：operationApi.planCoverage(data)，调用POST /operations/coverage-plan，返回覆盖规划方案
+- **覆盖规划历史方法**：operationApi.getCoveragePlans()，调用GET /operations/coverage-plans，返回最近20条记录
+- **类型安全**：使用TypeScript接口确保参数和返回值类型正确
+- **数据格式**：支持完整的覆盖规划数据结构，包括作业带、路径、统计信息等
+
+```mermaid
+classDiagram
+class OperationApiClient {
++planNavigation(data) : Promise~NavPlan~
++getPathPlans() : Promise~NavPlan[]~
++planCoverage(data) : Promise~CoveragePlan~
++getCoveragePlans() : Promise~CoveragePlan[]~
+}
+class CoverageRequest {
++plotCode
++boundary
++implementWidthM
++overlapM?
++headingDeg?
++speedKmh?
++turnSpeedKmh?
++start?
++areaMu?
+}
+class CoveragePlan {
++planId
++plotCode
++headingDeg
++headingAuto
++implementWidthM
++overlapM
++laneSpacingM
++laneCount
++turnCount
++lanes[]
++workDistanceM
++transferDistanceM
++totalDistanceM
++durationMin
++areaMu
++coverageRatio
++path
++warnings[]
+}
+OperationApiClient --> CoverageRequest : "接收"
+OperationApiClient --> CoveragePlan : "返回"
+```
+
+**图示来源**
+- [apps/web/src/api/index.ts:702-707](file://apps/web/src/api/index.ts#L702-L707)
+- [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
+
+**章节来源**
+- [apps/web/src/api/index.ts:702-707](file://apps/web/src/api/index.ts#L702-L707)
+- [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
+
+### 地块合并与拆分API
+- **合并接口**：/api/v1/plots/merge POST，支持多个地块合并为单个地块
+  - 请求体：{ parcelCodes: string[], parcelName?: string, plotType?: string, remark?: string }
+  - 响应：{ plot: Plot, sourceCodes: string[] }
+  - 业务逻辑：计算源地块顶点凸包作为新边界，自动计算面积，归档源地块
+- **拆分接口**：/api/v1/plots/split POST，支持将单个地块拆分为多个子地块
+  - 请求体：{ parcelCode: string, pieces: Array<{ parcelName: string; geom: GeoPolygon }>, keepSource?: boolean }
+  - 响应：{ plots: Plot[], sourceCode: string, sourceRemoved: boolean, pieceAreaSum: number }
+  - 业务逻辑：验证子地块几何有效性，可选保留或归档原地块
+
+```mermaid
+flowchart TD
+MergeSplit["合并/拆分API"] --> Merge["POST /plots/merge<br/>多地块合并"]
+MergeSplit --> Split["POST /plots/split<br/>单地块拆分"]
+Merge --> Validate["验证至少两个地块"]
+Validate --> Hull["计算凸包边界"]
+Hull --> Area["计算合并面积"]
+Area --> Archive["归档源地块"]
+Archive --> Result["返回合并结果"]
+Split --> ValidatePieces["验证子地块几何"]
+ValidatePieces --> CreatePlots["创建子地块"]
+CreatePlots --> SourceCheck{"保留原地块?"}
+SourceCheck --> |是| KeepSource["保留原地块"]
+SourceCheck --> |否| RemoveSource["归档原地块"]
+KeepSource --> SplitResult["返回拆分结果"]
+RemoveSource --> SplitResult
+```
+
+**图示来源**
+- [apps/plot-service/src/http.ts:616-680](file://apps/plot-service/src/http.ts#L616-L680)
+- [apps/plot-service/src/plot.service.ts:276-411](file://apps/plot-service/src/plot.service.ts#L276-L411)
+
+**章节来源**
+- [apps/plot-service/src/http.ts:616-680](file://apps/plot-service/src/http.ts#L616-L680)
+- [apps/plot-service/src/plot.service.ts:276-411](file://apps/plot-service/src/plot.service.ts#L276-L411)
+
 ### 片区管理API
 - 片区列表：/api/v1/zones GET，返回片区台账与统计信息
 - 地图视图：/api/v1/zones/map GET，额外返回凸包与中心点
@@ -536,12 +668,43 @@ number durationMin
 array legs
 object polyline
 }
+MERGE_RESULT {
+object plot
+array sourceCodes
+}
+SPLIT_RESULT {
+array plots
+string sourceCode
+boolean sourceRemoved
+number pieceAreaSum
+}
+COVERAGE_PLAN {
+string planId
+string plotCode
+number headingDeg
+boolean headingAuto
+number implementWidthM
+number overlapM
+number laneSpacingM
+number laneCount
+number turnCount
+array lanes
+number workDistanceM
+number transferDistanceM
+number totalDistanceM
+number durationMin
+number areaMu
+number coverageRatio
+object path
+array warnings
+}
 ```
 
 **图示来源**
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
 - [apps/web/src/api/index.ts:125-146](file://apps/web/src/api/index.ts#L125-L146)
 - [apps/iot-service/src/device.repository.ts:31-44](file://apps/iot-service/src/device.repository.ts#L31-L44)
+- [apps/web/src/api/index.ts:771-791](file://apps/web/src/api/index.ts#L771-L791)
 
 **章节来源**
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
@@ -552,10 +715,11 @@ object polyline
 - 认证服务依赖内存Map存储会话，简单但非持久化
 - IoT设备服务依赖设备仓储（内存或SQL实现）和权限验证
 - 业务服务依赖公共契约包定义响应信封与分页结构
+- **覆盖规划服务依赖几何计算库和数学算法**，用于牛耕式作业带计算
 - 公共契约包仅导出类型与枚举，不依赖能力包，便于前后端共享
 - 权限验证依赖合约包的权限解析函数
 
-**更新** 新增了IoT设备服务和权限验证的依赖关系。
+**更新** 新增了覆盖规划服务的几何计算和数学算法依赖关系。
 
 ```mermaid
 graph LR
@@ -566,10 +730,12 @@ AUTH["认证服务"] --> MAP["内存会话Map"]
 IOT["IoT设备服务"] --> DEVICE_REPO["设备仓储"]
 IOT --> AUTHZ["权限验证"]
 PLOT["地块服务"] --> CONTRACTS["公共契约包"]
-OPERATION["操作服务"] --> NAVIGATION["导航算法"]
+OPERATION["操作服务"] --> COVERAGE["覆盖规划算法"]
+OPERATION --> NAVIGATION["导航算法"]
 CONTRACTS --> MESSAGES["消息模板"]
 TYPES --> CONTRACTS
 AUTHZ --> CONTRACTS
+COVERAGE --> GEOMETRY["几何计算库"]
 ```
 
 **图示来源**
@@ -579,6 +745,7 @@ AUTHZ --> CONTRACTS
 - [apps/iot-service/src/http.ts:1-8](file://apps/iot-service/src/http.ts#L1-L8)
 - [apps/plot-service/src/http.ts:4-7](file://apps/plot-service/src/http.ts#L4-L7)
 - [apps/operation-service/src/navigation.ts:1-3](file://apps/operation-service/src/navigation.ts#L1-L3)
+- [apps/operation-service/src/coverage.ts:1-3](file://apps/operation-service/src/coverage.ts#L1-L3)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
 - [packages/shared/src/authz.ts:1-3](file://packages/shared/src/authz.ts#L1-L3)
 
@@ -589,6 +756,7 @@ AUTHZ --> CONTRACTS
 - [apps/iot-service/src/http.ts:1-8](file://apps/iot-service/src/http.ts#L1-L8)
 - [apps/plot-service/src/http.ts:4-7](file://apps/plot-service/src/http.ts#L4-L7)
 - [apps/operation-service/src/navigation.ts:1-3](file://apps/operation-service/src/navigation.ts#L1-L3)
+- [apps/operation-service/src/coverage.ts:1-3](file://apps/operation-service/src/coverage.ts#L1-L3)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
 - [packages/shared/src/authz.ts:1-3](file://packages/shared/src/authz.ts#L1-L3)
 
@@ -603,8 +771,9 @@ AUTHZ --> CONTRACTS
 - 路网吸附：智能吸附站点到最近路网节点，提高路径精度
 - 设备查询优化：设备列表支持多维度筛选，减少前端过滤开销
 - 几何计算优化：管线长度自动计算，避免前端重复计算
+- **覆盖规划优化**：等距圆柱平面坐标转换，避免经纬度直接计算的精度损失；自动方向选择算法优化总里程；作业带间距自适应调整
 
-**更新** 新增了设备查询优化和几何计算优化相关的性能考虑。
+**更新** 新增了覆盖规划相关的优化考虑。
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -619,8 +788,11 @@ AUTHZ --> CONTRACTS
 - 设备权限错误：检查device:read和device:control权限是否正确授予
 - 设备编号冲突：创建设备时deviceNo必须唯一，避免重复编号
 - 设备状态无效：设备状态只能是ONLINE或OFFLINE，类型必须是预定义的10种之一
+- **覆盖规划参数错误**：plotCode不能为空，boundary需为有效的Polygon几何，implementWidthM需在0~50米之间
+- **覆盖规划几何错误**：地块边界顶点不足3个，无法铺作业带；作业带间距不为正；按给定幅宽铺不出任何作业带
+- **覆盖规划算法错误**：作业带超过2000条上限；地块边界退化导致无法计算
 
-**更新** 新增了设备相关的故障排查指导。
+**更新** 新增了覆盖规划相关的故障排查指导。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:37-86](file://apps/web/src/utils/request.ts#L37-L86)
@@ -628,11 +800,12 @@ AUTHZ --> CONTRACTS
 - [apps/plot-service/src/http.ts:100-103](file://apps/plot-service/src/http.ts#L100-L103)
 - [apps/iot-service/src/http.ts:72-76](file://apps/iot-service/src/http.ts#L72-L76)
 - [apps/operation-service/src/navigation.ts:400-447](file://apps/operation-service/src/navigation.ts#L400-L447)
+- [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
 
 ## 结论
-本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、设备管理、片区管理、基础设施管线、导航规划和消息模板等基本功能；后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
+本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、设备管理、片区管理、基础设施管线、导航规划、覆盖规划和消息模板等基本功能；**新增的覆盖规划功能进一步增强了农事作业的智能化水平**。后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
 
-**更新** 新增了设备管理API、完善的基础设施管线API和增强的认证授权逻辑，进一步完善了智慧农业平台的能力体系。
+**更新** 新增了覆盖规划API、完善的Web API客户端方法和增强的业务逻辑处理，进一步完善了智慧农业平台的能力体系。
 
 [本节为总结性内容，不直接分析具体文件]
 
@@ -681,6 +854,37 @@ AUTHZ --> CONTRACTS
 
 **章节来源**
 - [apps/iot-service/src/http.ts:50-130](file://apps/iot-service/src/http.ts#L50-L130)
+
+### 覆盖规划接口
+- **POST /api/v1/operations/coverage-plan**
+  - 请求体：{ plotCode, boundary, implementWidthM, overlapM?, headingDeg?, speedKmh?, turnSpeedKmh?, start?, areaMu? }
+  - 响应：CoveragePlan
+  - 说明：全地块覆盖式作业规划，自动计算牛耕式作业带路径
+- **GET /api/v1/operations/coverage-plans**
+  - 响应：CoveragePlan[]
+  - 说明：返回最近20条覆盖方案记录，按租户隔离
+
+**更新** 新增覆盖规划接口。
+
+**章节来源**
+- [apps/operation-service/src/http.ts:134-141](file://apps/operation-service/src/http.ts#L134-L141)
+- [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
+
+### 地块合并与拆分接口
+- **POST /api/v1/plots/merge**
+  - 请求体：{ parcelCodes: string[], parcelName?: string, plotType?: string, remark?: string }
+  - 响应：{ plot: Plot, sourceCodes: string[] }
+  - 说明：合并多个地块为单个地块，自动计算凸包边界和面积，归档源地块
+- **POST /api/v1/plots/split**
+  - 请求体：{ parcelCode: string, pieces: Array<{ parcelName: string; geom: GeoPolygon }>, keepSource?: boolean }
+  - 响应：{ plots: Plot[], sourceCode: string, sourceRemoved: boolean, pieceAreaSum: number }
+  - 说明：将单个地块拆分为多个子地块，可选保留或归档原地块
+
+**更新** 新增地块合并与拆分接口。
+
+**章节来源**
+- [apps/plot-service/src/http.ts:616-680](file://apps/plot-service/src/http.ts#L616-L680)
+- [apps/plot-service/src/plot.service.ts:276-411](file://apps/plot-service/src/plot.service.ts#L276-L411)
 
 ### 地块服务接口
 - GET /api/v1/plots/stats
@@ -765,14 +969,15 @@ AUTHZ --> CONTRACTS
 - PageResult：items、total、page、size、pages
 - 领域模型：Plot、Device、FarmTask、UserInfo等
 
-**更新** 新增了ZoneSummary、InfraLine、NavPlan等相关类型。
+**更新** 新增了ZoneSummary、InfraLine、NavPlan、CoveragePlan等相关类型。
 
 **章节来源**
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
 - [apps/web/src/api/index.ts:125-146](file://apps/web/src/api/index.ts#L125-L146)
 - [apps/web/src/api/index.ts:110-118](file://apps/web/src/api/index.ts#L110-L118)
-- [apps/web/src/api/index.ts:466-474](file://apps/web/src/api/index.ts#L466-L474)
+- [apps/web/src/api/index.ts:428-482](file://apps/web/src/api/index.ts#L428-L482)
+- [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
 
 ### Geo几何类型
 - Coordinate：经纬度坐标对象
@@ -803,3 +1008,27 @@ AUTHZ --> CONTRACTS
 
 **章节来源**
 - [apps/iot-service/src/device.repository.ts:12-29](file://apps/iot-service/src/device.repository.ts#L12-L29)
+
+### 地块合并拆分类型
+- MergePlotsInput：合并入参，包含源地块编码数组和可选的档案字段
+- MergePlotsResult：合并结果，包含新地块记录和源地块编码数组
+- SplitPlotPiece：拆分子地块定义，包含名称和几何边界
+- SplitPlotInput：拆分入参，包含源地块编码和子地块数组
+- SplitPlotResult：拆分结果，包含子地块数组、源地块信息和总面积
+
+**更新** 新增地块合并与拆分相关类型定义。
+
+**章节来源**
+- [apps/plot-service/src/plot.service.ts:55-99](file://apps/plot-service/src/plot.service.ts#L55-L99)
+
+### 覆盖规划类型
+- CoverageRequest：覆盖规划请求参数，包含地块编码、边界几何、农具幅宽、重叠距离、作业方向、速度等
+- CoveragePlan：覆盖规划结果，包含计划ID、作业方向、作业带信息、距离统计、覆盖率、连续路径等
+- CoverageLane：作业带定义，包含序号、段落号、坐标点和长度
+- CoveragePoint：坐标点定义，包含经度和纬度
+
+**更新** 新增覆盖规划相关类型定义。
+
+**章节来源**
+- [apps/operation-service/src/coverage.ts:24-82](file://apps/operation-service/src/coverage.ts#L24-L82)
+- [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
