@@ -6,6 +6,8 @@ import { authorizeRequest } from "@agri/shared";
 
 import { DEVICE_STATUSES, DEVICE_TYPES, DEFAULT_TENANT, InMemoryDeviceRepository } from "./device.repository.js";
 import type { Device, DeviceRepository, DeviceStatus, DeviceType, UpdateDeviceInput } from "./device.repository.js";
+import { DEFAULT_DEVICE_PROTOCOL, DEVICE_PROTOCOLS, normalizeBinding } from "./device-binding.js";
+import type { DeviceProtocol } from "./device-binding.js";
 
 /**
  * 设备台账 HTTP 接口。
@@ -70,6 +72,7 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
           type: url.searchParams.get("type")?.trim() || undefined,
           status: url.searchParams.get("status")?.trim() || undefined,
           plotCode: url.searchParams.get("plotCode")?.trim() || undefined,
+          protocol: url.searchParams.get("protocol")?.trim() || undefined,
         });
         const start = (pageNo - 1) * size;
         send(res, 200, { items: filtered.slice(start, start + size), total: filtered.length, page: pageNo, size, pages: Math.ceil(filtered.length / size) }, traceId);
@@ -88,6 +91,10 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
         if (!name) { send(res, 400, null, traceId, "设备名称不能为空"); return; }
         if (!DEVICE_TYPES.includes(type as DeviceType)) { send(res, 400, null, traceId, `设备类型需为 ${DEVICE_TYPES.join("/")}`); return; }
         if (!DEVICE_STATUSES.includes(status as DeviceStatus)) { send(res, 400, null, traceId, `设备状态需为 ${DEVICE_STATUSES.join("/")}`); return; }
+        const protocol = (text(body.protocol) || DEFAULT_DEVICE_PROTOCOL) as DeviceProtocol;
+        if (!DEVICE_PROTOCOLS.includes(protocol)) { send(res, 400, null, traceId, `接入协议需为 ${DEVICE_PROTOCOLS.join("/")}`); return; }
+        // 现场协议设备的接入地址与剖面在建档时就校验到位，否则要等网关下发才发现连不上
+        const binding = normalizeBinding(protocol, body.binding, type as DeviceType) ?? undefined;
         if (await devices.findByDeviceNo(tenantId, deviceNo)) { send(res, 409, null, traceId, `设备编号 ${deviceNo} 已存在`); return; }
 
         const created = await devices.create(tenantId, {
@@ -96,6 +103,8 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
           type: type as DeviceType,
           status: status as DeviceStatus,
           ...(plotCode ? { plotCode } : {}),
+          protocol,
+          ...(binding ? { binding } : {}),
         });
         send(res, 201, created, traceId);
         return;
@@ -119,9 +128,11 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
       }
       // 台账配置编辑：只改台账字段，编号、归属租户与最后上报时间不接受手工写入
       if (id && !match?.[2] && req.method === "PUT") {
-        if (!(await devices.find(tenantId, id))) { send(res, 404, null, traceId, "设备不存在"); return; }
+        const current = await devices.find(tenantId, id);
+        if (!current) { send(res, 404, null, traceId, "设备不存在"); return; }
         const body = await json(req);
         const input: UpdateDeviceInput = {};
+        let nextType = current.type;
         if (body.name !== undefined) {
           const name = text(body.name);
           if (!name) { send(res, 400, null, traceId, "设备名称不能为空"); return; }
@@ -131,6 +142,7 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
           const type = text(body.type);
           if (!DEVICE_TYPES.includes(type as DeviceType)) { send(res, 400, null, traceId, `设备类型需为 ${DEVICE_TYPES.join("/")}`); return; }
           input.type = type as DeviceType;
+          nextType = type as DeviceType;
         }
         if (body.status !== undefined) {
           const status = text(body.status);
@@ -140,6 +152,14 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
         if (body.plotCode !== undefined) {
           if (typeof body.plotCode !== "string") { send(res, 400, null, traceId, "地块编码需为字符串，空串表示解绑地块"); return; }
           input.plotCode = body.plotCode.trim();
+        }
+        // 接入协议与绑定一起改：协议不变时缺省沿用在册绑定，协议改了则旧绑定作废、必须给新的
+        if (body.protocol !== undefined || body.binding !== undefined) {
+          const nextProtocol = body.protocol === undefined ? current.protocol : (text(body.protocol) as DeviceProtocol);
+          if (!DEVICE_PROTOCOLS.includes(nextProtocol)) { send(res, 400, null, traceId, `接入协议需为 ${DEVICE_PROTOCOLS.join("/")}`); return; }
+          const rawBinding = body.binding !== undefined ? body.binding : nextProtocol === current.protocol ? current.binding : null;
+          input.protocol = nextProtocol;
+          input.binding = normalizeBinding(nextProtocol, rawBinding, nextType);
         }
         if (Object.keys(input).length === 0) { send(res, 400, null, traceId, "没有需要修改的台账字段"); return; }
         const updated = await devices.update(tenantId, id, input);

@@ -5,7 +5,7 @@ import { DEFAULT_TENANT, SqlDeviceRepository } from "../src/device.repository.js
 
 /**
  * SQL 设备仓储的语句与映射验证：部署走 sql 模式，
- * 列名、筛选片段、租户前缀和「空串/NULL 不当成真实取值」这些口径只有这里能守住。
+ * 列名、筛选片段、租户前缀、接入协议/绑定列和「空串/NULL 不当成真实取值」这些口径只有这里能守住。
  */
 
 interface Captured {
@@ -36,7 +36,7 @@ function makeClient(rows: Record<string, unknown>[] = []) {
 const EAST_1 = "511723-000001-01-00001-0000-5";
 const OTHER_TENANT = "tenant-beta";
 
-/** 台账行样例：迁移 035 之后每行都带 tenant_id，映射出的归属全靠它 */
+/** 台账行样例：迁移 035 之后每行都带 tenant_id，迁移 038 之后带接入协议与绑定 */
 function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: "device-x",
@@ -46,6 +46,8 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     type: "SOIL_SENSOR",
     status: "ONLINE",
     plot_code: EAST_1,
+    protocol: "HTTP",
+    binding_json: null,
     last_seen_at: "2026-11-09T01:02:03.000Z",
     created_at: "2026-11-01",
     updated_at: "2026-11-02",
@@ -60,10 +62,26 @@ describe("SqlDeviceRepository", () => {
       row({ id: "device-y", device_no: "DZ-Y-1", name: "首部气象站", type: "WEATHER_STATION", status: "OFFLINE", plot_code: "", last_seen_at: null }),
     ]);
     const list = await new SqlDeviceRepository(client).list(DEFAULT_TENANT);
-    expect(list[0]).toMatchObject({ id: "device-x", tenantId: DEFAULT_TENANT, deviceNo: "DZ-X-1", type: "SOIL_SENSOR", status: "ONLINE", plotCode: EAST_1 });
+    expect(list[0]).toMatchObject({ id: "device-x", tenantId: DEFAULT_TENANT, deviceNo: "DZ-X-1", type: "SOIL_SENSOR", status: "ONLINE", plotCode: EAST_1, protocol: "HTTP" });
     expect(list[0]!.lastSeenAt).toBe("2026-11-09T01:02:03.000Z");
     expect(list[1]!.plotCode).toBeUndefined();
+    expect(list[1]!.binding).toBeUndefined();
     expect(list[1]!.lastSeenAt).toBeNull();
+  });
+
+  it("现场协议设备的绑定从 JSONB 还原，对象与文本两种形状都收", async () => {
+    const binding = { host: "10.20.30.40", port: 502, unitId: 3, profile: "WATER_M3", timeoutMs: 2000 };
+    const { client, calls } = makeClient([
+      row({ id: "device-p", device_no: "DZ-P-9", type: "IRRIGATION_PUMP", protocol: "MODBUS_TCP", binding_json: binding }),
+      row({ id: "device-q", device_no: "DZ-Q-9", type: "IRRIGATION_VALVE", protocol: "MODBUS_TCP", binding_json: JSON.stringify(binding) }),
+    ]);
+    const list = await new SqlDeviceRepository(client).list(DEFAULT_TENANT, { protocol: "MODBUS_TCP" });
+    expect(list.map((device) => device.protocol)).toEqual(["MODBUS_TCP", "MODBUS_TCP"]);
+    expect(list[0]!.binding).toEqual(binding);
+    expect(list[1]!.binding).toEqual(binding);
+    // 网关按协议取数，落到 SQL 是等值条件
+    expect(calls[0]!.query).toContain("WHERE tenant_id = $1 AND protocol = $2");
+    expect(calls[0]!.params).toEqual([DEFAULT_TENANT, "MODBUS_TCP"]);
   });
 
   it("筛选条件按出现顺序编号占位，租户固定为第一个条件", async () => {
@@ -100,6 +118,21 @@ describe("SqlDeviceRepository", () => {
     await new SqlDeviceRepository(client).create(DEFAULT_TENANT, { deviceNo: "DZ-N-002", name: "无地块设备", type: "WEATHER_STATION", status: "ONLINE" });
     const insert = calls.find((call) => call.query.includes("INSERT INTO devices"));
     expect(insert!.params[6]).toBe("");
+    expect(insert!.params[7]).toBe("HTTP");
+    expect(insert!.params[8]).toBeNull();
+  });
+
+  it("现场协议建档把绑定序列化成 JSONB，缺省端口与超时由入参给全", async () => {
+    const { client, calls } = makeClient();
+    const binding = { host: "10.20.30.40", port: 1502, unitId: 3, profile: "WATER_M3", timeoutMs: 3000 };
+    const created = await new SqlDeviceRepository(client).create(DEFAULT_TENANT, { deviceNo: "DZ-N-003", name: "联片泵站", type: "IRRIGATION_PUMP", status: "ONLINE", protocol: "MODBUS_TCP", binding });
+    const insert = calls.find((call) => call.query.includes("INSERT INTO devices"));
+    expect(insert!.query).toContain("protocol, binding_json");
+    expect(insert!.query).toContain("$9::jsonb");
+    expect(insert!.params[7]).toBe("MODBUS_TCP");
+    expect(JSON.parse(String(insert!.params[8]))).toEqual(binding);
+    expect(created.protocol).toBe("MODBUS_TCP");
+    expect(created.binding).toEqual(binding);
   });
 
   it("按编号与按 id 查询都限定单条并锁在租户内，供撞号校验使用", async () => {
@@ -126,7 +159,7 @@ describe("SqlDeviceRepository", () => {
       async $queryRawUnsafe<T>(query: string, ...params: unknown[]) {
         calls.push({ query, params });
         if (!query.includes("UPDATE")) return [current] as T;
-        return [{ ...current, name: params[0], type: params[1], status: params[2], plot_code: params[3], updated_at: params[4] }] as T;
+        return [{ ...current, name: params[0], type: params[1], status: params[2], plot_code: params[3], protocol: params[4], binding_json: params[5], updated_at: params[6] }] as T;
       },
       async $executeRawUnsafe(query: string, ...params: unknown[]) {
         calls.push({ query, params });
@@ -138,14 +171,17 @@ describe("SqlDeviceRepository", () => {
     const statement = calls.find((call) => call.query.includes("UPDATE devices"));
     expect(statement).toBeDefined();
     expect(statement!.query).toContain("RETURNING");
-    expect(statement!.query).toContain("updated_at = $5::timestamptz");
-    expect(statement!.query).toContain("WHERE tenant_id = $6 AND id = $7");
+    expect(statement!.query).toContain("updated_at = $7::timestamptz");
+    expect(statement!.query).toContain("WHERE tenant_id = $8 AND id = $9");
     // 名称与类型没传，参数里仍是当前行的取值；解绑地块写成空串而不是 NULL
     expect(statement!.params.slice(0, 4)).toEqual(["甲", "SOIL_SENSOR", "OFFLINE", ""]);
-    expect(statement!.params.slice(5)).toEqual([DEFAULT_TENANT, "device-a"]);
-    expect(updated).toMatchObject({ id: "device-a", tenantId: DEFAULT_TENANT, deviceNo: "DZ-A-1", name: "甲", type: "SOIL_SENSOR", status: "OFFLINE" });
+    // 没传协议与绑定：沿用当前行的 HTTP，绑定为 NULL 与 CHECK 约束同口径
+    expect(statement!.params.slice(4, 6)).toEqual(["HTTP", null]);
+    expect(statement!.params.slice(7)).toEqual([DEFAULT_TENANT, "device-a"]);
+    expect(updated).toMatchObject({ id: "device-a", tenantId: DEFAULT_TENANT, deviceNo: "DZ-A-1", name: "甲", type: "SOIL_SENSOR", status: "OFFLINE", protocol: "HTTP" });
     expect(updated!.plotCode).toBeUndefined();
-    expect(updated!.updatedAt).toBe(String(statement!.params[4]));
+    expect(updated!.binding).toBeUndefined();
+    expect(updated!.updatedAt).toBe(String(statement!.params[6]));
   });
 
   it("设备不存在时更新返回 null，不发写语句", async () => {
@@ -165,7 +201,7 @@ describe("SqlDeviceRepository", () => {
     // create 走 INSERT，租户写在 VALUES 的参数里而不是 WHERE
     const scoped = calls.filter((call) => !call.query.includes("INSERT INTO devices"));
     expect(scoped).toHaveLength(5);
-    // 占位符序号从语句里现取：update 的 SET 子句在前，租户落在 $6 而不是 $1
+    // 占位符序号从语句里现取：update 的 SET 子句在前，租户不在 $1
     expect(
       scoped.map((call) => {
         const placeholder = /tenant_id = \$(\d+)/.exec(call.query)?.[1];

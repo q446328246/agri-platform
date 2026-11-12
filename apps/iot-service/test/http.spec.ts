@@ -234,3 +234,95 @@ describe("iot HTTP API", () => {
     expect((await fetch(`${base}/api/v1/devices/${created.data.id}`)).status).toBe(404);
   });
 });
+
+/**
+ * 现场接入协议（迁移 038）：台账要能记住「网关怎么连这台设备」。
+ * 校验口径全在 device-binding.ts，这里验的是接口把这些规则真实落住，且拒掉的请求不留半行台账。
+ */
+describe("设备现场接入绑定", () => {
+  it("Modbus 建档缺省项按规范补齐，协议筛选只取现场设备", async () => {
+    const base = await start(createIotHttpServer());
+    const post = (body: unknown) => fetch(`${base}/api/v1/devices`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await jsonOf(await post({
+      deviceNo: "DZ-P-100",
+      name: "联片灌溉泵站 P100",
+      type: "IRRIGATION_PUMP",
+      protocol: "MODBUS_TCP",
+      binding: { host: "10.20.30.41", profile: "WATER_M3" },
+    }));
+    expect(created.data.protocol).toBe("MODBUS_TCP");
+    // 端口/单元标识/超时都是可以从规范与剖面缺省推出的值，不该让人反复抄
+    expect(created.data.binding).toEqual({ host: "10.20.30.41", port: 502, unitId: 1, profile: "WATER_M3", timeoutMs: 2000 });
+
+    // 演示台账 12 台全是回调式，加上新建的这一台现场设备
+    const field = await jsonOf(await fetch(`${base}/api/v1/devices?protocol=MODBUS_TCP&size=200`));
+    expect(field.data.items.map((item: { deviceNo: string }) => item.deviceNo)).toEqual(["DZ-P-100"]);
+    const callback = await jsonOf(await fetch(`${base}/api/v1/devices?protocol=HTTP&size=200`));
+    expect(callback.data.total).toBe(demoDevices().length);
+  });
+
+  it("协议与绑定不配套、剖面未知或与类型不符都会被拒，台账不留半行", async () => {
+    const base = await start(createIotHttpServer());
+    const post = (body: unknown) => fetch(`${base}/api/v1/devices`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const unknownProtocol = await post({ deviceNo: "DZ-X-110", name: "非法协议", type: "SOIL_SENSOR", protocol: "MODBUS_RTU" });
+    expect(unknownProtocol.status).toBe(400);
+    expect((await jsonOf(unknownProtocol)).message).toContain("MODBUS_TCP");
+
+    const noBinding = await post({ deviceNo: "DZ-X-111", name: "缺绑定", type: "IRRIGATION_PUMP", protocol: "MODBUS_TCP" });
+    expect(noBinding.status).toBe(400);
+    expect((await jsonOf(noBinding)).message).toContain("绑定");
+
+    const httpWithBinding = await post({ deviceNo: "DZ-X-112", name: "回调式带绑定", type: "SOIL_SENSOR", binding: { host: "10.0.0.1", profile: "SWITCH_ONLY" } });
+    expect(httpWithBinding.status).toBe(400);
+    expect((await jsonOf(httpWithBinding)).message).toContain("HTTP");
+
+    const unknownProfile = await post({ deviceNo: "DZ-X-113", name: "未知剖面", type: "IRRIGATION_PUMP", protocol: "MODBUS_TCP", binding: { host: "10.0.0.1", profile: "TURBO_9000" } });
+    expect(unknownProfile.status).toBe(400);
+    expect((await jsonOf(unknownProfile)).message).toContain("WATER_M3");
+
+    // 给墒情站配启停剖面等于对着表计下令，类型与剖面必须对得上
+    const mismatched = await post({ deviceNo: "DZ-X-114", name: "类型不符", type: "SOIL_SENSOR", protocol: "MODBUS_TCP", binding: { host: "10.0.0.1", profile: "WATER_M3" } });
+    expect(mismatched.status).toBe(400);
+    expect((await jsonOf(mismatched)).message).toContain("SOIL_SENSOR");
+
+    const badUnit = await post({ deviceNo: "DZ-X-115", name: "单元标识越界", type: "IRRIGATION_VALVE", protocol: "MODBUS_TCP", binding: { host: "10.0.0.1", unitId: 300, profile: "WATER_M3" } });
+    expect(badUnit.status).toBe(400);
+
+    const blankHost = await post({ deviceNo: "DZ-X-116", name: "空地址", type: "IRRIGATION_VALVE", protocol: "MODBUS_TCP", binding: { host: "  ", profile: "WATER_M3" } });
+    expect(blankHost.status).toBe(400);
+
+    const listed = await jsonOf(await fetch(`${base}/api/v1/devices?size=200`));
+    expect(listed.data.total).toBe(demoDevices().length);
+  });
+
+  it("改协议必须同时给出配套绑定，改回回调式时绑定清空", async () => {
+    const base = await start(createIotHttpServer());
+    const put = (id: string, body: unknown) => fetch(`${base}/api/v1/devices/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const switched = await jsonOf(await put("device-pump-001", { protocol: "MODBUS_TCP", binding: { host: "10.20.30.42", port: 1502, unitId: 4, profile: "WATER_M3", timeoutMs: 5000 } }));
+    expect(switched.data).toMatchObject({ deviceNo: "DZ-P-001", protocol: "MODBUS_TCP" });
+    expect(switched.data.binding).toEqual({ host: "10.20.30.42", port: 1502, unitId: 4, profile: "WATER_M3", timeoutMs: 5000 });
+
+    // 只改名称不动协议：绑定原样留着，不会因为编辑把现场接入抹掉
+    const renamed = await jsonOf(await put("device-pump-001", { name: "联片灌溉泵站（已接总线）" }));
+    expect(renamed.data.binding).toEqual(switched.data.binding);
+    expect(renamed.data.protocol).toBe("MODBUS_TCP");
+
+    // 在册绑定不改协议时也不必填一遍
+    const bindingOnly = await jsonOf(await put("device-pump-001", { binding: { host: "10.20.30.99", profile: "WATER_M3" } }));
+    expect(bindingOnly.data.binding.host).toBe("10.20.30.99");
+
+    const bareSwitch = await put("device-pump-001", { protocol: "HTTP" });
+    expect(bareSwitch.status).toBe(200);
+    const backToCallback = await jsonOf(bareSwitch);
+    expect(backToCallback.data.protocol).toBe("HTTP");
+    expect(backToCallback.data.binding).toBeUndefined();
+
+    const stillModbus = await jsonOf(await put("device-station-002", { protocol: "MODBUS_TCP" }));
+    expect(stillModbus.message).toContain("绑定");
+    // 被拒的这次不改协议
+    expect((await jsonOf(await fetch(`${base}/api/v1/devices/device-station-002`))).data.protocol).toBe("HTTP");
+  });
+});

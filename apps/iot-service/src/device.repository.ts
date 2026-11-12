@@ -1,10 +1,13 @@
 import type { PrismaClientLike } from "@agri/db";
 import { keywordHits, likePattern, toIsoTimestamp, ulid } from "@agri/shared";
 
+import { DEFAULT_DEVICE_PROTOCOL } from "./device-binding.js";
+import type { DeviceProtocol, ModbusBinding } from "./device-binding.js";
+
 /**
  * 设备台账仓储。
  *
- * 表结构由迁移 014 管理、迁移 035 补上租户归属；内存实现装载与迁移同一批演示设备，
+ * 表结构由迁移 014 管理、迁移 035 补上租户归属、迁移 038 补上现场接入绑定；内存实现装载与迁移同一批演示设备，
  * 供单测与未启用数据库的本地模式使用。
  * 设备 id 保持既有 `device-*` 形态，遥测读数、控制指令与摄像头配置都按这些 id 关联，不能改口径。
  *
@@ -46,6 +49,10 @@ export interface Device {
   status: DeviceStatus;
   /** 绑定地块编码，未绑定时省略 */
   plotCode?: string | undefined;
+  /** 接入协议（迁移 038）：HTTP 为设备回调，MODBUS_TCP 由 iot-service 现场网关主动下发 */
+  protocol: DeviceProtocol;
+  /** 现场接入绑定（地址 + 剖面）；协议为 HTTP 时省略 */
+  binding?: ModbusBinding | undefined;
   /** 最后一次上报时间；新登记但尚未上报的设备为 null，不拿当前时刻冒充 */
   lastSeenAt: string | null;
   createdAt: string;
@@ -59,6 +66,9 @@ export interface CreateDeviceInput {
   type: DeviceType;
   status: DeviceStatus;
   plotCode?: string | undefined;
+  /** 省略即按缺省协议（HTTP 回调）建档 */
+  protocol?: DeviceProtocol | undefined;
+  binding?: ModbusBinding | undefined;
 }
 
 /**
@@ -66,6 +76,8 @@ export interface CreateDeviceInput {
  *
  * deviceNo 是出厂标识，遥测读数与控制指令都按它关联，不提供修改；
  * lastSeenAt 只能由上报侧写入，配置编辑不碰，避免手工把离线设备「点亮」。
+ * 协议与绑定的配套关系（HTTP 不留绑定、现场协议必给绑定）由 HTTP 层校验后再进来，
+ * 这里只负责按字段合并。
  */
 export interface UpdateDeviceInput {
   name?: string;
@@ -73,6 +85,10 @@ export interface UpdateDeviceInput {
   status?: DeviceStatus;
   /** 传空串表示解绑地块，省略表示不改绑定 */
   plotCode?: string;
+  /** 接入协议：与 binding 配套改，协议与绑定同生同灭的口径由迁移 038 的 CHECK 兜住 */
+  protocol?: DeviceProtocol;
+  /** 传 null 表示清空绑定（改回 HTTP 回调时用），省略表示不改绑定 */
+  binding?: ModbusBinding | null;
 }
 
 /** 台账筛选条件，全部为精确或子串匹配，缺省不过滤 */
@@ -82,6 +98,8 @@ export interface DeviceFilter {
   type?: string | undefined;
   status?: string | undefined;
   plotCode?: string | undefined;
+  /** 接入协议：现场网关只取非 HTTP 的设备，不用把整本台账拉过去再筛 */
+  protocol?: string | undefined;
 }
 
 export interface DeviceRepository {
@@ -101,6 +119,7 @@ function matchesFilter(device: Device, filter: DeviceFilter | undefined): boolea
   if (filter.type && device.type !== filter.type) return false;
   if (filter.status && device.status !== filter.status) return false;
   if (filter.plotCode && device.plotCode !== filter.plotCode) return false;
+  if (filter.protocol && device.protocol !== filter.protocol) return false;
   if (filter.keyword) {
     if (!keywordHits(filter.keyword, [device.name, device.deviceNo])) return false;
   }
@@ -150,6 +169,9 @@ export function demoDevices(tenantId: string = DEFAULT_TENANT): Device[] {
     type,
     status,
     ...(plotCode ? { plotCode } : {}),
+    // 演示台账全部保持回调式接入：现场协议设备必须由人给出真实地址与剖面，
+    // 编一个假 IP 进种子只会让网关每轮都连不上，把失败日志当成演示数据
+    protocol: DEFAULT_DEVICE_PROTOCOL,
     lastSeenAt,
     createdAt: lastSeenAt ?? now,
     updatedAt: lastSeenAt ?? now,
@@ -192,6 +214,8 @@ export class InMemoryDeviceRepository implements DeviceRepository {
       type: input.type,
       status: input.status,
       ...(input.plotCode ? { plotCode: input.plotCode } : {}),
+      protocol: input.protocol ?? DEFAULT_DEVICE_PROTOCOL,
+      ...(input.binding ? { binding: structuredClone(input.binding) } : {}),
       lastSeenAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -220,20 +244,33 @@ function mergeDevice(current: Device, input: UpdateDeviceInput, updatedAt: strin
     name: input.name ?? current.name,
     type: input.type ?? current.type,
     status: input.status ?? current.status,
+    protocol: input.protocol ?? current.protocol,
     updatedAt,
   };
   if (input.plotCode === "") delete merged.plotCode;
   else if (input.plotCode !== undefined) merged.plotCode = input.plotCode;
+  if (input.binding === null) delete merged.binding;
+  else if (input.binding !== undefined) merged.binding = structuredClone(input.binding);
   return merged;
 }
 
-const DEVICE_COLUMNS = "id, tenant_id, device_no, name, type, status, plot_code, last_seen_at, created_at, updated_at";
+const DEVICE_COLUMNS = "id, tenant_id, device_no, name, type, status, plot_code, protocol, binding_json, last_seen_at, created_at, updated_at";
+
+/** JSONB 列在不同驱动下可能是对象也可能是文本，两种都收成绑定对象；空值返回 undefined 而不是 null */
+function toBinding(row: Record<string, unknown>): ModbusBinding | undefined {
+  const raw = row.binding_json;
+  if (raw === null || raw === undefined || raw === "") return undefined;
+  const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  return parsed as ModbusBinding;
+}
 
 export class SqlDeviceRepository implements DeviceRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
   private toDevice(row: Record<string, unknown>): Device {
     const plotCode = String(row.plot_code ?? "");
+    const binding = toBinding(row);
     return {
       id: String(row.id),
       tenantId: String(row.tenant_id),
@@ -242,6 +279,8 @@ export class SqlDeviceRepository implements DeviceRepository {
       type: String(row.type) as DeviceType,
       status: String(row.status) as DeviceStatus,
       ...(plotCode ? { plotCode } : {}),
+      protocol: String(row.protocol) as DeviceProtocol,
+      ...(binding ? { binding } : {}),
       lastSeenAt: row.last_seen_at === null || row.last_seen_at === undefined ? null : toIsoTimestamp(row.last_seen_at),
       createdAt: toIsoTimestamp(row.created_at),
       updatedAt: toIsoTimestamp(row.updated_at),
@@ -262,6 +301,10 @@ export class SqlDeviceRepository implements DeviceRepository {
     if (filter?.plotCode) {
       values.push(filter.plotCode);
       conditions.push(`plot_code = $${values.length}`);
+    }
+    if (filter?.protocol) {
+      values.push(filter.protocol);
+      conditions.push(`protocol = $${values.length}`);
     }
     if (filter?.keyword) {
       // 转义 LIKE 通配符，否则关键词里的 % 和 _ 会当通配符用，和内存模式的字面包含对不上
@@ -306,13 +349,15 @@ export class SqlDeviceRepository implements DeviceRepository {
       type: input.type,
       status: input.status,
       ...(input.plotCode ? { plotCode: input.plotCode } : {}),
+      protocol: input.protocol ?? DEFAULT_DEVICE_PROTOCOL,
+      ...(input.binding ? { binding: input.binding } : {}),
       lastSeenAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
     await this.client.$executeRawUnsafe(
-      `INSERT INTO devices (id, tenant_id, device_no, name, type, status, plot_code, last_seen_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8::timestamptz, $9::timestamptz)`,
+      `INSERT INTO devices (id, tenant_id, device_no, name, type, status, plot_code, protocol, binding_json, last_seen_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NULL, $10::timestamptz, $11::timestamptz)`,
       device.id,
       device.tenantId,
       device.deviceNo,
@@ -320,6 +365,8 @@ export class SqlDeviceRepository implements DeviceRepository {
       device.type,
       device.status,
       input.plotCode ?? "",
+      device.protocol,
+      device.binding ? JSON.stringify(device.binding) : null,
       device.createdAt,
       device.updatedAt,
     );
@@ -331,13 +378,15 @@ export class SqlDeviceRepository implements DeviceRepository {
     if (!current) return null;
     const next = mergeDevice(current, input, new Date().toISOString());
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `UPDATE devices SET name = $1, type = $2, status = $3, plot_code = $4, updated_at = $5::timestamptz
-       WHERE tenant_id = $6 AND id = $7
+      `UPDATE devices SET name = $1, type = $2, status = $3, plot_code = $4, protocol = $5, binding_json = $6::jsonb, updated_at = $7::timestamptz
+       WHERE tenant_id = $8 AND id = $9
        RETURNING ${DEVICE_COLUMNS}`,
       next.name,
       next.type,
       next.status,
       next.plotCode ?? "",
+      next.protocol,
+      next.binding ? JSON.stringify(next.binding) : null,
       next.updatedAt,
       tenantId,
       id,
