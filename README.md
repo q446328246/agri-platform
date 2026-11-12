@@ -265,6 +265,10 @@ agri-platform-nodejs-scaffold/
   `CONTROL_OUTBOX_RELAY_INTERVAL_MS` 把 `control.command.timeout` 投进共享事件日志，消息中心据此生成告警
   （急停为 CRITICAL，其余 WARNING，按指令 id 聚合不刷屏）。收口与迟到的真实回执抢同一个 `version`，
   先到先得：谁先落到终态另一边拿 409，不悄悄覆盖任何一侧的结果，「设备到底做没做」交给超时告警去人工确认。
+  演示种子 `010` 里那几条一直停在 QUEUED/SENT 的指令由迁移 `036` 预先收口成 `FAILED`（只认 `cmd-demo-` 前缀且仍在途的行，
+  留言按「已下发未回执」「入队未下发」分开写明是演示数据收口、不是设备故障），这样 control-service 一起来不会给演示库
+  推五条没人认领的超时告警；036 **不**回填 `sent_at`/`acked_at`（031 的理由依旧成立），也**不**往 `control_outbox` 投递事件。
+  现场自己下的超时指令仍归收口任务处理——它才会连带推告警。
   水肥类指令结单（`DONE` + `IRRIGATION`/`FERTILIZATION`）不再只改状态：同一事务推对应主题，把「灌了多少水、施了多少肥、
   作业多久」回流给档案与消息中心。数值只有两条正路——设备在 `result` 里实测上报（`DEVICE`），或按指令分区参数
   现算方案总量（`PLAN`：灌溉取 `totalWaterVolume`，施肥取配方千克/亩 × 分区面积合计的 `totalKg`）/按状态推进时间

@@ -406,7 +406,7 @@
 - **生命周期**：`QUEUED → SENT → ACKED → DONE`，任一在途状态（`QUEUED/SENT/ACKED`）都可被 `FAILED` 收口，终态不可再改。跃迁表与合法性判断放在 `control.repository.ts`（`TRANSITIONS` + `canTransition`），同态重复上报**不算跃迁**，由端点按幂等返回。
 - **迁移 `031_control_command_receipt.sql`**：重建 `status` CHECK 纳入 `ACKED/DONE`，`type` CHECK 纳入 `ESTOP`（急停与农事四类共用一条回执链路）；新增 `sent_at`/`acked_at`/`finished_at`/`receipt_message`/`result_json`/`version`；补 `receipt_order_check`（先下发、再接收、后结束，乱序时间直接拒绝）与在途部分索引 `idx_control_commands_open`（`WHERE status IN ('QUEUED','SENT','ACKED')`，终态行不参与扫描）。旧行全部落在新枚举子集内，不回填。**未应用到任何库**（按交付口径只在用户点名时迁移）。
 - **仓储双模**：`transition()` 内存与 SQL 同一套语义——SQL 侧先 `statusOf(id)` 取库内真实状态判合法（取不到行 = 非法，早退 `null`），再 `UPDATE ... WHERE id = $1 AND version = $2 RETURNING` 做乐观锁，状态列用 `CASE` 只写当前跃迁该落的时间戳，`receipt_message`/`result_json` 用 `COALESCE` 保留旧值；版本冲突返回 `null`，由 HTTP 层翻成 409。查询新增 `pending`（只看非终态）与 `pendingOverMin`（超时），SQL 用 `now() - COALESCE(acked_at, sent_at, created_at) > make_interval(mins => $n)`，内存实现同口径。
-- **超时不靠定时改状态**（`#95` 起改为「可见 + 自动收口」，口径同源不变，见下一节）：`pendingMinutesOf(command, now)` 由 `COALESCE(ackedAt, sentAt, createdAt)` **现算**，HTTP 侧 `toView()` 给每条在途指令附 `pendingMin` 与 `overdue`；阈值走 `CONTROL_RECEIPT_TIMEOUT_MIN`（默认 15 分钟，`.env.example` 已登记）。这样既不虚构设备行为，也不会把演示库里的历史指令自动刷成 FAILED。031 也**不回填** `sent_at`：历史 `SENT` 行没有可信的下发时刻，宁可回退到 `created_at` 显示「已等待 N 分钟」，也不造一个假时间——因此演示库里那几条 `010` 种子的 SENT 指令会带「超时未回执」红标，这是如实反映「无人确认设备收到」，不是缺陷。**注**：`#95` 上线后，SQL 模式的收口任务确实会把这批陈旧在途指令刷成 `FAILED`（并各推一条超时告警）——这正是「没人确认设备收到」的处置结果，不是数据损坏；不想动演示库就别启 `control-service` 的 HTTP 模式。
+- **超时不靠定时改状态**（`#95` 起改为「可见 + 自动收口」，口径同源不变，见下一节）：`pendingMinutesOf(command, now)` 由 `COALESCE(ackedAt, sentAt, createdAt)` **现算**，HTTP 侧 `toView()` 给每条在途指令附 `pendingMin` 与 `overdue`；阈值走 `CONTROL_RECEIPT_TIMEOUT_MIN`（默认 15 分钟，`.env.example` 已登记）。这样既不虚构设备行为，也不会把演示库里的历史指令自动刷成 FAILED。031 也**不回填** `sent_at`：历史 `SENT` 行没有可信的下发时刻，宁可回退到 `created_at` 显示「已等待 N 分钟」，也不造一个假时间——因此演示库里那几条 `010` 种子的 SENT 指令会带「超时未回执」红标，这是如实反映「无人确认设备收到」，不是缺陷。~~**注**：`#95` 上线后，SQL 模式的收口任务确实会把这批陈旧在途指令刷成 `FAILED`（并各推一条超时告警）——这正是「没人确认设备收到」的处置结果，不是数据损坏；不想动演示库就别启 `control-service` 的 HTTP 模式。~~（「别启 HTTP 模式」这个 workaround 已由迁移 `036` 取代，见本节末「演示库陈旧在途指令收口」一节：演示行预先收口到终态，收口任务对演示库无事可做，现场指令仍按运行时收口并连带推事件。）
 - **设备通道（复用 `DEVICE_CALLBACK_TOKEN` 白名单思路）**：
   - `POST /api/v1/control/device/dispatch`：网关领取，`QUEUED → SENT`；未知指令 404，`FAILED` 后拒绝再下发 409，已推进过的幂等返回 200 现有记录（重试不用猜自己有没有领到）。
   - `POST /api/v1/control/device/receipt`：`status` 只收 `ACKED/DONE/FAILED`（想报 `SENT` → 400 并指明改用 `dispatch`）；`FAILED` 必须带 `message`；`at` 给了就必须可解析；`result` 必须是 JSON 对象；**急停 `ESTOP` 的 `DONE` 必须带 `result.confirmed === true`**，否则 400「必须带到位确认」——服务端硬约束，不靠前端勾选。非法跃迁 409 带上当前状态，版本冲突 409 提示刷新。
@@ -496,6 +496,17 @@
 - **仍不做**：不在消费时自动跑 `evaluateOutcome`——评估要作业后的实测含水率，设备回执里没有这个数，自动跑等于拿旧读数评估新作业。评估时机仍由调用方掌握，回流表只负责把执行事实备齐。
 - **用例**：`decision-service/test/execution.spec.ts`（新，11 例：灌溉/施肥各记各的、人工指令跳过且无失败、同指令重投不覆盖首次留痕、用量缺省时来源字段一并留空、地块以处方为准、处方不存在与载荷非法分别失败、位点推进不重复、按处方查询、接口分页与过滤）；`sql-decision-repository.spec.ts` 增 `describe.runIf(DB_URL)` 的真实库幂等（需先应用迁移 034）；`control-service/test/command-finished.spec.ts` 增处方标识三条（处方指令带 id、人工指令不带、空白/非字符串/待 trim）。**按交付口径未跑验证。**
 
+### 2026-11-12：演示库陈旧在途指令收口（`036_control_command_demo_closure.sql`）
+
+- **问题**：`010` 的六条演示指令里五条停在 `QUEUED`/`SENT`，`031` 补回执时间戳时**故意不回填**（没有可信的下发时刻，编一个等于伪造设备上报）。`#95` 的收口任务上线后这变成真麻烦：SQL 模式下 `control-service` 一起来，`ControlReceiptSweeper` 就把这批演示行当「超时未回执」刷成 `FAILED`，并各推一条 `control.command.timeout` 进消息中心。演示数据不是真实事故，不该占用现场告警通道；当时文档里给的 workaround 是「不想动演示库就别启 HTTP 模式」，那是把功能开关当数据修复用，不成立。
+- **迁移 `036_control_command_demo_closure.sql`**：一条 `UPDATE`，按运行时跃迁同样的写法落终态——`status = 'FAILED'`、`finished_at = now()`、`version = version + 1`（看板读到的形状与真实收口过的指令一致）。
+  - **范围**：`id LIKE 'cmd-demo-%' AND status IN ('QUEUED','SENT','ACKED')`。前缀按 `010` 的演示编号约定派生，不手写五个 id 的清单（`010` 日后补种子不会被漏掉）；真实指令的 id 由服务生成，不带这一前缀，加上在途状态这道条件，现场数据一条也不会被误改。`status` 条件同时是幂等保证：第二次执行匹配不到任何行。
+  - **留言分两种**：`SENT`/`ACKED` → 「指令已下发但设备从未回执」，`QUEUED` → 「指令入队后从未下发，设备未接收」，两者都写明「迁移 036 标记为失败（不是真实设备故障）」，后续开发照着排查不会走错路。文案由 `CASE status` 现取，不是逐行手填。
+  - **不回填 `sent_at`/`acked_at`、不写 `result_json`**：`031` 的理由依旧成立，且运行时超时收口同样只改状态与留言——结果快照只有设备回执才会产生。`receipt_order_check` 允许这些列为 NULL，收口不违反时序约束。
+  - **不投递事件**：迁移往 `control_outbox` 塞 `control.command.timeout` 等于给一批从没发生过的事故发消息，去重键按指令 id 唯一，消息中心会长期留着这五条没人认领的告警。运行时收口的「状态与事件同事务」约束是给真实设备链路准备的，不适用于数据修复。
+- **未改代码**：收口任务、仓储、HTTP 一概不动。演示库收干净之后 `listOverdue` 对演示行返回空集，现场指令该收口照旧收口——这是数据侧补齐，不是把自动化关掉。
+- **迁移状态**：**未应用到任何库**（按交付口径只在用户点名时迁移）。应用到演示库后那五条种子指令转为 `FAILED`，消息中心不新增告警。
+
 ## 下一步（中断后从这里继续）
 
 > **交付口径（2026-11-11 起，用户长期要求）**：改完直接 `git commit` + `git push`，**不再**跑单元测试 / `tsc -b` / `pnpm build` / `smoke-*` 冒烟 / 浏览器实操验证，**不再**重建或重新部署 `app`、`edge` 镜像。迁移文件照常编写，只在用户点名时才应用到库；风险较高的改动收工时注明「未跑验证」即可。
@@ -527,7 +538,7 @@
    - ~~地块合并 / 拆分~~：`#83` 已实现（凸包合并 + 操作人逐块画界拆分，见 2026-11-11 一节）；破坏性操作只经用户在前端真实触发，不代跑演示库。
    - ~~`PlotCreated` 下游消费~~：`#82` 已接入消息中心建档通知；`plot-service` 内存消费者仍只校验面积，属演示链路。
 11. **待决（需用户点头，未擅自处理）**：
-   - ~~超时未回执只做了「可见」，没有自动置 `FAILED` 或推事件~~：`#95` 已做（迁移 `033` 建 `control_outbox` + `ControlReceiptSweeper` 同事务收口推事件 + 消息中心告警，见 2026-11-12 收口一节）。「会覆盖现场迟到的真实回执」这一顾虑按**先到先得**处理：收口与回执抢同一个 `version`，谁先到终态另一边拿 409，不做覆盖式改写；
+   - ~~超时未回执只做了「可见」，没有自动置 `FAILED` 或推事件~~：`#95` 已做（迁移 `033` 建 `control_outbox` + `ControlReceiptSweeper` 同事务收口推事件 + 消息中心告警，见 2026-11-12 收口一节）。「会覆盖现场迟到的真实回执」这一顾虑按**先到先得**处理：收口与回执抢同一个 `version`，谁先到终态另一边拿 409，不做覆盖式改写；~~演示库里 `010` 种子那几条陈旧在途指令会被首轮收口刷成 `FAILED` 并各推一条告警，当时给的口径是「不想动演示库就别启 `control-service` 的 HTTP 模式」~~（已做，迁移 `036` 按运行时同一口径预先收口演示行——`id LIKE 'cmd-demo-%'` + 仍在途双条件、`CASE status` 分写留言、不回填时间戳、不投递事件，见 2026-11-12「演示库陈旧在途指令收口」一节）；
    - ~~`EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环~~：`#96` 已做（灌溉指令 `DONE` 在同一事务写 `control_outbox`，`trace-service` 结档案、`message-service` 发通知，见 2026-11-12 结单回流一节）；~~**施肥作业的实际用量回流**没有对应载荷口径~~（已做，`control.fertilization.finished`，见 2026-11-12 施肥结单事件回流一节）；~~决策侧也尚未消费该事件做处方效果回流，仍待决~~（已做，见 2026-11-12「决策侧消费结单事件」一节：`decision_prescription_executions` 落库 + `GET /decision/executions`；`evaluateOutcome` 仍需人工在拿到复测墒情后触发，这不是缺口而是时机依赖外部读数）。
    - ~~`control_commands` 无 `tenant_id`（多租户下指令台账互通）~~：`#97` 已做（迁移 `032` + 仓储首参 + 可信头归属，见 2026-11-12 租户隔离一节）；~~**设备台账 `iot_devices` 仍是全局台账**，是否一并隔离待决~~（已做，迁移 `035` + `DeviceRepository` 首参 + `tenantOf` 归属，编号唯一改为租户内唯一，见 2026-11-12 设备台账租户隔离一节）；
    - ~~`.qoder/repowiki/**` 每次收尾都会被自动重生成（本轮 40+ 文件 M/D/??），与功能改动分开单独征询是否提交，目前仍未入库~~：本轮已按「单独一笔」入库（`62a3fea`，53 文件），此后每轮收尾仍会重生成，继续按「与功能改动分开、单独提交」处理；**注意重生成分支落后于当日功能**，事件类文档以 README / 本节为准；
