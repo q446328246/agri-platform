@@ -690,6 +690,10 @@ export const operationApi = {
   updateStatus(id: string, status: string, options?: { version?: number; result?: { outcome: 'success' | 'partial' | 'failed'; finishedAreaMu: number; notes?: string } }): Promise<any> {
     return post<any>(`/farm-tasks/${encodeURIComponent(id)}/status`, { status, ...options })
   },
+  /** 删除是软删归档（与地块/片区同一口径）：列表与详情此后读不到，行留在库里 */
+  deleteTask(id: string): Promise<any> {
+    return del<any>(`/farm-tasks/${encodeURIComponent(id)}`)
+  },
   /** 田间导航规划：最近邻排站 + 2-opt 优化，提供机耕道时按沿路里程计算 */
   planNavigation(data: NavigationRequest): Promise<NavPlan> {
     return post<NavPlan>('/operations/path-plan', data)

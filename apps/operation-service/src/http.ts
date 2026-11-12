@@ -128,6 +128,12 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
         const task = await tasks.find(tenantId, decodeURIComponent(detailMatch[1]));
         send(res, task ? 200 : 404, task, traceId, task ? "" : "任务不存在"); return;
       }
+      if (detailMatch?.[1] && req.method === "DELETE") {
+        // 与地块/片区同一口径：删除是归档，行留在表里，列表与详情此后都读不到。
+        // 不挡 RUNNING——地块软删同样不校验名下有没有在途作业，平台里「删除」只表示不再在册。
+        const removed = await tasks.remove(tenantId, decodeURIComponent(detailMatch[1]), new Date().toISOString());
+        send(res, removed ? 200 : 404, removed, traceId, removed ? "" : "任务不存在"); return;
+      }
       if (req.method === "POST" && url.pathname === "/api/v1/operations/path-plan") {
         const parsed = parseNavigationRequest(await json(req));
         if (!parsed.ok || !parsed.input) throw new InputError(parsed.errors.join("；"));

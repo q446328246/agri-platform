@@ -74,12 +74,13 @@
         <el-table-column prop="planEndDate" label="计划结束时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.planEndDate) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="240" align="center" fixed="right">
+        <el-table-column label="操作" width="280" align="center" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showDetail(row)">详情</el-button>
             <el-button v-if="row.status === 'PENDING'" link type="success" size="small" @click="handleStatus(row, 'RUNNING')">开始</el-button>
             <el-button v-if="row.status === 'IN_PROGRESS'" link type="success" size="small" @click="openComplete(row)">完成</el-button>
             <el-button v-if="row.status === 'PENDING' || row.status === 'IN_PROGRESS'" link type="danger" size="small" @click="handleCancel(row)">取消</el-button>
+            <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -354,6 +355,21 @@ async function handleCancel(row: { id: string; name: string; version: number }) 
     await fetchList()
   } catch (error) {
     console.error('任务取消失败', error)
+    await fetchList()
+  }
+}
+
+async function handleDelete(row: { id: string; name: string }) {
+  try {
+    await ElMessageBox.confirm(`确定删除任务「${row.name}」吗？删除是归档：任务从列表与详情消失，作业记录仍留在台账里可回查`, '删除任务', { type: 'warning' })
+  } catch { return }
+  try {
+    await operationApi.deleteTask(row.id)
+    ElMessage.success('任务已归档删除')
+    await fetchList()
+  } catch (error) {
+    console.error('任务删除失败', error)
+    // 404 说明任务刚被其他操作删掉，刷新列表让对方视角的结果呈现出来
     await fetchList()
   }
 }

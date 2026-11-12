@@ -218,6 +218,15 @@ describe("任务创建与查询校验", () => {
     expect(items.length).toBeGreaterThan(0);
     expect(items.every((task: Task) => task.status === "RUNNING")).toBe(true);
   });
+
+  it("关键词逐字段命中，跨字段拼接的假命中不算匹配（与 SQL 的 ILIKE 各字段同口径）", async () => {
+    const base = await start();
+    const task = await createTask(base, { name: "灌溉", plotCode: "P-0001" });
+    // 旧口径把 name 和 plot_code 拼成一串再找，"溉 P-0001" 会命中这条拼接缝隙上的假命中
+    expect((await (await fetch(`${base}/api/v1/farm-tasks?keyword=${encodeURIComponent("溉 P-0001")}`)).json()).data.total).toBe(0);
+    expect((await (await fetch(`${base}/api/v1/farm-tasks?keyword=P-0001`)).json()).data.total).toBe(1);
+    expect((await (await fetch(`${base}/api/v1/farm-tasks?keyword=${encodeURIComponent("灌溉")}`)).json()).data.items.map((item: Task) => item.id)).toContain(task.id);
+  });
 });
 
 describe("任务租户隔离与持久化", () => {
@@ -259,5 +268,50 @@ describe("任务租户隔离与持久化", () => {
     expect(own.data).toHaveLength(1);
     const other = await (await fetch(`${base}/api/v1/operations/path-plans`, { headers: { "x-tenant-id": "tenant-b" } })).json();
     expect(other.data).toHaveLength(0);
+  });
+});
+
+describe("任务软删除归档", () => {
+  it("DELETE 只归档：列表与详情此后读不到，行本身保留作业进度", async () => {
+    const base = await start();
+    const task = await createTask(base, { name: "归档候选任务", plotCode: "P-ARCHIVE" });
+    await setStatus(base, task.id, { status: "RUNNING" });
+
+    const removed = await fetch(`${base}/api/v1/farm-tasks/${task.id}`, { method: "DELETE" });
+    expect(removed.status).toBe(200);
+    // 归档不改状态也不 bump 版本：回执读到的仍是「进行中、第 2 版」，只有 deletedAt 是新增的
+    const archived = (await removed.json()).data;
+    expect(archived).toMatchObject({ id: task.id, status: "RUNNING", version: 2 });
+    expect(Date.parse(archived.deletedAt)).not.toBeNaN();
+
+    const listed = await (await fetch(`${base}/api/v1/farm-tasks?size=200`)).json();
+    expect(listed.data.items.map((item: Task) => item.id)).not.toContain(task.id);
+    expect((await fetch(`${base}/api/v1/farm-tasks/${task.id}`)).status).toBe(404);
+    // 不在册的任务不能再流转
+    expect((await setStatus(base, task.id, { status: "COMPLETED", result: RESULT })).status).toBe(404);
+    // 重复删除没有第二次归档
+    expect((await fetch(`${base}/api/v1/farm-tasks/${task.id}`, { method: "DELETE" })).status).toBe(404);
+  });
+
+  it("归档按租户隔离，跨租户删不到别人的任务", async () => {
+    const base = await start();
+    const task = await createTask(base, { name: "甲农场任务", plotCode: "P-OWNER" }, { "x-tenant-id": "tenant-a" });
+    expect((await fetch(`${base}/api/v1/farm-tasks/${task.id}`, { method: "DELETE", headers: { "x-tenant-id": "tenant-b" } })).status).toBe(404);
+    expect((await fetch(`${base}/api/v1/farm-tasks/${task.id}`, { headers: { "x-tenant-id": "tenant-a" } })).status).toBe(200);
+
+    expect((await fetch(`${base}/api/v1/farm-tasks/${task.id}`, { method: "DELETE", headers: { "x-tenant-id": "tenant-a" } })).status).toBe(200);
+    expect((await fetch(`${base}/api/v1/farm-tasks/${task.id}`, { headers: { "x-tenant-id": "tenant-a" } })).status).toBe(404);
+  });
+
+  it("归档不重写完成事件，事件只在作业真正结单时产生", async () => {
+    const repository = new InMemoryTaskRepository();
+    const base = await start(repository);
+    const task = await createTask(base, { name: "已完成待归档", plotCode: "P-EVENT" }, { "x-tenant-id": "tenant-a" });
+    await setStatus(base, task.id, { status: "RUNNING" }, { "x-tenant-id": "tenant-a" });
+    await setStatus(base, task.id, { status: "COMPLETED", result: RESULT }, { "x-tenant-id": "tenant-a" });
+    expect(repository.completedEvents).toHaveLength(1);
+
+    expect((await fetch(`${base}/api/v1/farm-tasks/${task.id}`, { method: "DELETE", headers: { "x-tenant-id": "tenant-a" } })).status).toBe(200);
+    expect(repository.completedEvents).toHaveLength(1);
   });
 });

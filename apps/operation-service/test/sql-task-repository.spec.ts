@@ -109,4 +109,60 @@ describe.runIf(databaseUrl)("SqlTaskRepository + SqlOperationOutbox（真实库�
       await client.$disconnect();
     }
   });
+
+  it("软删归档：读路径全部过滤、行与已入队事件留在库里、归档行不能再跃迁", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const repository = new SqlTaskRepository(client);
+    const tenantId = "tenant-smoke-ops-archive";
+    const suffix = Date.now();
+    const archivedId = `task-smoke-archive-${suffix}`;
+    const liveId = `task-smoke-archive-live-${suffix}`;
+    const now = new Date().toISOString();
+    try {
+      // 先结单让完成事件进 operation_outbox，再归档——归档只盖 deleted_at，不碰已入队的事件
+      const created = await repository.create({ id: archivedId, tenantId, plotCode: "P-ARCHIVE", type: "SPRAYING", name: "SQL冒烟归档任务", status: "PENDING", createdAt: now, version: 1 });
+      const running = await repository.transition(created, "RUNNING", now, "smoke-archive");
+      const completed = await repository.transition(running!, "COMPLETED", now, "smoke-archive", { outcome: "success", finishedAreaMu: 8, notes: "归档前结单" });
+      const queued = await client.$queryRawUnsafe<Array<{ total: string }>>("SELECT count(*) AS total FROM operation_outbox WHERE task_id = $1", archivedId);
+      expect(Number(queued[0]?.total)).toBe(1);
+
+      const removed = await repository.remove(tenantId, archivedId, now);
+      // 状态与版本按归档前最后一次跃迁读，只有 deletedAt 是新增的
+      expect(removed).toMatchObject({ id: archivedId, status: "COMPLETED", version: 3 });
+      expect(removed?.deletedAt).toBe(now);
+
+      expect(await repository.find(tenantId, archivedId)).toBeNull();
+      expect(await repository.remove(tenantId, archivedId, now)).toBeNull();
+      // 幂等重放走 find、真实写入走 UPDATE，两边都带 deleted_at IS NULL
+      expect(await repository.transition(completed!, "COMPLETED", now, "smoke-archive", { outcome: "success", finishedAreaMu: 8, notes: "归档前结单" })).toBeNull();
+
+      // 归档不碰已入队的完成事件：外键指向的行还在，中继照旧能取到这条待投递
+      const outbox = new SqlOperationOutbox(client);
+      const pendingAfterArchive = await outbox.listPending(200);
+      const archivedEvent = pendingAfterArchive.find((item) => item.payload && (item.payload as { taskId?: string }).taskId === archivedId);
+      expect(archivedEvent?.topic).toBe(EventTopic.OperationTaskCompleted);
+
+      const live = await repository.create({ id: liveId, tenantId, plotCode: "P-测试", type: "IRRIGATION", name: "灌溉", status: "PENDING", createdAt: now, version: 1 });
+      const listed = await repository.page(tenantId, { page: 1, size: 10 });
+      expect(listed.items.map((task) => task.id)).toEqual([live.id]);
+      expect(listed.total).toBe(1);
+
+      // 关键词逐字段匹配：拼接 name 和 plot_code 会把「灌溉 P-测试」整串当成一个字段，造出跨字段假命中
+      expect((await repository.page(tenantId, { page: 1, size: 10, keyword: "溉 P" })).items).toHaveLength(0);
+      expect((await repository.page(tenantId, { page: 1, size: 10, keyword: "irrigation" })).items).toHaveLength(0);
+      expect((await repository.page(tenantId, { page: 1, size: 10, keyword: "P-测试" })).items.map((task) => task.id)).toEqual([live.id]);
+
+      // 行没被物理删掉：归档只多了一个时间戳，历史仍可回查
+      const raw = await client.$queryRawUnsafe<Array<{ deleted_at: unknown; status: string; version: number }>>("SELECT deleted_at, status, version FROM operation_tasks WHERE id = $1", archivedId);
+      expect(raw[0]).toMatchObject({ status: "COMPLETED", version: 3 });
+      expect(raw[0]?.deleted_at).not.toBeNull();
+    } finally {
+      for (const id of [archivedId, liveId]) {
+        await client.$executeRawUnsafe("DELETE FROM operation_outbox WHERE task_id = $1", id);
+        await client.$executeRawUnsafe("DELETE FROM operation_tasks WHERE id = $1", id);
+      }
+      await client.$disconnect();
+    }
+  });
 });
