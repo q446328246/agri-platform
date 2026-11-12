@@ -19,7 +19,8 @@ import { createControlHttpServer } from "../src/http.js";
  * 因此用例断言的是「来源标记 + 与方案同一口径」，不写死任何由几何或时间推导出来的数字。
  */
 
-/** 分区参数与配比：施肥总量由这两组数字现算，用例里不预先算好写死 */const ZONES = [
+/** 分区参数与配比：施肥总量由这两组数字现算，用例里不预先算好写死 */
+const ZONES = [
   { zoneCode: "ZONE-01", areaMu: 10, targetMm: 20 },
   { zoneCode: "ZONE-02", areaMu: 6.5, targetMm: 15 },
 ];
@@ -245,17 +246,36 @@ describe("DONE 回执结单时回流作业完成事件", () => {
     expect(payload).toMatchObject({ fertilizerKg: 128.5, fertilizerSource: "DEVICE" });
   });
 
-  it("处方自动施肥指令没有分区与配比：结单照发事件，投肥量留空", async () => {
+  it("处方自动施肥指令没有分区与配比：结单照发事件，投肥量留空但带出处方标识", async () => {
     const repository = new InMemoryControlCommandRepository([
-      command({ id: "cmd-fert-auto", type: "FERTILIZATION", origin: "EVENT", parameters: { source: "prescription", materialCode: "UREA", dosage: 8 } }),
+      command({ id: "cmd-fert-auto", type: "FERTILIZATION", origin: "EVENT", parameters: { source: "prescription", prescriptionId: "rx-auto-1", materialCode: "UREA", dosage: 8 } }),
     ]);
     const { store, outbox, withTransaction } = makeRelay();
     const base = await start(createControlHttpServer(repository, { outbox, withTransaction }));
 
     expect((await postReceipt(base, { commandId: "cmd-fert-auto", status: "DONE", at: finishedAt })).status).toBe(200);
     const payload = store.all()[0]?.payload as FertilizationFinishedPayload;
-    expect(payload).toMatchObject({ commandId: "cmd-fert-auto", durationSource: "RUNTIME" });
+    expect(payload).toMatchObject({ commandId: "cmd-fert-auto", durationSource: "RUNTIME", prescriptionId: "rx-auto-1" });
     expect("fertilizerKg" in payload).toBe(false);
+  });
+
+  it("人工指令没有处方标识：载荷不带该字段，决策侧据此跳过回流", async () => {
+    const repository = new InMemoryControlCommandRepository([command({ id: "cmd-manual" })]);
+    const { store, outbox, withTransaction } = makeRelay();
+    const base = await start(createControlHttpServer(repository, { outbox, withTransaction }));
+
+    await postReceipt(base, { commandId: "cmd-manual", status: "DONE", at: finishedAt });
+    const payload = store.all()[0]?.payload as IrrigationFinishedPayload;
+    expect("prescriptionId" in payload).toBe(false);
+  });
+
+  it("参数里的处方标识空白或类型不对时按没有处方处理", () => {
+    const blank = buildFinishedEvent(command({ parameters: { zones: ZONES, prescriptionId: "  " } }), finishedAt)?.payload as IrrigationFinishedPayload;
+    expect("prescriptionId" in blank).toBe(false);
+    const dirty = buildFinishedEvent(command({ parameters: { zones: ZONES, prescriptionId: 123 } }), finishedAt)?.payload as IrrigationFinishedPayload;
+    expect("prescriptionId" in dirty).toBe(false);
+    const kept = buildFinishedEvent(command({ parameters: { zones: ZONES, prescriptionId: " rx-1 " } }), finishedAt)?.payload as IrrigationFinishedPayload;
+    expect(kept.prescriptionId).toBe("rx-1");
   });
 
   it("急停与播种的 DONE 不推任何结单事件", async () => {

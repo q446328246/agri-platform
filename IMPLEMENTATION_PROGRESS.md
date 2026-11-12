@@ -457,7 +457,7 @@
 - **顺手修掉一个真实缺陷**：`buildMessageDraft` 之前是「`MESSAGE_TEMPLATES` 注册表 + 一段手写 switch」两套真相，switch 里只有 4 个分支，`ControlCommandTimeout`（`#95` 已注册）落到 `default` 返回 `null`——即 `#95` 的超时告警在真实链路上根本发不出来，只是当时的用例直连模板没走到这条分支。改为按 `isMessageTemplateTopic(topic)` 从 `MESSAGE_TEMPLATES[topic].render` 取渲染，注册即生效；`preference.spec.ts` 里写死的「主题数 = 4」同步改成 `MESSAGE_TEMPLATE_TOPICS.length` 推导。
 - **封住人工造数据的口子**：`IRRIGATION_FINISHED` 只能由设备结单事件写入，`POST /api/v1/trace/records` 收到该事件直接 400「灌溉完成由设备结单事件写入，不支持人工补录」；前端把事件标签抽成 `utils` 的 `TRACE_EVENT_LABELS`，派生 `traceEventOptions`（筛选，含全部）与 `manualTraceEventOptions`（新增弹窗，剔除 `DEVICE_ONLY_EVENTS`），溯源页与农事档案页的下拉都由这两者渲染，不再各写一份 `<el-option>`。时间轴配色同步：处方、灌溉结单、采收归绿（success），不再写死「处方绿」。
 - **用例**：`apps/control-service/test/irrigation-finished.spec.ts`（分区方案水量按 `waterVolumeOf` 现算断言、不写死立方米数；设备实测覆盖方案值且来源随之变 `DEVICE`；重复 DONE 不再入队；`traceId`/`producer`；FERTILIZATION 与 ESTOP 不推事件；无消息表时照常结单；缺事务句柄构造期抛错；陈旧版本 409 且 outbox 为空）；`sql-control-outbox.spec.ts` 增 `describe.runIf(DB_URL)` 的「DONE 与事件同一事务落库」（断言状态/版本、`control_outbox` 恰一条、`durationMin` 落在预期区间而非硬编码、重复 DONE 不翻倍，`finally` 按 trace_id 清理）；`trace-service/test/consumer.spec.ts`（入档字段、换 `eventId` 重投不重复建档、处方与结单并存）与 `http-chain.spec.ts`（人工补录 400 且列表为空）；`message-service/test/irrigation-finished-closure.spec.ts` 新文件 5 例（生成通知、实测与推算文案分开、未上报口径、按指令聚合、换指令另开 + 关闭偏好不落库）；`contracts/test/message-template.spec.ts` 补灌溉完成模板与主题清单第 6 项。**按交付口径未跑验证。**
-- **仍留作待决**：~~施肥作业的实际用量回流（需要另一条载荷口径）~~（已做，见下一节 2026-11-12 施肥结单事件回流）；决策侧消费该事件做处方效果回流（`evaluateOutcome` 目前仍由调用方手工触发）；未新增 `smoke-irrigation-finished` 脚本（演示库无真实设备，脚本只能自造回执）。
+- **仍留作待决**：~~施肥作业的实际用量回流（需要另一条载荷口径）~~（已做，见下一节 2026-11-12 施肥结单事件回流）；~~决策侧消费该事件做处方效果回流（`evaluateOutcome` 目前仍由调用方手工触发）~~（已做，见下一节「决策侧消费结单事件」：执行事实已落 `decision_prescription_executions`，`evaluateOutcome` 仍按人工时机触发）；未新增 `smoke-irrigation-finished` 脚本（演示库无真实设备，脚本只能自造回执）。
 
 ### 2026-11-12：控制指令页挂载测试（`views/device/Commands.vue`）
 
@@ -475,6 +475,18 @@
 - **消费闭环**：`trace-service` 补 `FERTILIZATION_EVENT = "FERTILIZATION_FINISHED"`（与 `IRRIGATION_EVENT`、`DEVICE_ONLY_EVENTS` 一起放 `repository.ts`），档案追溯码 `TR-FERT-<commandId>`，详情写「施氮磷钾合计 N 千克（设备实测/按配方与面积推算）」；`POST /trace/records` 改判 `DEVICE_ONLY_EVENTS.includes(event)`，两类作业完成档案都不接受人工补录。`message-service` 补 `@registerHandler(ControlFertilizationFinished)`。前端 `TRACE_EVENT_LABELS` 增「施肥完成」，`DEVICE_ONLY_EVENTS` 同步剔除，`getTraceEventType` 的 success 判定改为复用该列表而不是再写一遍事件名。
 - **诚实口径**：处方自动下发的施肥指令参数里只有 `items`/`materialCode`/`dosage`（亩均用量），没有分区也没有面积，`resolveFertilizerKg` 算不出总投肥量，事件就干脆不带 `fertilizerKg` 字段，档案与消息直说「施肥量未上报」。这条路径有用例兜住，防止以后有人拿 `dosage` 乘个猜测面积补数。
 - **用例**：`command-finished.spec.ts`（原 `irrigation-finished.spec.ts` 改名；新增投肥量 DEVICE/PLAN、脏配方与无分区缺省、施肥载荷不带 `waterVolume`、ESTOP/SEEDING 不组事件、施肥 DONE 只推施肥主题、重复 DONE 不翻倍、SQL 模式两类指令各一条同事务落库）；`trace-service/test/consumer.spec.ts` 新增施肥入档、实测/推算/未上报三种文案、同指令重投不重复建档；`http-chain.spec.ts` 的人工补录拒绝改为两类事件循环断言；`message-service/test/finished-closure.spec.ts`（原 `irrigation-finished-closure.spec.ts` 改名）新增施肥 describe；`contracts/test/message-template.spec.ts` 补施肥模板与主题清单第 7 项、跨主题同指令号去重键不互撞。**按交付口径未跑验证。**
+
+### 2026-11-12：决策侧消费结单事件（处方执行回流 `decision_prescription_executions`）
+
+- **问题**：`#96`/`#100` 之后，结单事件已经有生产者、有档案、有通知，唯独决策侧仍站在链路外面——处方留痕停在「建议发出去了」，`evaluateOutcome` 需要的执行事实只能由调用方手工喂参数。想知道「这张处方实际灌了多少水、由哪条指令执行」，服务端没有一张表答得上来。
+- **契约**：`IrrigationFinishedPayload` 与 `FertilizationFinishedPayload` 各补可选 `prescriptionId`。来源是处方下发指令 `parameters.prescriptionId`（`control-service/consumer.ts` 早就把它写进指令参数），`command-finished.ts` 新增 `prescriptionIdOf`：非空字符串才带上（并 `trim`），空白/非字符串按「没有处方」处理——人工指令不该被伪造成某张处方的执行。
+- **迁移 `034_decision_prescription_executions.sql`**：新表按处方留痕执行事实，`command_id` **唯一索引**是幂等锚点（中继重投、事件换 `eventId` 重放都只记一次），`water_volume`/`fertilizer_kg` 与各自 `*_source` 成对可空，`plan_type`/`duration_source` 用 CHECK 钉死口径。与 `decision_prescription_outcomes` 一致不带 `tenant_id`（决策留痕按处方归属，事件本身带租户）。**未应用到任何库**（按交付口径只在用户点名时迁移）。
+- **仓储 `execution.repository.ts`**：`SqlExecutionRepository.record` 走 `INSERT … ON CONFLICT (command_id) DO NOTHING` 并以 `rowCount` 判定「首次留痕 / 重放」，重放返回 `null` 且**不覆盖**首次记录；`list({prescriptionId, plotCode, limit})` 与 `findByCommandId` 供接口与用例，内存实现同口径幂等。
+- **消费者 `consumer.ts`**（新）：`DecisionEventConsumer` 注册两条结单主题，`createDecisionEventConsumer(executions, prescriptions, store, options)` 与 `trace-service` 同构（幂等前缀 `decision-service:idem:`、主题由处理器注册表推导）。`acceptFinishedPayload` 先校验 `commandId`/`deviceId`/`durationMin`/`finishedAt`/用量非负，再取处方标识：**没有处方标识直接跳过**（人工指令，不是漏记），有标识但处方查不到抛错（数据不一致要让人看见）。地块编码取处方留痕的 `plotCode`，指令参数改了也不跟着漂。
+- **装配**：`main.ts` 把原先内联的 `new PgEventLogStore(client)` 提为共享 `store`，中继与消费者读同一份事件日志；`DECISION_CONSUMER_GROUP` / `DECISION_POLL_INTERVAL_MS`（默认 1000）与其余服务一致，关停顺序 `consumer.stop() → server.close() → relay.stop() → $disconnect()`。内存 HTTP 分支不动：接口仍可用，只是回流表是进程内实现，不假装跨进程闭环。
+- **接口**：`GET /api/v1/decision/executions?prescriptionId=&plotCode=`（`decision:read`，分页窗口取满 200 再交给 `page()`，避免只拉一屏却报全量总数）。
+- **仍不做**：不在消费时自动跑 `evaluateOutcome`——评估要作业后的实测含水率，设备回执里没有这个数，自动跑等于拿旧读数评估新作业。评估时机仍由调用方掌握，回流表只负责把执行事实备齐。
+- **用例**：`decision-service/test/execution.spec.ts`（新，11 例：灌溉/施肥各记各的、人工指令跳过且无失败、同指令重投不覆盖首次留痕、用量缺省时来源字段一并留空、地块以处方为准、处方不存在与载荷非法分别失败、位点推进不重复、按处方查询、接口分页与过滤）；`sql-decision-repository.spec.ts` 增 `describe.runIf(DB_URL)` 的真实库幂等（需先应用迁移 034）；`control-service/test/command-finished.spec.ts` 增处方标识三条（处方指令带 id、人工指令不带、空白/非字符串/待 trim）。**按交付口径未跑验证。**
 
 ## 下一步（中断后从这里继续）
 
@@ -508,7 +520,7 @@
    - ~~`PlotCreated` 下游消费~~：`#82` 已接入消息中心建档通知；`plot-service` 内存消费者仍只校验面积，属演示链路。
 11. **待决（需用户点头，未擅自处理）**：
    - ~~超时未回执只做了「可见」，没有自动置 `FAILED` 或推事件~~：`#95` 已做（迁移 `033` 建 `control_outbox` + `ControlReceiptSweeper` 同事务收口推事件 + 消息中心告警，见 2026-11-12 收口一节）。「会覆盖现场迟到的真实回执」这一顾虑按**先到先得**处理：收口与回执抢同一个 `version`，谁先到终态另一边拿 409，不做覆盖式改写；
-   - ~~`EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环~~：`#96` 已做（灌溉指令 `DONE` 在同一事务写 `control_outbox`，`trace-service` 结档案、`message-service` 发通知，见 2026-11-12 结单回流一节）；~~**施肥作业的实际用量回流**没有对应载荷口径~~（已做，`control.fertilization.finished`，见 2026-11-12 施肥结单事件回流一节）；决策侧也尚未消费该事件做处方效果回流，仍待决；
+   - ~~`EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环~~：`#96` 已做（灌溉指令 `DONE` 在同一事务写 `control_outbox`，`trace-service` 结档案、`message-service` 发通知，见 2026-11-12 结单回流一节）；~~**施肥作业的实际用量回流**没有对应载荷口径~~（已做，`control.fertilization.finished`，见 2026-11-12 施肥结单事件回流一节）；~~决策侧也尚未消费该事件做处方效果回流，仍待决~~（已做，见 2026-11-12「决策侧消费结单事件」一节：`decision_prescription_executions` 落库 + `GET /decision/executions`；`evaluateOutcome` 仍需人工在拿到复测墒情后触发，这不是缺口而是时机依赖外部读数）。
    - ~~`control_commands` 无 `tenant_id`（多租户下指令台账互通）~~：`#97` 已做（迁移 `032` + 仓储首参 + 可信头归属，见 2026-11-12 租户隔离一节）；**设备台账 `iot_devices` 仍是全局台账**，是否一并隔离待决；
    - ~~`.qoder/repowiki/**` 每次收尾都会被自动重生成（本轮 40+ 文件 M/D/??），与功能改动分开单独征询是否提交，目前仍未入库~~：本轮已按「单独一笔」入库（`62a3fea`，53 文件），此后每轮收尾仍会重生成，继续按「与功能改动分开、单独提交」处理；**注意重生成分支落后于当日功能**，事件类文档以 README / 本节为准；
    - 内存模式与 SQL 模式的行为差异（如 016 CHECK 要求 `CANCELLED` 必留 `cancelled_at`，而内存种子留空）要不要抹平；

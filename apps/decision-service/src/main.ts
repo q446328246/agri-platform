@@ -2,10 +2,13 @@ import "reflect-metadata";
 
 import { PgClientAdapter, resolveDatabaseUrl } from "@agri/db";
 import { EventLogPublisher, OutboxService, PgEventLogStore, setDefaultPublisher } from "@agri/mq";
+import type { EventLogStore } from "@agri/mq";
 import { configureDecorators, LoggerService } from "@agri/observability";
 
+import { createDecisionEventConsumer } from "./consumer.js";
 import { createDecisionHttpServer } from "./http.js";
 import type { DecisionDependencies } from "./http.js";
+import { SqlExecutionRepository } from "./execution.repository.js";
 import { SqlOutcomeRepository } from "./outcome.repository.js";
 import { SqlPrescriptionRepository } from "./prescription.repository.js";
 import { SqlOutboxStore } from "./outbox.repository.js";
@@ -47,18 +50,30 @@ async function bootstrap(): Promise<void> {
     if ((await rules.count()) === 0) await rules.create({ ...defaultRule(new Date().toISOString()), condition: { ...defaultRule(new Date().toISOString()).condition }, action: { ...defaultRule(new Date().toISOString()).action } });
     const prescriptions = new SqlPrescriptionRepository(client);
     const outcomes = new SqlOutcomeRepository(client);
+    const executions = new SqlExecutionRepository(client);
     const outbox = new SqlOutboxStore(client);
     const tenantId = process.env.TENANT_ID ?? "tenant-demo";
     const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
     const fetchRainProbability = createRainProbabilityFetcher(weatherUrl);
     // 中继把本地消息表投递到共享事件日志，其他服务据此消费处方事件
-    const publisher = new EventLogPublisher(new PgEventLogStore(client), { tenantId, traceId: "decision-relay", producer: "decision" });
+    const store: EventLogStore = new PgEventLogStore(client);
+    const publisher = new EventLogPublisher(store, { tenantId, traceId: "decision-relay", producer: "decision" });
     const relay = new OutboxService(outbox, publisher, { tenantId, traceId: "decision-relay", producer: "decision" });
     relay.start();
     setDefaultPublisher(publisher);
-    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, outbox, publisher, tenantId, fetchRainProbability, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
+    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, outbox, publisher, tenantId, fetchRainProbability, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
+    // 消费控制服务的结单事件，把处方实际执行的水肥用量回流到 decision_prescription_executions
+    const { consumer } = createDecisionEventConsumer(executions, prescriptions, store, {
+      group: process.env.DECISION_CONSUMER_GROUP ?? "decision-service",
+      pollIntervalMs: Number(process.env.DECISION_POLL_INTERVAL_MS ?? 1000),
+      onError: (topic, eventId, error, attempt) => {
+        logger.warn("decision-service 事件处理失败", { topic, eventId, attempt, message: error.message });
+      },
+    });
+    await consumer.start();
     const shutdown = async (): Promise<void> => {
+      await consumer.stop();
       server.close();
       relay.stop();
       await client.$disconnect();

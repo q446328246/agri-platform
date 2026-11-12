@@ -107,6 +107,12 @@ export function resolveDurationMin(
   return { durationMin: Math.max(0, Math.round((endMs - startMs) / 60_000)), durationSource: "RUNTIME" };
 }
 
+/** 指令参数里的来源处方标识；处方自动下发的指令才有，人工指令没有 */
+function prescriptionIdOf(command: ControlCommand): { prescriptionId: string } | Record<string, never> {
+  const value = command.parameters.prescriptionId;
+  return typeof value === "string" && value.trim() ? { prescriptionId: value.trim() } : {};
+}
+
 /** 组装结单事件载荷；指令类型不参与结单回流时返回 undefined */
 export function buildFinishedEvent(
   command: ControlCommand,
@@ -121,6 +127,7 @@ export function buildFinishedEvent(
     deviceId: command.deviceId,
     ...resolveDurationMin(command, finishedAt, result),
     finishedAt,
+    ...prescriptionIdOf(command),
   };
   return topic === EventTopic.ControlIrrigationFinished
     ? { topic, payload: { ...base, ...(resolveWaterVolume(command, result) ?? {}) } }

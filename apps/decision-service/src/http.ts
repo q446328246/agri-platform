@@ -13,6 +13,8 @@ import { authorizeRequest, identityHeaders } from "@agri/shared";
 import { InMemoryPrescriptionRepository, SqlPrescriptionRepository } from "./prescription.repository.js";
 import type { CreatePrescriptionInput, PrescriptionQuery, PrescriptionRecord, PrescriptionRepository, PrescriptionStatus } from "./prescription.repository.js";
 import { newPrescriptionId } from "./prescription.repository.js";
+import { InMemoryExecutionRepository } from "./execution.repository.js";
+import type { ExecutionQuery, ExecutionRepository } from "./execution.repository.js";
 import { evaluateOutcome, formatCondition, InMemoryOutcomeRepository, newOutcomeId } from "./outcome.repository.js";
 import type { OutcomeRepository, PrescriptionOutcome } from "./outcome.repository.js";
 import { optionalFiniteNumber, RuleEngine } from "./rule.engine.js";
@@ -26,6 +28,8 @@ export interface DecisionDependencies {
   rules?: RuleRepository;
   prescriptions?: PrescriptionRepository;
   outcomes?: OutcomeRepository;
+  /** 处方执行回流：由消费结单事件写入，接口只做查询 */
+  executions?: ExecutionRepository;
   outbox?: OutboxStore;
   /** SQL 留痕与消息表的事务边界；内存测试路径不提供原子性保证。 */
   withTransaction?: PrismaClientLike["$transaction"];
@@ -89,6 +93,7 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
   const rules = dependencies?.rules ?? new InMemoryRuleRepository([defaultRule(new Date().toISOString())]);
   const prescriptions = dependencies?.prescriptions ?? new InMemoryPrescriptionRepository();
   const outcomes = dependencies?.outcomes ?? new InMemoryOutcomeRepository();
+  const executions = dependencies?.executions ?? new InMemoryExecutionRepository();
   const tenantId = dependencies?.tenantId ?? "tenant-demo";
   const engine = new RuleEngine(rules);
   const fetchSoilMoisture = dependencies?.fetchSoilMoisture;
@@ -290,6 +295,20 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
         };
         await outcomes.create(outcome);
         send(res, 201, { outcome, rule: appliedRule }, traceId);
+        return;
+      }
+
+      // 执行回流查询：处方下发后实际用了多少水肥、作业多久
+      if (req.method === "GET" && url.pathname === `${API_PREFIX}/executions`) {
+        const prescriptionId = url.searchParams.get("prescriptionId") ?? undefined;
+        const plotCode = url.searchParams.get("plotCode") ?? undefined;
+        const query: ExecutionQuery = {
+          ...(prescriptionId ? { prescriptionId } : {}),
+          ...(plotCode ? { plotCode } : {}),
+          // 取满分页窗口上限再交给 page()，避免只拉一屏却报出全量总数
+          limit: 200,
+        };
+        send(res, 200, page(await executions.list(query), url.searchParams), traceId);
         return;
       }
 

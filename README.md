@@ -250,7 +250,8 @@ agri-platform-nodejs-scaffold/
   不设或设为 `sql` 时随 `DB_URL` 落库，设为 `memory` 时退回内存实现。
 - **事件消费方只做翻译**：`control-service` 把「土壤含水率低于下限」与灌溉/施肥处方
   翻译成自动指令（执行人 `system:event`、保留 `sourceEventId`），`trace-service` 把处方
-  写入生产档案（追溯码 `TR-PRES-<eventId>`）、把作业结单写成作业档案（灌溉 `TR-IRR-<指令id>`、施肥 `TR-FERT-<指令id>`）；
+  写入生产档案（追溯码 `TR-PRES-<eventId>`）、把作业结单写成作业档案（灌溉 `TR-IRR-<指令id>`、施肥 `TR-FERT-<指令id>`），
+  `decision-service` 消费结单事件把实际水肥用量回流到来源处方（`decision_prescription_executions`，迁移 034）；
   重复事件由幂等键、指令唯一索引与档案追溯码三层兜住。植保处方与其它指标越限不自动下令，仍由消息中心提醒人工处置。
 - **指令要有回执才算下过**：控制指令走 `QUEUED → SENT → ACKED → DONE`，任一在途状态都可被 `FAILED` 收口，
   终态不可再改；跃迁表 + `version` 乐观锁在 `control.repository.ts`，设备通道 `POST /control/device/dispatch`
@@ -271,6 +272,9 @@ agri-platform-nodejs-scaffold/
   阈值与处方自动下发的指令参数里没有分区与配比，结单事件就带不出用量字段——这是事实，不是漏发。
   播种、除草、急停没有可核对的作业量，不发结单事件。该档案**不支持人工补录**：
   `POST /trace/records` 收到 `IRRIGATION_FINISHED`/`FERTILIZATION_FINISHED` 直接 400，前端新增弹窗的事件下拉里也没有这两项。
+  处方下发的指令会把 `prescriptionId` 一路带进结单事件，`decision-service` 据此把实际用量回流到
+  `decision_prescription_executions`（`GET /api/v1/decision/executions?prescriptionId=` 可查，按指令 id 幂等）；
+  人工指令没有处方标识，回流直接跳过，效果评估（`POST /prescriptions/:id/outcome`）仍由人工在拿到复测墒情后触发。
 - **指令台账按租户隔离**：迁移 `032` 给 `control_commands` 补 `tenant_id`（`DEFAULT 'tenant-demo'`，存量行含
   `010` 种子全部属演示租户，常量默认值不重写表）。仓储的读、写、跃迁都以 `tenantId` 为首参，跨租户的 id
   一律当作不存在——查不到 404、跃不动返回 `null` 翻成 409，与 `operation_tasks`/`video_ptz_commands` 同口径。

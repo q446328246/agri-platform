@@ -120,6 +120,8 @@ export interface IrrigationFinishedPayload {
   /** 时长来源：DEVICE 为设备回执实测，RUNTIME 为「设备接收/下发 → 结单」现算 */
   durationSource: "DEVICE" | "RUNTIME";
   finishedAt: string;
+  /** 来源处方标识；人工下发的指令没有处方，缺省即不参与处方效果回流 */
+  prescriptionId?: string;
 }
 
 /** control.fertilization.finished —— 施肥执行完成（DONE 回执回流） */
@@ -141,6 +143,8 @@ export interface FertilizationFinishedPayload {
   /** 时长来源：DEVICE 为设备回执实测，RUNTIME 为「设备接收/下发 → 结单」现算 */
   durationSource: "DEVICE" | "RUNTIME";
   finishedAt: string;
+  /** 来源处方标识；人工下发的指令没有处方，缺省即不参与处方效果回流 */
+  prescriptionId?: string;
 }
 
 /** control.command.timeout —— 指令超时未回执，系统自动收口为失败 */

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { PgClientAdapter } from "@agri/db";
 
+import type { PrescriptionExecution } from "../src/execution.repository.js";
+import { SqlExecutionRepository } from "../src/execution.repository.js";
 import { SqlPrescriptionRepository } from "../src/prescription.repository.js";
 import { SqlOutboxStore } from "../src/outbox.repository.js";
 import { SqlRuleRepository } from "../src/rule.repository.js";
@@ -92,6 +94,82 @@ describe.runIf(databaseUrl)("SqlPrescriptionRepository（真实库）", () => {
       await client.$executeRawUnsafe(`DELETE FROM decision_prescriptions WHERE id = $1`, id);
       await outbox.markPublished(`evt-${Date.now() - 1}`);
       await client.$executeRawUnsafe("DELETE FROM decision_outbox WHERE trace_id = 'smoke'");
+      await client.$disconnect();
+    }
+  });
+});
+
+describe.runIf(databaseUrl)("SqlExecutionRepository（真实库，需迁移 034）", () => {
+  it("结单事件按指令幂等落库，可按处方与地块查询", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const repository = new SqlExecutionRepository(client);
+    const now = new Date().toISOString();
+    const stamp = Date.now();
+    const recordId = `exec-smoke-${stamp}`;
+    const prescriptionId = `exec-smoke-rx-${stamp}`;
+    const commandId = `exec-smoke-cmd-${stamp}`;
+    const plotCode = "511723-000001-01-00001-0000-5";
+
+    const record = (durationMin: number): PrescriptionExecution => ({
+      id: recordId,
+      prescriptionId,
+      commandId,
+      plotCode,
+      planType: "irrigation",
+      deviceId: "device-irri-001",
+      waterVolume: 133.33,
+      waterVolumeSource: "PLAN",
+      durationMin,
+      durationSource: "RUNTIME",
+      finishedAt: now,
+      eventId: `exec-smoke-evt-${stamp}`,
+      recordedAt: now,
+    });
+
+    try {
+      expect(await repository.record(record(40))).not.toBeNull();
+      // 中继重试同一条指令：ON CONFLICT (command_id) DO NOTHING 让首次留痕保持不变
+      expect(await repository.record(record(99))).toBeNull();
+
+      const byPrescription = await repository.list({ prescriptionId });
+      expect(byPrescription).toHaveLength(1);
+      expect(byPrescription[0]).toMatchObject({
+        commandId,
+        plotCode,
+        planType: "irrigation",
+        waterVolume: 133.33,
+        waterVolumeSource: "PLAN",
+        durationMin: 40,
+        durationSource: "RUNTIME",
+      });
+
+      expect((await repository.list({ plotCode })).map((row) => row.commandId)).toContain(commandId);
+      expect((await repository.list({ plotCode: "P-NOT-EXIST" })).some((row) => row.commandId === commandId)).toBe(false);
+      expect(await repository.findByCommandId(commandId)).toMatchObject({ prescriptionId });
+
+      // 设备没报用水量：来源与用量成对留空，读取回来也不多出字段
+      const unfurnishedId = `exec-smoke-empty-${stamp}`;
+      const unfurnishedRecord: PrescriptionExecution = {
+        id: `exec-smoke-empty-row-${stamp}`,
+        prescriptionId,
+        commandId: unfurnishedId,
+        plotCode,
+        planType: "irrigation",
+        deviceId: "device-irri-002",
+        durationMin: 12,
+        durationSource: "RUNTIME",
+        finishedAt: now,
+        eventId: `exec-smoke-empty-evt-${stamp}`,
+        recordedAt: now,
+      };
+      expect(await repository.record(unfurnishedRecord)).not.toBeNull();
+      const readBack = await repository.findByCommandId(unfurnishedId);
+      expect(readBack).toBeDefined();
+      expect("waterVolume" in readBack!).toBe(false);
+      expect("waterVolumeSource" in readBack!).toBe(false);
+    } finally {
+      await client.$executeRawUnsafe("DELETE FROM decision_prescription_executions WHERE prescription_id = $1", prescriptionId);
       await client.$disconnect();
     }
   });
