@@ -465,7 +465,7 @@
 - **顺手修掉一个真实缺陷**：`buildMessageDraft` 之前是「`MESSAGE_TEMPLATES` 注册表 + 一段手写 switch」两套真相，switch 里只有 4 个分支，`ControlCommandTimeout`（`#95` 已注册）落到 `default` 返回 `null`——即 `#95` 的超时告警在真实链路上根本发不出来，只是当时的用例直连模板没走到这条分支。改为按 `isMessageTemplateTopic(topic)` 从 `MESSAGE_TEMPLATES[topic].render` 取渲染，注册即生效；`preference.spec.ts` 里写死的「主题数 = 4」同步改成 `MESSAGE_TEMPLATE_TOPICS.length` 推导。
 - **封住人工造数据的口子**：`IRRIGATION_FINISHED` 只能由设备结单事件写入，`POST /api/v1/trace/records` 收到该事件直接 400「灌溉完成由设备结单事件写入，不支持人工补录」；前端把事件标签抽成 `utils` 的 `TRACE_EVENT_LABELS`，派生 `traceEventOptions`（筛选，含全部）与 `manualTraceEventOptions`（新增弹窗，剔除 `DEVICE_ONLY_EVENTS`），溯源页与农事档案页的下拉都由这两者渲染，不再各写一份 `<el-option>`。时间轴配色同步：处方、灌溉结单、采收归绿（success），不再写死「处方绿」。
 - **用例**：`apps/control-service/test/irrigation-finished.spec.ts`（分区方案水量按 `waterVolumeOf` 现算断言、不写死立方米数；设备实测覆盖方案值且来源随之变 `DEVICE`；重复 DONE 不再入队；`traceId`/`producer`；FERTILIZATION 与 ESTOP 不推事件；无消息表时照常结单；缺事务句柄构造期抛错；陈旧版本 409 且 outbox 为空）；`sql-control-outbox.spec.ts` 增 `describe.runIf(DB_URL)` 的「DONE 与事件同一事务落库」（断言状态/版本、`control_outbox` 恰一条、`durationMin` 落在预期区间而非硬编码、重复 DONE 不翻倍，`finally` 按 trace_id 清理）；`trace-service/test/consumer.spec.ts`（入档字段、换 `eventId` 重投不重复建档、处方与结单并存）与 `http-chain.spec.ts`（人工补录 400 且列表为空）；`message-service/test/irrigation-finished-closure.spec.ts` 新文件 5 例（生成通知、实测与推算文案分开、未上报口径、按指令聚合、换指令另开 + 关闭偏好不落库）；`contracts/test/message-template.spec.ts` 补灌溉完成模板与主题清单第 6 项。**按交付口径未跑验证。**
-- **仍留作待决**：~~施肥作业的实际用量回流（需要另一条载荷口径）~~（已做，见下一节 2026-11-12 施肥结单事件回流）；~~决策侧消费该事件做处方效果回流（`evaluateOutcome` 目前仍由调用方手工触发）~~（已做，见下一节「决策侧消费结单事件」：执行事实已落 `decision_prescription_executions`，`evaluateOutcome` 仍按人工时机触发）；未新增 `smoke-irrigation-finished` 脚本（演示库无真实设备，脚本只能自造回执）。
+- **仍留作待决**：~~施肥作业的实际用量回流（需要另一条载荷口径）~~（已做，见下一节 2026-11-12 施肥结单事件回流）；~~决策侧消费该事件做处方效果回流（`evaluateOutcome` 目前仍由调用方手工触发）~~（已做，见下一节「决策侧消费结单事件」：执行事实已落 `decision_prescription_executions`，`evaluateOutcome` 仍按人工时机触发）；~~未新增 `smoke-irrigation-finished` 脚本（演示库无真实设备，脚本只能自造回执）~~（已做：`pnpm smoke:receipt` 由脚本自己扮演设备网关领取与回执，把跃迁、消息表、事件日志与三本下游账串一遍，见 2026-11-12「回执链路端到端冒烟」一节；超时收口仍不在脚本内，理由同节写明）。
 
 ### 2026-11-12：控制指令页挂载测试（`views/device/Commands.vue`）
 
@@ -506,6 +506,24 @@
   - **不投递事件**：迁移往 `control_outbox` 塞 `control.command.timeout` 等于给一批从没发生过的事故发消息，去重键按指令 id 唯一，消息中心会长期留着这五条没人认领的告警。运行时收口的「状态与事件同事务」约束是给真实设备链路准备的，不适用于数据修复。
 - **未改代码**：收口任务、仓储、HTTP 一概不动。演示库收干净之后 `listOverdue` 对演示行返回空集，现场指令该收口照旧收口——这是数据侧补齐，不是把自动化关掉。
 - **迁移状态**：**未应用到任何库**（按交付口径只在用户点名时迁移）。应用到演示库后那五条种子指令转为 `FAILED`，消息中心不新增告警。
+
+### 2026-11-12：回执链路端到端冒烟（`scripts/smoke-command-receipt.mjs` + `pnpm smoke:receipt`）
+
+- **问题**：`#94`/`#96`/`#100`/`#101` 每一笔都带用例，但全部跑在内存实现或假客户端上——「设备领取真的把 `sent_at` 写进了库」「结单事件真的被中继从 `control_outbox` 搬进 `event_log`」「档案、消息、执行回流三本账读的是同一条事件」这三件事从来没有一次性验过。`smoke:consumers` 只走到「指令入队」，之后再没人接手。
+- **脚本**：拉起 decision / control / trace / message 四个真实进程（独立端口 3641–3644，`SERVICE_MODE=http` + `DB_URL`，`*_POLL_INTERVAL_MS`/`CONTROL_OUTBOX_RELAY_INTERVAL_MS` 调小），地块编码 `P-SMOKE-RECEIPT` 与规则 id 全程隔离，开头与 `finally` 都按 `plot_code` / `payload_json->>'parcelId'` / 规则 id 清理，可重复执行。等待一律走 `waitList`/`waitRows` 轮询断言，不靠固定 sleep。
+- **验的东西**（九段，覆盖此前无人验证的接缝）：
+  1. 处方下发 → 控制侧自动生成一灌一肥两条 `EVENT` 指令，`parameters.prescriptionId` 与处方一致，在途时间字段为空；
+  2. `/device/dispatch` 推进 `QUEUED → SENT` 且 `version + 1`、`sentAt` 落库；重复领取幂等返回原记录；用 `/device/receipt` 报 `SENT` → 400 指路；
+  3. `ACKED → DONE` 的 `ackedAt`/`finishedAt` 按 `031` 的时序约束真实递增；终态后迟到的 `ACKED` → 409；
+  4. 结单事件：`control_outbox`（`trace_id = control-finished:<指令id>`）恰一条且 `published_at` 非空，`event_log` 同 `trace_id` 恰一条；重复 `DONE` 不翻倍、`version` 不动；
+  5. 下游三本账同源：档案 `TR-IRR-<指令id>` 与消息中心通知都带上设备实测的同一个 `waterVolume`；`GET /decision/executions?prescriptionId=` 出现该指令的行，`waterVolumeSource=DEVICE`；
+  6. 处方下发的施肥指令（只有明细、没有分区与配比）结单后事件**不带** `fertilizerKg`，`durationSource=RUNTIME`，档案与通知都写「施肥量未上报」，执行回流行的 `fertilizerKg` 为 `null`——把「不编数」这条口径钉在真实链路上；
+  7. 人工施肥指令（`recipe` + `zones`）现算出 `PLAN` 投肥量，脚本从事件里取那个数去核对档案与通知的文案（不重抄配方×面积公式），并断言它**不进**处方执行回流（人工指令无处方标识）；缺 `x-confirm-action` 的头 → 409；
+  8. 急停：没有 `result.confirmed=true` 的 `DONE` → 400，带上才结单；`ESTOP` 不发结单事件（`control_outbox` 按 `commandId` 计数为 0）；终态指令 `overdue=false` 且不带 `pendingMin`；
+  9. 台账口径：`pending=true` 在本地块收口后为空集，库内分组只剩 `DONE`。
+- **明确不验超时收口**：`ControlReceiptSweeper` 的候选查询是跨租户全表的 `status IN ('QUEUED','SENT','ACKED')`，为在这轮里看到收口而调小 `CONTROL_RECEIPT_TIMEOUT_MIN`，会连带把演示库里别人正在途的指令刷成 `FAILED` 并各推一条告警——冒烟脚本不该有这种副作用。该路径由 `receipt-sweeper.spec.ts` 与 `sql-control-outbox.spec.ts` 覆盖，脚本头部注释写明原因。
+- **依赖**：迁移 031（回执列与时序 CHECK）、033（`control_outbox`）、034（执行回流表）。未应用时对应语句直接报错、脚本 FAIL 退出，不做「缺表就跳过」的粉饰。
+- **状态**：**只落盘未执行**（按 2026-11-11 起的交付口径，本轮不跑 `pnpm run build` 与任何冒烟）。入口已登记为 `package.json` 的 `smoke:receipt`（与 `smoke:consumers` 同样先 `pnpm run build`），README 命令表补一行。**未跑验证。**
 
 ## 下一步（中断后从这里继续）
 

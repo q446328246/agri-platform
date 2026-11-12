@@ -51,6 +51,7 @@ pnpm --filter @agri/web dev
 | `pnpm smoke:decision-telemetry` | 需 `DB_URL`：遥测历史/告警与规则热更新、处方留痕 |
 | `pnpm smoke:events` | 需 `DB_URL`：遥测越限与处方事件 → 事件日志 → 消息中心 → 效果回流 |
 | `pnpm smoke:consumers` | 需 `DB_URL`：越限/处方事件 → 自动水肥指令与生产档案 |
+| `pnpm smoke:receipt` | 需 `DB_URL` 与迁移 031/033/034：设备领取与回执跃迁 → 结单事件（实测/推算/未上报三种口径）→ 档案、消息、处方执行回流；不含超时收口（其候选查询跨租户全表，调小阈值会误伤他人在途指令） |
 | `pnpm smoke:messages` | 需 `DB_URL`：消息订阅偏好过滤与来源主题去重 |
 | `pnpm smoke:identity` | 需 `DB_URL`：角色/用户落库，重启后仍可登录与查询 |
 | `pnpm smoke:zones` | 片区建档/划入/凸包与机耕道导航（默认经 `https://localhost`，可用 `BASE_URL` 覆盖） |
