@@ -1,5 +1,5 @@
 import { EventTopic } from "@agri/contracts";
-import type { IrrigationFinishedPayload, PrescriptionIssuedPayload } from "@agri/contracts";
+import type { FertilizationFinishedPayload, IrrigationFinishedPayload, PrescriptionIssuedPayload } from "@agri/contracts";
 import { EventLogPublisher, InMemoryEventLogStore } from "@agri/mq";
 import { describe, expect, it } from "vitest";
 
@@ -8,7 +8,7 @@ import { InMemoryTraceRepository } from "../src/repository.js";
 
 /**
  * 生产档案消费的契约测试。
- * 处方（建议）与灌溉结单（实际执行）都要入档，且同一事件重放不会重复建档。
+ * 处方（建议）、灌溉与施肥结单（实际执行）都要入档，且同一事件重放不会重复建档。
  */
 
 const payload: PrescriptionIssuedPayload = {
@@ -27,6 +27,17 @@ const irrigation: IrrigationFinishedPayload = {
   durationMin: 40,
   durationSource: "RUNTIME",
   finishedAt: "2026-11-05T03:00:00.000Z",
+};
+
+const fertilization: FertilizationFinishedPayload = {
+  commandId: "cmd-fert-1",
+  parcelId: "P-1",
+  deviceId: "device-irri-001",
+  fertilizerKg: 150,
+  fertilizerSource: "PLAN",
+  durationMin: 35,
+  durationSource: "RUNTIME",
+  finishedAt: "2026-11-05T04:00:00.000Z",
 };
 
 function setup() {
@@ -62,7 +73,7 @@ describe("生产档案事件消费", () => {
 
   it("灌溉结单入档，档案时间取结单时刻并标注数值来源", async () => {
     const { store, records, dispatcher, consumer } = setup();
-    const publisher = new EventLogPublisher(store, { tenantId: "tenant-demo", traceId: "control-irrigation:cmd-irri-1", producer: "control" });
+    const publisher = new EventLogPublisher(store, { tenantId: "tenant-demo", traceId: "control-finished:cmd-irri-1", producer: "control" });
     await publisher.publish(EventTopic.ControlIrrigationFinished, irrigation);
     expect(await consumer.pollOnce()).toBe(1);
 
@@ -90,6 +101,61 @@ describe("生产档案事件消费", () => {
 
     expect(store.all()).toHaveLength(2);
     expect(await records.list("P-1", "IRRIGATION_FINISHED")).toHaveLength(1);
+  });
+
+  it("施肥结单入档：与灌溉分事件编码，投肥量与来源都写进详情", async () => {
+    const { store, records, consumer } = setup();
+    await new EventLogPublisher(store, { tenantId: "tenant-demo", traceId: "control-finished:cmd-fert-1", producer: "control" })
+      .publish(EventTopic.ControlFertilizationFinished, fertilization);
+    expect(await consumer.pollOnce()).toBe(1);
+
+    const list = await records.list("P-1", "FERTILIZATION_FINISHED");
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      traceCode: "TR-FERT-cmd-fert-1",
+      plotCode: "P-1",
+      operator: "event:control",
+      createdAt: "2026-11-05T04:00:00.000Z",
+    });
+    expect(list[0]?.detail).toContain("施氮磷钾合计 150 千克（按配方与面积推算）");
+    expect(list[0]?.detail).toContain("历时 35 分钟（按回执时间推算）");
+    // 施肥结单不会顺手补一条灌溉档案：两本账各自的事件编码，混了就把用水统计污染了
+    expect(await records.list("P-1", "IRRIGATION_FINISHED")).toHaveLength(0);
+  });
+
+  it("设备实测的投肥量按实测口径入档，未上报时直说未上报", async () => {
+    const { store, records, consumer } = setup();
+    const publisher = new EventLogPublisher(store, { tenantId: "tenant-demo", traceId: "t", producer: "control" });
+    await publisher.publish(EventTopic.ControlFertilizationFinished, { ...fertilization, commandId: "cmd-fert-2", fertilizerSource: "DEVICE" });
+    // 设备没报、参数也推不出来的自动指令：载荷干脆不带投肥量字段
+    const unmeasured: FertilizationFinishedPayload = {
+      commandId: "cmd-fert-3",
+      parcelId: "P-1",
+      deviceId: "device-irri-001",
+      durationMin: fertilization.durationMin,
+      durationSource: "RUNTIME",
+      finishedAt: fertilization.finishedAt,
+    };
+    await publisher.publish(EventTopic.ControlFertilizationFinished, unmeasured);
+    await consumer.pollOnce();
+
+    const measured = await records.list("P-1", "FERTILIZATION_FINISHED");
+    expect(measured).toHaveLength(2);
+    expect(measured.find((record) => record.traceCode === "TR-FERT-cmd-fert-2")?.detail).toContain("（设备实测）");
+    expect(measured.find((record) => record.traceCode === "TR-FERT-cmd-fert-3")?.detail).toContain("施肥量未上报");
+  });
+
+  it("同一条施肥指令重投不重复建档", async () => {
+    const { store, records, consumer } = setup();
+    await new EventLogPublisher(store, { tenantId: "tenant-demo", traceId: "t1", producer: "control" })
+      .publish(EventTopic.ControlFertilizationFinished, fertilization);
+    await consumer.pollOnce();
+    await new EventLogPublisher(store, { tenantId: "tenant-demo", traceId: "t2", producer: "control" })
+      .publish(EventTopic.ControlFertilizationFinished, fertilization);
+    await consumer.pollOnce();
+
+    expect(store.all()).toHaveLength(2);
+    expect(await records.list("P-1", "FERTILIZATION_FINISHED")).toHaveLength(1);
   });
 
   it("先建议后执行：处方与结单在链条上是两条独立档案", async () => {

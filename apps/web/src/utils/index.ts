@@ -138,6 +138,7 @@ export function getControlStatusType(status: string): 'primary' | 'success' | 'i
 const TRACE_EVENT_LABELS: Record<string, string> = {
   PRESCRIPTION_ISSUED: '处方生成',
   IRRIGATION_FINISHED: '灌溉完成',
+  FERTILIZATION_FINISHED: '施肥完成',
   FARM_OPERATION: '农事作业',
   OPERATION_COMPLETED: '作业完成',
   INPUT_MATERIAL: '投入品领用',
@@ -146,7 +147,7 @@ const TRACE_EVENT_LABELS: Record<string, string> = {
 }
 
 /** 由设备结单事件写入的档案：人工补录不提供，免得手填一条设备没做过的作业 */
-const DEVICE_ONLY_EVENTS = ['IRRIGATION_FINISHED']
+const DEVICE_ONLY_EVENTS = ['IRRIGATION_FINISHED', 'FERTILIZATION_FINISHED']
 
 export function getTraceEventText(event: string): string {
   return TRACE_EVENT_LABELS[event] || event || '-'
@@ -159,7 +160,7 @@ export const traceEventOptions = Object.entries(TRACE_EVENT_LABELS).map(([value,
 export const manualTraceEventOptions = traceEventOptions.filter((option) => !DEVICE_ONLY_EVENTS.includes(option.value))
 
 export function getTraceEventType(event: string): 'success' | 'warning' | 'info' {
-  if (event === 'PRESCRIPTION_ISSUED' || event === 'IRRIGATION_FINISHED' || event === 'HARVEST') return 'success'
+  if (event === 'PRESCRIPTION_ISSUED' || DEVICE_ONLY_EVENTS.includes(event) || event === 'HARVEST') return 'success'
   if (event === 'OPERATION_COMPLETED') return 'warning'
   return 'info'
 }

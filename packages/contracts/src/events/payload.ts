@@ -122,6 +122,27 @@ export interface IrrigationFinishedPayload {
   finishedAt: string;
 }
 
+/** control.fertilization.finished —— 施肥执行完成（DONE 回执回流） */
+export interface FertilizationFinishedPayload {
+  /** 结单的指令标识，重复投递按它去重 */
+  commandId: string;
+  /** 指令归属地块，未绑定地块的指令为空串 */
+  parcelId: string;
+  deviceId: string;
+  /**
+   * 实际施肥量，单位：千克（氮磷钾合计）。来源见 fertilizerSource；
+   * 设备没报、指令参数又推不出配方总量时缺省，不编一个数。
+   */
+  fertilizerKg?: number;
+  /** 施肥量来源：DEVICE 为设备回执实测，PLAN 为按分区面积与配比现算的方案总量 */
+  fertilizerSource?: "DEVICE" | "PLAN";
+  /** 作业持续时长，单位：分钟。来源见 durationSource */
+  durationMin: number;
+  /** 时长来源：DEVICE 为设备回执实测，RUNTIME 为「设备接收/下发 → 结单」现算 */
+  durationSource: "DEVICE" | "RUNTIME";
+  finishedAt: string;
+}
+
 /** control.command.timeout —— 指令超时未回执，系统自动收口为失败 */
 export interface CommandTimeoutPayload {
   commandId: string;

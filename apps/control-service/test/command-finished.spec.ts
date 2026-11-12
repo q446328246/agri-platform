@@ -2,24 +2,28 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Server } from "node:http";
 
 import { EventTopic } from "@agri/contracts";
-import type { IrrigationFinishedPayload } from "@agri/contracts";
+import type { FertilizationFinishedPayload, IrrigationFinishedPayload } from "@agri/contracts";
 import type { Tx } from "@agri/db";
 import { InMemoryEventPublisher, InMemoryOutboxStore, OutboxService } from "@agri/mq";
 
-import { waterVolumeOf } from "../src/command-spec.js";
+import { buildIrrigationPlan, waterVolumeOf } from "../src/command-spec.js";
+import { buildFinishedEvent, resolveDurationMin, resolveFertilizerKg, resolveWaterVolume } from "../src/command-finished.js";
 import { InMemoryControlCommandRepository } from "../src/control.repository.js";
 import type { ControlCommand, ControlCommandRepository } from "../src/control.repository.js";
 import { createControlHttpServer } from "../src/http.js";
-import { buildIrrigationFinished, resolveDurationMin, resolveWaterVolume } from "../src/irrigation-finished.js";
 
 /**
- * 灌溉 DONE 回执 → `control.irrigation.finished` 事件。
+ * DONE 回执 → `control.*.finished` 事件。
  *
- * 平台不替设备测量：用水量与时长要么来自设备实测，要么由指令自己的分区参数与时间戳现算，
+ * 平台不替设备测量：用水量、投肥量与时长要么来自设备实测，要么由指令自己的分区参数与时间戳现算，
  * 因此用例断言的是「来源标记 + 与方案同一口径」，不写死任何由几何或时间推导出来的数字。
  */
 
-const MINUTE = 60_000;
+/** 分区参数与配比：施肥总量由这两组数字现算，用例里不预先算好写死 */const ZONES = [
+  { zoneCode: "ZONE-01", areaMu: 10, targetMm: 20 },
+  { zoneCode: "ZONE-02", areaMu: 6.5, targetMm: 15 },
+];
+const RECIPE = { nitrogen: 8, phosphorus: 4, potassium: 3 };
 
 function command(overrides: Partial<ControlCommand> = {}): ControlCommand {
   return {
@@ -30,7 +34,7 @@ function command(overrides: Partial<ControlCommand> = {}): ControlCommand {
     operatorId: "user-admin",
     confirmedAt: "2026-11-12T00:00:00.000Z",
     type: "IRRIGATION",
-    parameters: { zones: [{ zoneCode: "ZONE-01", areaMu: 10, targetMm: 20 }, { zoneCode: "ZONE-02", areaMu: 6.5, targetMm: 15 }] },
+    parameters: { zones: ZONES },
     status: "SENT",
     origin: "MANUAL",
     reason: "土壤含水率低于下限",
@@ -43,24 +47,37 @@ function command(overrides: Partial<ControlCommand> = {}): ControlCommand {
 
 const finishedAt = "2026-11-12T01:01:00.000Z";
 
-describe("灌溉完成事件载荷", () => {
+describe("结单事件载荷", () => {
   it("设备实测值优先于任何推算，来源标记为 DEVICE", () => {
     const water = resolveWaterVolume(command(), { waterVolumeM3: 200 });
     expect(water).toEqual({ waterVolume: 200, waterVolumeSource: "DEVICE" });
+    expect(resolveFertilizerKg(command({ type: "FERTILIZATION" }), { fertilizerKg: 145 })).toEqual({
+      fertilizerKg: 145,
+      fertilizerSource: "DEVICE",
+    });
     expect(resolveDurationMin(command(), finishedAt, { durationMin: 30 })).toEqual({ durationMin: 30, durationSource: "DEVICE" });
   });
 
   it("设备没报量时按指令分区参数现算方案总量，来源标记为 PLAN", () => {
     const expected = Number((waterVolumeOf(10, 20) + waterVolumeOf(6.5, 15)).toFixed(2));
     expect(resolveWaterVolume(command())).toEqual({ waterVolume: expected, waterVolumeSource: "PLAN" });
+    // 投肥总量与预演方案同一口径：配方千克/亩 × 分区面积合计
+    expect(resolveFertilizerKg(command({ type: "FERTILIZATION", parameters: { zones: ZONES, recipe: RECIPE } }))).toEqual({
+      fertilizerKg: buildIrrigationPlan({ zones: ZONES, recipe: RECIPE }).recipe?.totalKg,
+      fertilizerSource: "PLAN",
+    });
   });
 
-  it("阈值自动指令没有分区：宁缺不造，用水量直接缺省", () => {
+  it("阈值自动指令没有分区：宁缺不造，用水量与投肥量直接缺省", () => {
     // 自动指令只带网格信息，硬凑一个用水量会让下游的用水统计全歪
     expect(resolveWaterVolume(command({ parameters: { gridCount: 12, targetMm: 20 } }))).toBeUndefined();
     expect(resolveWaterVolume(command({ parameters: { zones: [] } }))).toBeUndefined();
-    // 历史脏参数（面积缺失）不该把结单带崩，也不该编一个数
+    // 处方自动指令带的是亩均用量，没有面积就乘不出总投肥量
+    expect(resolveFertilizerKg(command({ type: "FERTILIZATION", parameters: { materialCode: "UREA", dosage: 8 } }))).toBeUndefined();
+    expect(resolveFertilizerKg(command({ type: "FERTILIZATION", parameters: { zones: ZONES } }))).toBeUndefined();
+    // 历史脏参数（面积缺失、配比越界）不该把结单带崩，也不该编一个数
     expect(resolveWaterVolume(command({ parameters: { zones: [{ zoneCode: "ZONE-01", targetMm: 20 }] } }))).toBeUndefined();
+    expect(resolveFertilizerKg(command({ type: "FERTILIZATION", parameters: { zones: ZONES, recipe: { nitrogen: -1 } } }))).toBeUndefined();
   });
 
   it("时长起点取最后一次状态推进时间，没有回执时刻时退到入队时间", () => {
@@ -73,8 +90,10 @@ describe("灌溉完成事件载荷", () => {
     expect(resolveDurationMin(command({ sentAt: "" , createdAt: "not-a-date" }), finishedAt)).toEqual({ durationMin: 0, durationSource: "RUNTIME" });
   });
 
-  it("载荷带指令、地块与设备标识，字段与派生结果一致", () => {
-    const payload = buildIrrigationFinished(command(), finishedAt);
+  it("灌溉指令组装灌溉主题与载荷，字段与派生结果一致", () => {
+    const finished = buildFinishedEvent(command(), finishedAt);
+    expect(finished?.topic).toBe(EventTopic.ControlIrrigationFinished);
+    const payload = finished?.payload as IrrigationFinishedPayload;
     expect(payload).toMatchObject({
       commandId: "cmd-irri-1",
       parcelId: "511723-000001-01-00001-0000-5",
@@ -85,9 +104,37 @@ describe("灌溉完成事件载荷", () => {
     });
     expect(payload.waterVolume).toBe(Number((waterVolumeOf(10, 20) + waterVolumeOf(6.5, 15)).toFixed(2)));
     // 无分区也无上报时，载荷干脆不带用水量字段
-    const unmeasured = buildIrrigationFinished(command({ parameters: {} }), finishedAt);
+    const unmeasured = buildFinishedEvent(command({ parameters: {} }), finishedAt)?.payload as IrrigationFinishedPayload;
     expect("waterVolume" in unmeasured).toBe(false);
     expect("waterVolumeSource" in unmeasured).toBe(false);
+  });
+
+  it("施肥指令组装施肥主题与载荷，不带用水量字段", () => {
+    const fertilizer = command({ id: "cmd-fert-1", type: "FERTILIZATION", parameters: { zones: ZONES, recipe: RECIPE } });
+    const finished = buildFinishedEvent(fertilizer, finishedAt);
+    expect(finished?.topic).toBe(EventTopic.ControlFertilizationFinished);
+    const payload = finished?.payload as FertilizationFinishedPayload;
+    expect(payload).toMatchObject({
+      commandId: "cmd-fert-1",
+      parcelId: "511723-000001-01-00001-0000-5",
+      deviceId: "device-irri-001",
+      finishedAt,
+      fertilizerSource: "PLAN",
+      durationSource: "RUNTIME",
+    });
+    expect(payload.fertilizerKg).toBe(buildIrrigationPlan({ zones: ZONES, recipe: RECIPE }).recipe?.totalKg);
+    // 施肥载荷口径是肥料千克数，绝不带用水量，免得下游把两本账加成一本
+    expect("waterVolume" in payload).toBe(false);
+    // 既没配方也没面积：载荷干脆不带投肥量字段，而不是填一个 0
+    const unfurnished = buildFinishedEvent(command({ type: "FERTILIZATION", parameters: {} }), finishedAt)?.payload as FertilizationFinishedPayload;
+    expect("fertilizerKg" in unfurnished).toBe(false);
+    expect("fertilizerSource" in unfurnished).toBe(false);
+  });
+
+  it("播种、除草、急停没有可核对的作业量，不组结单事件", () => {
+    expect(buildFinishedEvent(command({ type: "SEEDING" }), finishedAt)).toBeUndefined();
+    expect(buildFinishedEvent(command({ type: "WEEDING" }), finishedAt)).toBeUndefined();
+    expect(buildFinishedEvent(command({ type: "ESTOP", parameters: {} }), finishedAt)).toBeUndefined();
   });
 });
 
@@ -124,7 +171,7 @@ async function postReceipt(base: string, body: Record<string, unknown>): Promise
   });
 }
 
-describe("DONE 回执结单时回流灌溉完成事件", () => {
+describe("DONE 回执结单时回流作业完成事件", () => {
   it("灌溉指令结单：状态与待投递事件同事务写入，用水量按方案现算", async () => {
     const repository = new InMemoryControlCommandRepository([command()]);
     const { store, publisher, outbox, withTransaction } = makeRelay();
@@ -136,7 +183,7 @@ describe("DONE 回执结单时回流灌溉完成事件", () => {
 
     const pending = store.all().filter((record) => record.topic === EventTopic.ControlIrrigationFinished);
     expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatchObject({ tenantId: "tenant-demo", producer: "control", traceId: "control-irrigation:cmd-irri-1" });
+    expect(pending[0]).toMatchObject({ tenantId: "tenant-demo", producer: "control", traceId: "control-finished:cmd-irri-1" });
     const payload = pending[0]?.payload as IrrigationFinishedPayload;
     expect(payload).toMatchObject({ commandId: "cmd-irri-1", parcelId: "511723-000001-01-00001-0000-5", deviceId: "device-irri-001", finishedAt });
     expect(payload.waterVolume).toBe(Number((waterVolumeOf(10, 20) + waterVolumeOf(6.5, 15)).toFixed(2)));
@@ -167,18 +214,60 @@ describe("DONE 回执结单时回流灌溉完成事件", () => {
     expect(payload).toMatchObject({ waterVolume: 173.4, waterVolumeSource: "DEVICE", durationMin: 47, durationSource: "DEVICE" });
   });
 
-  it("施肥与急停的 DONE 不推灌溉完成事件", async () => {
+  it("施肥指令结单：推施肥主题事件，用水主题一条也不留", async () => {
     const repository = new InMemoryControlCommandRepository([
-      command({ id: "cmd-fert", type: "FERTILIZATION" }),
-      command({ id: "cmd-estop", type: "ESTOP", parameters: {} }),
+      command({ id: "cmd-fert-1", type: "FERTILIZATION", parameters: { zones: ZONES, recipe: RECIPE } }),
+    ]);
+    const { store, publisher, outbox, withTransaction } = makeRelay();
+    const base = await start(createControlHttpServer(repository, { outbox, withTransaction }));
+
+    expect((await postReceipt(base, { commandId: "cmd-fert-1", status: "DONE", at: finishedAt })).status).toBe(200);
+    expect(store.all().filter((record) => record.topic === EventTopic.ControlIrrigationFinished)).toHaveLength(0);
+    const pending = store.all().filter((record) => record.topic === EventTopic.ControlFertilizationFinished);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ tenantId: "tenant-demo", producer: "control", traceId: "control-finished:cmd-fert-1" });
+    const payload = pending[0]?.payload as FertilizationFinishedPayload;
+    expect(payload.fertilizerKg).toBe(buildIrrigationPlan({ zones: ZONES, recipe: RECIPE }).recipe?.totalKg);
+    expect(payload.fertilizerSource).toBe("PLAN");
+    expect(await outbox.relayOnce()).toBe(1);
+    expect(publisher.published.filter((item) => item.topic === EventTopic.ControlFertilizationFinished)).toHaveLength(1);
+  });
+
+  it("设备实测的投肥量原样进事件，不被配方推算值覆盖", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "cmd-fert-1", type: "FERTILIZATION", parameters: { zones: ZONES, recipe: RECIPE } }),
     ]);
     const { store, outbox, withTransaction } = makeRelay();
     const base = await start(createControlHttpServer(repository, { outbox, withTransaction }));
 
-    expect((await postReceipt(base, { commandId: "cmd-fert", status: "DONE", at: finishedAt })).status).toBe(200);
-    expect((await repository.find("tenant-demo", "cmd-fert"))?.status).toBe("DONE");
-    const estop = await postReceipt(base, { commandId: "cmd-estop", status: "DONE", at: finishedAt, result: { confirmed: true } });
-    expect(estop.status).toBe(200);
+    await postReceipt(base, { commandId: "cmd-fert-1", status: "DONE", at: finishedAt, result: { fertilizerKg: 128.5 } });
+    const payload = store.all()[0]?.payload as FertilizationFinishedPayload;
+    expect(payload).toMatchObject({ fertilizerKg: 128.5, fertilizerSource: "DEVICE" });
+  });
+
+  it("处方自动施肥指令没有分区与配比：结单照发事件，投肥量留空", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "cmd-fert-auto", type: "FERTILIZATION", origin: "EVENT", parameters: { source: "prescription", materialCode: "UREA", dosage: 8 } }),
+    ]);
+    const { store, outbox, withTransaction } = makeRelay();
+    const base = await start(createControlHttpServer(repository, { outbox, withTransaction }));
+
+    expect((await postReceipt(base, { commandId: "cmd-fert-auto", status: "DONE", at: finishedAt })).status).toBe(200);
+    const payload = store.all()[0]?.payload as FertilizationFinishedPayload;
+    expect(payload).toMatchObject({ commandId: "cmd-fert-auto", durationSource: "RUNTIME" });
+    expect("fertilizerKg" in payload).toBe(false);
+  });
+
+  it("急停与播种的 DONE 不推任何结单事件", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "cmd-estop", type: "ESTOP", parameters: {} }),
+      command({ id: "cmd-seed", type: "SEEDING", parameters: {} }),
+    ]);
+    const { store, outbox, withTransaction } = makeRelay();
+    const base = await start(createControlHttpServer(repository, { outbox, withTransaction }));
+
+    expect((await postReceipt(base, { commandId: "cmd-estop", status: "DONE", at: finishedAt, result: { confirmed: true } })).status).toBe(200);
+    expect((await postReceipt(base, { commandId: "cmd-seed", status: "DONE", at: finishedAt })).status).toBe(200);
 
     expect(store.all()).toHaveLength(0);
   });

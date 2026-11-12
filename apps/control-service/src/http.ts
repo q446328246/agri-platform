@@ -3,17 +3,16 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 
 import type { ApiResponse, PageResult } from "@agri/contracts";
-import { EventTopic } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
 import type { OutboxService } from "@agri/mq";
 import { authorizeRequest } from "@agri/shared";
 
+import { buildFinishedEvent } from "./command-finished.js";
 import { buildIrrigationPlan, validateCommandParameters } from "./command-spec.js";
 import type { IrrigationPlanInput } from "./command-spec.js";
 import { CONTROL_STATUSES, canTransition, pendingMinutesOf } from "./control.repository.js";
 import { InMemoryControlCommandRepository } from "./control.repository.js";
 import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, ControlCommandType, ControlOrigin } from "./control.repository.js";
-import { buildIrrigationFinished } from "./irrigation-finished.js";
 
 /**
  * 控制指令 HTTP 接口。
@@ -306,17 +305,17 @@ export function createControlHttpServer(
           ...(message === undefined ? {} : { message }),
           ...(result === undefined ? {} : { result }),
         };
-        // 只有灌溉指令结单会回流一条完成事件：施肥走的是同一台水肥机，但事件口径说的是「灌了多少水」，
-        // 把它算成灌溉用水会虚报——施肥的用水回流留作待决，不顺手挂上。
-        const finished = status === "DONE" && target.type === "IRRIGATION" ? buildIrrigationFinished(target, at, result) : undefined;
+        // 水肥类指令结单回流一条完成事件：灌溉记用水量，施肥记配方总投肥量，
+        // 口径分主题——把施肥的肥料量算进灌溉用水会虚报，两类各说各的账。
+        const finished = status === "DONE" ? buildFinishedEvent(target, at, result) : undefined;
         const apply = async (tx?: Tx): Promise<ControlCommand | null> => {
           // 先跃迁再入队：跃迁被版本拦住时不留一条没人结单的事件
           const updated = await repository.transition(tenantId, transition, tx);
           if (!updated) return null;
           if (finished && outbox) {
-            await outbox.enqueue(tx, EventTopic.ControlIrrigationFinished, finished, {
+            await outbox.enqueue(tx, finished.topic, finished.payload, {
               tenantId,
-              traceId: `control-irrigation:${target.id}`,
+              traceId: `control-finished:${target.id}`,
               producer: "control",
             });
           }

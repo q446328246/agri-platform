@@ -62,9 +62,15 @@ export class MessageEventConsumer {
     await this.deliver(event);
   }
 
-  /** 灌溉执行完成：生成通知消息，把设备实测的用水量为地块结一笔账 */
+  /** 灌溉执行完成：生成通知消息，把设备结单的用水量为地块记一笔账 */
   @registerHandler(EventTopic.ControlIrrigationFinished)
   async onIrrigationFinished(event: DomainEvent<unknown>): Promise<void> {
+    await this.deliver(event);
+  }
+
+  /** 施肥执行完成：生成通知消息，投肥量与用水量分开通知，同一台水肥机两本账 */
+  @registerHandler(EventTopic.ControlFertilizationFinished)
+  async onFertilizationFinished(event: DomainEvent<unknown>): Promise<void> {
     await this.deliver(event);
   }
 

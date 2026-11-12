@@ -1,6 +1,6 @@
 import "reflect-metadata";
 
-import type { DomainEvent, IrrigationFinishedPayload, PrescriptionIssuedPayload } from "@agri/contracts";
+import type { DomainEvent, FertilizationFinishedPayload, IrrigationFinishedPayload, PrescriptionIssuedPayload } from "@agri/contracts";
 import { EventTopic } from "@agri/contracts";
 import {
   buildHandlers,
@@ -13,7 +13,7 @@ import {
 import type { EventLogStore } from "@agri/mq";
 
 import type { TraceRecord, TraceRepository } from "./repository.js";
-import { IRRIGATION_EVENT, PRESCRIPTION_EVENT } from "./repository.js";
+import { FERTILIZATION_EVENT, IRRIGATION_EVENT, PRESCRIPTION_EVENT } from "./repository.js";
 
 /**
  * 生产档案的事件消费。
@@ -22,8 +22,8 @@ import { IRRIGATION_EVENT, PRESCRIPTION_EVENT } from "./repository.js";
  * 「哪块地在什么时间按什么建议作业」。档案只做追加记录，不修改处方本身，
  * 因此处理器里不调用决策服务。
  *
- * 灌溉结单同样入账：处方只是「建议」，DONE 回执带回来的用水量与时长才是「实际做了什么」。
- * 两条档案事件分开保留，溯源链条才能既看到建议也看到执行。
+ * 作业结单同样入账：处方只是「建议」，DONE 回执带回来的用水量、投肥量与时长才是「实际做了什么」。
+ * 两类档案事件分开保留，溯源链条才能既看到建议也看到执行。
  */
 
 /** 处方类型中文名，用于档案详情 */
@@ -32,6 +32,11 @@ const PLAN_LABELS: Record<PrescriptionIssuedPayload["planType"], string> = {
   fertilization: "施肥",
   pesticide: "植保",
 };
+
+/** 结单事件的时长文案：设备实测与按回执时间推算的置信度不同，档案里要分开讲 */
+function durationText(payload: { durationMin: number; durationSource: "DEVICE" | "RUNTIME" }): string {
+  return `历时 ${payload.durationMin} 分钟${payload.durationSource === "DEVICE" ? "（设备实测）" : "（按回执时间推算）"}`;
+}
 
 /** 事件消费处理器：一个方法对应一个主题 */
 export class TraceEventConsumer {
@@ -70,14 +75,37 @@ export class TraceEventConsumer {
       payload.waterVolume === undefined
         ? "用水量未上报"
         : `用水 ${payload.waterVolume} 立方米${payload.waterVolumeSource === "DEVICE" ? "（设备实测）" : "（按分区方案推算）"}`;
-    const duration = `历时 ${payload.durationMin} 分钟${payload.durationSource === "DEVICE" ? "（设备实测）" : "（按回执时间推算）"}`;
     const record: TraceRecord = {
       id: `TRACE-${event.eventId}`,
       traceCode: `TR-IRR-${payload.commandId}`,
       batchCode: "",
       plotCode: payload.parcelId,
       event: IRRIGATION_EVENT,
-      detail: `灌溉指令 ${payload.commandId} 执行到位（设备 ${payload.deviceId}）：${water}，${duration}`,
+      detail: `灌溉指令 ${payload.commandId} 执行到位（设备 ${payload.deviceId}）：${water}，${durationText(payload)}`,
+      operator: `event:${event.producer}`,
+      createdAt: payload.finishedAt || event.occurredAt,
+    };
+    await this.records.create(record);
+  }
+
+  /**
+   * 施肥执行完成：DONE 回执带回来的实际投肥量入账。
+   * 与灌溉分主题、分事件编码存档——肥料千克数混进用水档案会把两本账搅在一起。
+   */
+  @registerHandler(EventTopic.ControlFertilizationFinished)
+  async onFertilizationFinished(event: DomainEvent<FertilizationFinishedPayload>): Promise<void> {
+    const payload = event.payload;
+    const amount =
+      payload.fertilizerKg === undefined
+        ? "施肥量未上报"
+        : `施氮磷钾合计 ${payload.fertilizerKg} 千克${payload.fertilizerSource === "DEVICE" ? "（设备实测）" : "（按配方与面积推算）"}`;
+    const record: TraceRecord = {
+      id: `TRACE-${event.eventId}`,
+      traceCode: `TR-FERT-${payload.commandId}`,
+      batchCode: "",
+      plotCode: payload.parcelId,
+      event: FERTILIZATION_EVENT,
+      detail: `施肥指令 ${payload.commandId} 执行到位（设备 ${payload.deviceId}）：${amount}，${durationText(payload)}`,
       operator: `event:${event.producer}`,
       createdAt: payload.finishedAt || event.occurredAt,
     };

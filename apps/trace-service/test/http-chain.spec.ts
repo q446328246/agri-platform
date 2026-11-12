@@ -53,15 +53,17 @@ describe("trace HTTP chain", () => {
     expect(((await chain.json()) as { data: unknown[] }).data).toHaveLength(1);
   });
 
-  it("灌溉完成档案不接受人工补录", async () => {
+  it("灌溉与施肥完成档案都不接受人工补录", async () => {
     const base = await start(createTraceHttpServer(seed()));
-    const res = await fetch(`${base}/api/v1/trace/records`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ plotCode: "P-9", event: "IRRIGATION_FINISHED", detail: "手填用水 999 立方米", operator: "张伟" }),
-    });
-    expect(res.status).toBe(400);
-    expect((await res.json() as { message: string }).message).toContain("不支持人工补录");
+    for (const [event, detail] of [["IRRIGATION_FINISHED", "手填用水 999 立方米"], ["FERTILIZATION_FINISHED", "手填施肥 999 千克"]] as const) {
+      const res = await fetch(`${base}/api/v1/trace/records`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ plotCode: "P-9", event, detail, operator: "张伟" }),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json() as { message: string }).message).toContain("不支持人工补录");
+    }
     // 拒绝要真的没落库：这条地块的档案还是空的
     const list = (await (await fetch(`${base}/api/v1/trace/records?plotCode=P-9`)).json() as { data: { items: unknown[] } }).data;
     expect(list.items).toHaveLength(0);

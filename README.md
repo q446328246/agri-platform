@@ -238,7 +238,7 @@ agri-platform-nodejs-scaffold/
   地块建档走 `plot_outbox`（迁移 028），SQL 模式 HTTP 启动后周期性中继把 `PlotCreated` 写入共享 `event_log`，
   跨进程可靠；`message-service` 已订阅 `PlotCreated` 生成「地块建档通知」（模板渲染 → 偏好过滤 → 落库，按 `eventId` 幂等）。
   控制指令的超时收口走同一套 `control_outbox`（迁移 033）：收口任务在事务内改状态并入队，中继再投递。
-  灌溉指令结单也走这一张表：`DONE` 回执在同一事务里推 `control.irrigation.finished`，状态落空（版本被抢）则不入队。
+  灌溉与施肥指令结单也走这一张表：`DONE` 回执在同一事务里推 `control.irrigation.finished` / `control.fertilization.finished`，状态落空（版本被抢）则不入队。
 - **跨进程事件靠事件日志**：`event_log` 按主题递增位点，`event_log_offsets` 记录消费者组位点；
   生产侧用 `EventLogPublisher`，消费侧用 `EventLogConsumer` 轮询，便于横向扩容与重放。
 - **处方要能被调优**：处方执行后必须回写实际效果，`evaluateOutcome` 给出阈值建议，
@@ -250,7 +250,7 @@ agri-platform-nodejs-scaffold/
   不设或设为 `sql` 时随 `DB_URL` 落库，设为 `memory` 时退回内存实现。
 - **事件消费方只做翻译**：`control-service` 把「土壤含水率低于下限」与灌溉/施肥处方
   翻译成自动指令（执行人 `system:event`、保留 `sourceEventId`），`trace-service` 把处方
-  写入生产档案（追溯码 `TR-PRES-<eventId>`）、把灌溉结单写成作业档案（追溯码 `TR-IRR-<指令id>`）；
+  写入生产档案（追溯码 `TR-PRES-<eventId>`）、把作业结单写成作业档案（灌溉 `TR-IRR-<指令id>`、施肥 `TR-FERT-<指令id>`）；
   重复事件由幂等键、指令唯一索引与档案追溯码三层兜住。植保处方与其它指标越限不自动下令，仍由消息中心提醒人工处置。
 - **指令要有回执才算下过**：控制指令走 `QUEUED → SENT → ACKED → DONE`，任一在途状态都可被 `FAILED` 收口，
   终态不可再改；跃迁表 + `version` 乐观锁在 `control.repository.ts`，设备通道 `POST /control/device/dispatch`
@@ -264,11 +264,13 @@ agri-platform-nodejs-scaffold/
   `CONTROL_OUTBOX_RELAY_INTERVAL_MS` 把 `control.command.timeout` 投进共享事件日志，消息中心据此生成告警
   （急停为 CRITICAL，其余 WARNING，按指令 id 聚合不刷屏）。收口与迟到的真实回执抢同一个 `version`，
   先到先得：谁先落到终态另一边拿 409，不悄悄覆盖任何一侧的结果，「设备到底做没做」交给超时告警去人工确认。
-  灌溉指令结单（`DONE` + `IRRIGATION`）不再只改状态：同一事务推 `control.irrigation.finished`，把「灌了多少水、
-  灌了多久」回流给档案与消息中心。数值只有两条正路——设备在 `result` 里实测上报（`DEVICE`），或按指令分区参数
-  现算方案总量（`PLAN`）/按状态推进时间现算时长（`RUNTIME`）；两条都走不通就留空并在文案里明说「用水量未上报」，
-  不拿估算冒充实测。施肥与急停不发该事件（载荷口径是灌水量）。该档案**不支持人工补录**：
-  `POST /trace/records` 收到 `IRRIGATION_FINISHED` 直接 400，前端新增弹窗的事件下拉里也没有这一项。
+  水肥类指令结单（`DONE` + `IRRIGATION`/`FERTILIZATION`）不再只改状态：同一事务推对应主题，把「灌了多少水、施了多少肥、
+  作业多久」回流给档案与消息中心。数值只有两条正路——设备在 `result` 里实测上报（`DEVICE`），或按指令分区参数
+  现算方案总量（`PLAN`：灌溉取 `totalWaterVolume`，施肥取配方千克/亩 × 分区面积合计的 `totalKg`）/按状态推进时间
+  现算时长（`RUNTIME`）；两条都走不通就留空并在文案里明说「用水量/施肥量未上报」，不拿估算冒充实测。
+  阈值与处方自动下发的指令参数里没有分区与配比，结单事件就带不出用量字段——这是事实，不是漏发。
+  播种、除草、急停没有可核对的作业量，不发结单事件。该档案**不支持人工补录**：
+  `POST /trace/records` 收到 `IRRIGATION_FINISHED`/`FERTILIZATION_FINISHED` 直接 400，前端新增弹窗的事件下拉里也没有这两项。
 - **指令台账按租户隔离**：迁移 `032` 给 `control_commands` 补 `tenant_id`（`DEFAULT 'tenant-demo'`，存量行含
   `010` 种子全部属演示租户，常量默认值不重写表）。仓储的读、写、跃迁都以 `tenantId` 为首参，跨租户的 id
   一律当作不存在——查不到 404、跃不动返回 `null` 翻成 409，与 `operation_tasks`/`video_ptz_commands` 同口径。
@@ -292,8 +294,8 @@ agri-platform-nodejs-scaffold/
 - **账号权限 = 角色权限 ∪ 直授权限**：登录与 `userinfo` 返回合并后的有效权限，前端据此过滤菜单、
   拦截路由（`meta.permission` → `/403`）；平台服务不可用时退回直授权限，不阻断登录。
 - **消费结果可直接核对**：设备管理下的「控制指令」页按地块与来源（自动/人工）筛选，展示指令缘由与
-  `sourceEventId` 便于回溯；生产档案页可按事件类型（处方生成/农事作业/作业完成/灌溉完成）筛选，下拉选项由
-  `@/utils` 的 `traceEventOptions` 统一派生（新增弹窗用剔除设备专属事件的 `manualTraceEventOptions`），事件列以标签区分。
+  `sourceEventId` 便于回溯；生产档案页可按事件类型筛选，下拉选项由
+  `@/utils` 的 `traceEventOptions` 统一派生（新增弹窗用剔除设备专属事件的 `manualTraceEventOptions`，灌溉完成与施肥完成都在剔除之列），事件列以标签区分。
 - **全站统一条件查询**：地块、设备、农事任务、控制指令、投入产出、溯源档案、视频监控、四情、消息等页面
   统一提供「关键词 + 枚举下拉 + 时间区间 + 重置 + 分页」查询条，筛选全部下沉服务端；
   地块台账补充类型/状态/当前作物/负责人字段（迁移 011），投入产出页汇总卡片与列表同一套条件联动。

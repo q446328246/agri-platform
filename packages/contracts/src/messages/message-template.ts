@@ -1,5 +1,6 @@
 import type {
   CommandTimeoutPayload,
+  FertilizationFinishedPayload,
   IrrigationFinishedPayload,
   PestDetectedPayload,
   PlotCreatedPayload,
@@ -18,7 +19,7 @@ import { EventTopic } from "../events/topic.js";
  * 去重键分三类：
  * - 越限告警按「地块 + 指标 + 方向 + 小时」聚合，抑制同一场灾害的一小时内刷屏；
  * - 处方通知按来源事件唯一，每份处方都要分别通知；
- * - 指令相关消息（超时收口、灌溉完成）按指令唯一——事件重放或中继重试会换 eventId，
+ * - 指令相关消息（超时收口、灌溉完成、施肥完成）按指令唯一——事件重放或中继重试会换 eventId，
  *   但同一条指令只该提醒一次。
  */
 
@@ -225,6 +226,19 @@ const commandTimeoutTemplate: MessageTemplate<CommandTimeoutPayload> = {
 };
 
 /**
+ * 结单事件的时长文案。灌溉与施肥共用同一套口径，
+ * 设备实测与按回执时间推算的置信度不同，来源必须写在文案里。
+ */
+function durationText(payload: { durationMin: number; durationSource: "DEVICE" | "RUNTIME" }): string {
+  return `历时 ${payload.durationMin} 分钟${payload.durationSource === "DEVICE" ? "（设备实测）" : "（按回执时间推算）"}`;
+}
+
+/** 结单事件的用量来源文案：DEVICE 恒为设备实测，PLAN 由各事件说明自己的推算依据 */
+function amountSourceLabel(source: "DEVICE" | "PLAN" | undefined, planLabel: string): string {
+  return source === "DEVICE" ? "设备实测" : planLabel;
+}
+
+/**
  * 灌溉执行完成：DONE 回执回流的通知消息。
  * 用水量与时长都标注来源——设备实测与方案推算的置信度不同，混在一起会把估算当成计量。
  */
@@ -237,16 +251,42 @@ const irrigationFinishedTemplate: MessageTemplate<IrrigationFinishedPayload> = {
     const water =
       payload.waterVolume === undefined
         ? "用水量未上报"
-        : `用水 ${payload.waterVolume} 立方米${payload.waterVolumeSource === "DEVICE" ? "（设备实测）" : "（按分区方案推算）"}`;
-    const duration = `历时 ${payload.durationMin} 分钟${payload.durationSource === "DEVICE" ? "（设备实测）" : "（按回执时间推算）"}`;
+        : `用水 ${payload.waterVolume} 立方米（${amountSourceLabel(payload.waterVolumeSource, "按分区方案推算")}）`;
     return {
       type: "NOTICE",
       level: "INFO",
       title: `灌溉执行完成：${plotCode}`,
-      content: `设备 ${payload.deviceId} 已完成 ${plotCode} 的灌溉指令，${water}，${duration}。可在生产档案与指令台账中核对。`,
+      content: `设备 ${payload.deviceId} 已完成 ${plotCode} 的灌溉指令，${water}，${durationText(payload)}。可在生产档案与指令台账中核对。`,
       plotCode: payload.parcelId,
       occurredAt: payload.finishedAt || context.occurredAt,
       dedupeKey: `${EventTopic.ControlIrrigationFinished}:${payload.commandId}`,
+    };
+  },
+};
+
+/**
+ * 施肥执行完成：与灌溉同一台水肥机，但账算在肥料上。
+ * 施肥量按配方与面积现算的是「计划投了多少肥」，设备回执才是「实际投了多少肥」，
+ * 两者都拿不到时说明未上报，不拿配方量冒充实测值。
+ */
+const fertilizationFinishedTemplate: MessageTemplate<FertilizationFinishedPayload> = {
+  topic: EventTopic.ControlFertilizationFinished,
+  label: "施肥执行完成",
+  type: "NOTICE",
+  render(payload, context) {
+    const plotCode = payload.parcelId || "未绑定地块";
+    const amount =
+      payload.fertilizerKg === undefined
+        ? "施肥量未上报"
+        : `施氮磷钾合计 ${payload.fertilizerKg} 千克（${amountSourceLabel(payload.fertilizerSource, "按配方与面积推算")}）`;
+    return {
+      type: "NOTICE",
+      level: "INFO",
+      title: `施肥执行完成：${plotCode}`,
+      content: `设备 ${payload.deviceId} 已完成 ${plotCode} 的施肥指令，${amount}，${durationText(payload)}。可在生产档案与指令台账中核对。`,
+      plotCode: payload.parcelId,
+      occurredAt: payload.finishedAt || context.occurredAt,
+      dedupeKey: `${EventTopic.ControlFertilizationFinished}:${payload.commandId}`,
     };
   },
 };
@@ -259,6 +299,7 @@ export const MESSAGE_TEMPLATES = {
   [EventTopic.PlotCreated]: plotCreatedTemplate,
   [EventTopic.ControlCommandTimeout]: commandTimeoutTemplate,
   [EventTopic.ControlIrrigationFinished]: irrigationFinishedTemplate,
+  [EventTopic.ControlFertilizationFinished]: fertilizationFinishedTemplate,
 } as const;
 
 /** 已登记模板的主题 */

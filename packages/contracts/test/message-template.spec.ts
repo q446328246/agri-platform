@@ -160,6 +160,40 @@ describe("消息模板与去重键", () => {
     expect(again?.dedupeKey).not.toBe(estimated?.dedupeKey);
   });
 
+  it("施肥完成按指令结一笔肥账，投肥量与时长都标来源", () => {
+    const payload = {
+      commandId: "cmd-12", parcelId: "P-7", deviceId: "device-irri-002",
+      fertilizerKg: 96, fertilizerSource: "DEVICE" as const,
+      durationMin: 14, durationSource: "DEVICE" as const,
+      finishedAt: "2026-11-05T03:00:00.000Z",
+    };
+    const draft = buildMessageDraft(EventTopic.ControlFertilizationFinished, payload, context);
+    expect(draft).toMatchObject({ type: "NOTICE", level: "INFO", plotCode: "P-7" });
+    expect(draft?.title).toBe("施肥执行完成：P-7");
+    expect(draft?.content).toContain("施氮磷钾合计 96 千克（设备实测）");
+    expect(draft?.content).toContain("历时 14 分钟（设备实测）");
+    expect(draft?.occurredAt).toBe("2026-11-05T03:00:00.000Z");
+
+    // 配方推算说推算依据，完全不落空也不写「实测」
+    const estimated = buildMessageDraft(EventTopic.ControlFertilizationFinished, {
+      ...payload, commandId: "cmd-13", fertilizerKg: 150, fertilizerSource: "PLAN", durationSource: "RUNTIME",
+    }, context);
+    expect(estimated?.content).toContain("施氮磷钾合计 150 千克（按配方与面积推算）");
+    expect(estimated?.content).toContain("历时 14 分钟（按回执时间推算）");
+    const unmeasured = buildMessageDraft(EventTopic.ControlFertilizationFinished, {
+      ...payload, commandId: "cmd-14", fertilizerKg: undefined, fertilizerSource: undefined,
+    }, context);
+    expect(unmeasured?.content).toContain("施肥量未上报");
+
+    // 去重键带主题：同一指令号在灌溉与施肥两条主题下各自结一次账
+    const irrigation = buildMessageDraft(EventTopic.ControlIrrigationFinished, {
+      commandId: "cmd-12", parcelId: "P-7", deviceId: "device-irri-002", durationMin: 14, durationSource: "RUNTIME", finishedAt: payload.finishedAt,
+    }, context);
+    expect(irrigation?.dedupeKey).not.toBe(draft?.dedupeKey);
+    const again = buildMessageDraft(EventTopic.ControlFertilizationFinished, payload, { eventId: "evt-fert-2", occurredAt: context.occurredAt });
+    expect(again?.dedupeKey).toBe(draft?.dedupeKey);
+  });
+
   it("未登记模板的主题不生成消息，级别权重可比较", () => {
     expect(buildMessageDraft(EventTopic.OperationTaskCompleted, {}, context)).toBeNull();
     expect(isMessageTemplateTopic(EventTopic.TelemetryThresholdBreached)).toBe(true);
@@ -171,6 +205,7 @@ describe("消息模板与去重键", () => {
       EventTopic.PlotCreated,
       EventTopic.ControlCommandTimeout,
       EventTopic.ControlIrrigationFinished,
+      EventTopic.ControlFertilizationFinished,
     ]);
     expect(MESSAGE_LEVEL_RANK.CRITICAL).toBeGreaterThan(MESSAGE_LEVEL_RANK.WARNING);
   });

@@ -1,7 +1,7 @@
 import "reflect-metadata";
 
 import { EventTopic } from "@agri/contracts";
-import type { IrrigationFinishedPayload } from "@agri/contracts";
+import type { FertilizationFinishedPayload, IrrigationFinishedPayload } from "@agri/contracts";
 import { EventLogPublisher, InMemoryEventLogStore } from "@agri/mq";
 import { describe, expect, it } from "vitest";
 
@@ -10,11 +10,12 @@ import { InMemoryMessageRepository } from "../src/message.repository.js";
 import { InMemoryMessagePreferenceRepository } from "../src/preference.repository.js";
 
 /**
- * 灌溉结单事件 → 消息中心的消费闭环。
+ * 作业结单事件 → 消息中心的消费闭环。
  *
  * DONE 回执由 control-service 写入 control_outbox，中继进共享 event_log 后由消息服务生成通知。
  * 这里验证三件事：结单一条通知、同一指令的重复投递不刷屏、文案把「设备实测」与「方案推算」
  * 分开——把估算写成实测，现场就会照着假数字算水费。
+ * 灌溉与施肥各说各的账：同一台水肥机的两条主题不能互相冒名，也不能互相顶掉去重键。
  */
 
 const TENANT = "tenant-demo";
@@ -33,8 +34,21 @@ function payload(overrides: Partial<IrrigationFinishedPayload> = {}): Irrigation
   };
 }
 
-function makeClosure(preferences = new InMemoryMessagePreferenceRepository()) {
-  const store = new InMemoryEventLogStore();
+function fertPayload(overrides: Partial<FertilizationFinishedPayload> = {}): FertilizationFinishedPayload {
+  return {
+    commandId: "cmd-fert-1",
+    parcelId: "511723-000001-01-00001-0000-5",
+    deviceId: "device-irri-001",
+    fertilizerKg: 150,
+    fertilizerSource: "PLAN",
+    durationMin: 35,
+    durationSource: "RUNTIME",
+    finishedAt: "2026-11-12T04:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function makeClosure(preferences = new InMemoryMessagePreferenceRepository()) {  const store = new InMemoryEventLogStore();
   const messages = new InMemoryMessageRepository();
   const publisher = new EventLogPublisher(store, { tenantId: TENANT, traceId: "control-relay", producer: "control" });
   const { consumer } = createMessageEventConsumer(messages, store, { pollIntervalMs: 20, preferences });
@@ -111,5 +125,71 @@ describe("灌溉完成事件驱动消息中心", () => {
     await publisher.publish(EventTopic.ControlIrrigationFinished, payload({ commandId: "cmd-c" }));
     expect(await consumer.pollOnce()).toBe(1);
     expect(messages.all()).toHaveLength(2);
+  });
+});
+
+describe("施肥完成事件驱动消息中心", () => {
+  it("消费 ControlFertilizationFinished 生成通知，投肥量与来源都来自事件载荷", async () => {
+    const { messages, publisher, consumer } = makeClosure();
+
+    await publisher.publish(EventTopic.ControlFertilizationFinished, fertPayload());
+    expect(await consumer.pollOnce()).toBe(1);
+
+    const rows = messages.all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tenantId: TENANT, type: "NOTICE", level: "INFO", plotCode: "511723-000001-01-00001-0000-5" });
+    expect(rows[0]?.title).toBe("施肥执行完成：511723-000001-01-00001-0000-5");
+    expect(rows[0]?.content).toContain("施氮磷钾合计 150 千克（按配方与面积推算）");
+    expect(rows[0]?.content).toContain("历时 35 分钟（按回执时间推算）");
+    // 施肥通知里不出现用水量：同一台水肥机，两本账必须分开
+    expect(rows[0]?.content).not.toContain("立方米");
+    expect(rows[0]?.createdAt).toBe("2026-11-12T04:00:00.000Z");
+  });
+
+  it("设备实测的投肥量写实测口径", async () => {
+    const { messages, publisher, consumer } = makeClosure();
+
+    await publisher.publish(EventTopic.ControlFertilizationFinished, fertPayload({ commandId: "cmd-fert-2", fertilizerSource: "DEVICE" }));
+    expect(await consumer.pollOnce()).toBe(1);
+    expect(messages.all()[0]?.content).toContain("施氮磷钾合计 150 千克（设备实测）");
+  });
+
+  it("推不出投肥量时直说未上报，不拿配方估一个", async () => {
+    const { messages, publisher, consumer } = makeClosure();
+
+    await publisher.publish(EventTopic.ControlFertilizationFinished, {
+      commandId: "cmd-fert-3", parcelId: "", deviceId: "device-irri-002", durationMin: 9, durationSource: "RUNTIME", finishedAt: "2026-11-12T05:00:00.000Z",
+    });
+    expect(await consumer.pollOnce()).toBe(1);
+
+    const row = messages.all()[0];
+    expect(row?.title).toBe("施肥执行完成：未绑定地块");
+    expect(row?.content).toContain("施肥量未上报");
+    expect(row?.content).not.toContain("千克");
+  });
+
+  it("同一施肥指令重复投递只留一条；灌溉与施肥同 id 也各留一条", async () => {
+    const { messages, publisher, consumer } = makeClosure();
+
+    await publisher.publish(EventTopic.ControlFertilizationFinished, fertPayload());
+    expect(await consumer.pollOnce()).toBe(1);
+    // 中继重试换事件标识，但结的是同一条指令的单
+    await publisher.publish(EventTopic.ControlFertilizationFinished, fertPayload({ durationMin: 36 }));
+    expect(await consumer.pollOnce()).toBe(1);
+    expect(messages.all()).toHaveLength(1);
+
+    // 去重键带主题：同一指令号在两条主题下不会互相顶掉
+    await publisher.publish(EventTopic.ControlIrrigationFinished, payload({ commandId: "cmd-fert-1" }));
+    expect(await consumer.pollOnce()).toBe(1);
+    expect(messages.all()).toHaveLength(2);
+  });
+
+  it("关闭施肥订阅后不再落库", async () => {
+    const { messages, publisher, preferences, consumer } = makeClosure();
+
+    await preferences.upsert({ tenantId: TENANT, topic: EventTopic.ControlFertilizationFinished, enabled: false, minLevel: "INFO", updatedAt: "" });
+    await publisher.publish(EventTopic.ControlFertilizationFinished, fertPayload({ commandId: "cmd-fert-4" }));
+    expect(await consumer.pollOnce()).toBe(1);
+    expect(messages.all()).toHaveLength(0);
   });
 });
