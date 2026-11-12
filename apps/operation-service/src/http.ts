@@ -5,6 +5,8 @@ import type { ApiResponse } from "@agri/contracts";
 import { authorizeRequest } from "@agri/shared";
 import { parseNavigationRequest, planNavigation } from "./navigation.js";
 import type { NavPlan } from "./navigation.js";
+import { CoverageError, parseCoverageRequest, planCoverage } from "./coverage.js";
+import type { CoveragePlan } from "./coverage.js";
 
 import { canTransition, InMemoryTaskRepository, TASK_STATUSES, TASK_TYPES } from "./task.repository.js";
 import type { Task, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType } from "./task.repository.js";
@@ -80,6 +82,7 @@ function resultOf(value: unknown): TaskResult {
 export function createOperationHttpServer(options: { tasks?: TaskRepository } = {}): Server {
   const tasks = options.tasks ?? new InMemoryTaskRepository(demoTasks.map((task) => ({ ...task, version: 1 })));
   const navPlans = new Map<string, NavPlan[]>();
+  const coveragePlans = new Map<string, CoveragePlan[]>();
   return createServer(async (req, res) => {
     const traceId = req.headers["x-request-id"]?.toString() || randomUUID();
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -128,9 +131,17 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
         send(res, 200, plan, traceId); return;
       }
       if (req.method === "GET" && url.pathname === "/api/v1/operations/path-plans") { send(res, 200, navPlans.get(tenantId) ?? [], traceId); return; }
+      if (req.method === "POST" && url.pathname === "/api/v1/operations/coverage-plan") {
+        const parsed = parseCoverageRequest(await json(req));
+        if (!parsed.ok || !parsed.input) throw new InputError(parsed.errors.join("；"));
+        const plan = planCoverage(parsed.input); const plans = coveragePlans.get(tenantId) ?? [];
+        plans.unshift(plan); if (plans.length > 20) plans.pop(); coveragePlans.set(tenantId, plans);
+        send(res, 200, plan, traceId); return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/v1/operations/coverage-plans") { send(res, 200, coveragePlans.get(tenantId) ?? [], traceId); return; }
       send(res, 404, null, traceId, "接口不存在");
     } catch (error) {
-      const invalid = error instanceof InputError || error instanceof SyntaxError || error instanceof URIError;
+      const invalid = error instanceof InputError || error instanceof CoverageError || error instanceof SyntaxError || error instanceof URIError;
       send(res, invalid ? 400 : 500, null, traceId, invalid ? error.message : "任务服务处理失败");
     }
   });

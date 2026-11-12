@@ -697,6 +697,14 @@ export const operationApi = {
   /** 最近的导航方案（进程内保留最近 20 条） */
   getPathPlans(): Promise<NavPlan[]> {
     return get<NavPlan[]>('/operations/path-plans')
+  },
+  /** 全地块覆盖式作业规划：按幅宽铺牛耕式作业带，返回连续路径与作业/转移里程 */
+  planCoverage(data: CoverageRequest): Promise<CoveragePlan> {
+    return post<CoveragePlan>('/operations/coverage-plan', data)
+  },
+  /** 最近的覆盖方案（进程内保留最近 20 条） */
+  getCoveragePlans(): Promise<CoveragePlan[]> {
+    return get<CoveragePlan[]>('/operations/coverage-plans')
   }
 }
 
@@ -734,6 +742,52 @@ export interface NavigationRequest {
   speedKmh?: number
   roadNetwork?: GeoLineString[]
   returnToStart?: boolean
+}
+
+/** 覆盖式作业规划入参：幅宽与重叠决定作业带间距，方向不填则由服务端自动挑 */
+export interface CoverageRequest {
+  plotCode: string
+  boundary: GeoPolygon
+  implementWidthM: number
+  overlapM?: number
+  headingDeg?: number
+  speedKmh?: number
+  turnSpeedKmh?: number
+  start?: { lng: number; lat: number }
+  /** 地块台账面积（亩），服务端用于算覆盖倍数；不传则按几何现算 */
+  areaMu?: number
+}
+
+export interface CoverageLane {
+  /** 作业顺序，从 1 开始 */
+  index: number
+  /** 同一条扫描线上的第几段，>1 说明地块含凹部或内环 */
+  pass: number
+  /** 作业带两端，按行进顺序 [lng, lat] */
+  coordinates: number[][]
+  lengthM: number
+}
+
+export interface CoveragePlan {
+  planId: string
+  plotCode: string
+  headingDeg: number
+  headingAuto: boolean
+  implementWidthM: number
+  overlapM: number
+  laneSpacingM: number
+  laneCount: number
+  turnCount: number
+  lanes: CoverageLane[]
+  workDistanceM: number
+  transferDistanceM: number
+  totalDistanceM: number
+  durationMin: number
+  areaMu: number
+  /** 按幅宽铺出的面积 / 地块面积：>1 有重复覆盖，<1 有漏作业 */
+  coverageRatio: number
+  path: GeoLineString
+  warnings: string[]
 }
 
 export const controlApi = {

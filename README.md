@@ -81,7 +81,7 @@ docker compose -f infra/docker-compose.yml --profile app up -d --build
 - 应用容器启动时先执行数据库迁移与 MinIO bucket 初始化，再拉起 15 个服务；网关是唯一对外入口。
 - 部署环境固定 `AUTH_GUARD_MODE=enforce` 与 `GATEWAY_AUTH_ENABLED=true`，`INTERNAL_TOKEN`、`AUTH_SESSION_TTL_SECONDS` 可覆盖。
 - 地图 Key 用 `VITE_TIANDITU_KEY` 构建参数传入；生产证书放到 `infra/certs` 并启用 `edge` 的注释卷。
-- 演示数据：迁移 `010_demo_data.sql` 会灌入一套达川丘区（地图中心 `30.982425, 107.421325`）的完整数据，含 12 块地块与 3 个片区、3024 条遥测读数、告警/虫情/处方/指令/消息/投入产出/溯源记录，设备、摄像头与农事任务由 iot/video/operation 服务的内存种子提供，各业务页面登录即有内容。演示账号：`agronomist`、`operator01`、`viewer01`（口令均为 `demo123`，`temp01` 为已停用账号）；需重置时删除主键带 `demo` 前缀的行后重跑迁移即可。
+- 演示数据：迁移 `010_demo_data.sql` 会灌入一套达川丘区（地图中心 `30.982425, 107.421325`）的完整数据，含 12 块地块与 3 个片区、3024 条遥测读数、告警/虫情/处方/指令/消息/投入产出/溯源记录，设备与摄像头由 iot/video 服务的内存种子提供，农事任务由迁移 `030_operation_task_demo_data.sql` 按在册地块落库（地块编码与亩数现取，不写死），各业务页面登录即有内容。演示账号：`agronomist`、`operator01`、`viewer01`（口令均为 `demo123`，`temp01` 为已停用账号）；需重置时删除主键带 `demo` 前缀的行后重跑迁移即可。
 - 构建需要能访问 Docker Hub 与 npm 源；若镜像拉取超时，先配置镜像加速或代理。
 
 ### 提交前校验
