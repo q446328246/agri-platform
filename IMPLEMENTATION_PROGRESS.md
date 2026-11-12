@@ -523,7 +523,32 @@
   9. 台账口径：`pending=true` 在本地块收口后为空集，库内分组只剩 `DONE`。
 - **明确不验超时收口**：`ControlReceiptSweeper` 的候选查询是跨租户全表的 `status IN ('QUEUED','SENT','ACKED')`，为在这轮里看到收口而调小 `CONTROL_RECEIPT_TIMEOUT_MIN`，会连带把演示库里别人正在途的指令刷成 `FAILED` 并各推一条告警——冒烟脚本不该有这种副作用。该路径由 `receipt-sweeper.spec.ts` 与 `sql-control-outbox.spec.ts` 覆盖，脚本头部注释写明原因。
 - **依赖**：迁移 031（回执列与时序 CHECK）、033（`control_outbox`）、034（执行回流表）。未应用时对应语句直接报错、脚本 FAIL 退出，不做「缺表就跳过」的粉饰。
-- **状态**：**只落盘未执行**（按 2026-11-11 起的交付口径，本轮不跑 `pnpm run build` 与任何冒烟）。入口已登记为 `package.json` 的 `smoke:receipt`（与 `smoke:consumers` 同样先 `pnpm run build`），README 命令表补一行。**未跑验证。**
+- **状态**：迁移 031–036 **已于 2026-11-12 应用到演示库 `agri`**；`pnpm run build`（`tsc -b`）、全量 `vitest`（618 用例）与 `smoke:receipt`/`smoke:events`/`smoke:consumers` 同日跑过，脚本 `SMOKE PASS`。
+
+### 2026-11-12：抹平双模行为差异（内存仓储 ↔ SQL 仓储）
+
+- **为什么值得做**：服务在无 `DB_URL` 时走 `InMemory*Repository`，这条路径不是只有单测在跑——本机起服务、演示沙箱、`*_REPOSITORY_MODE=memory` 部署都用它。每一处「SQL 有、内存没有」的行为都是现场可达的坑，而且两套部署对同一个请求给出不同答复时，排查会先怀疑设备与网络。
+- **按差异类型逐轴扫，而不是逐文件改**（覆盖 telemetry / iot / message / auth / platform / finance / trace / weather / decision / plot / operation 共 12 个服务）：
+  - **排序**：SQL 有 `ORDER BY`，内存靠插入顺序。回填的历史行一进内存就翻页错位，同一页两套模式拿到不同的行。全部补齐同口径比较（`created_at DESC`、`finished_at DESC, id DESC`、编码字典序等）。
+  - **关键字检索**：SQL 侧 `ILIKE '%x%'` 把 `%` `_` 当通配、内存侧逐字段 `includes`，同一个词两边命中不同。收敛到 `packages/shared/src/utils.ts` 的 `likePattern`（转义 `\ % _`）与 `keywordHits`（逐字段大小写不敏感包含）——**语义只有一份权威**，不再每个仓储抄一遍。
+  - **建档只写 INSERT 认的列**：内存 `create` 照单全收调用方塞来的 `version`/`status`/`sentAt`/`read`/`handled`，能凭空铺出「已完成」「已读」的记录；SQL 模式把这些留给默认值。改为同口径（版本从 1 起算、新任务恒 `PENDING`、已读/已处理一律 false、回执时间戳只由跃迁写入）。
+  - **`ON CONFLICT` 语义**：`trace` 与 telemetry 阈值规则的 SQL 侧冲突后保留**原有行的 id**（`ON CONFLICT (metric, plot_code, level) DO UPDATE`），内存侧整行替换会换掉 id，前端下一步按 id 操作就 404。SQL 改 `RETURNING` 回读、内存改「只覆盖可更新字段」。
+  - **引用逃逸**：内存方法把存进去的对象直接交出去，调用方改一下返回值就等于改库。出入双向 `structuredClone`。
+  - **边界校验**：SQL 靠 CHECK 拒绝、内存照收的行为，一律提到 HTTP 入口判定（回执时刻倒流、财务收支类型与金额），两套部署都回 400——放库里判会变成「SQL 模式 500、内存模式 200」。天气预警 `deactivate` 补 `AND active = TRUE`，重复下架不再报成功。
+  - **演示种子**：`operation-service` 内存 `demoTasks` 补齐 `scheduledEndAt` 与 `assigneeName`，与迁移 `030` 同列同值。
+- **抹不平的那条**：共享事件总线就是 `event_log` 表本身，无数据库部署里没有任何跨进程事件通道，内存模式的 `TaskCompleted` 永远发不出去。结论是**需要事件链路的部署必须配 `DB_URL`**，不做内存版伪总线（那等于造一套只对演示生效的第二事件系统）。
+- **新增用例**：控制指令「回执时刻不许倒流」——早于下发时刻的 `ACKED`、早于上一次推进的 `FAILED` 都 400，且指令留在原状态不被改写；`@agri/shared` 的 `likePattern`/`keywordHits` 直接单测（通配符转义、跨字段不串味、大小写不敏感）——双模一致性不再靠「两边各测一遍」，而是靠两边引用同一个函数。
+
+### 2026-11-12：地块合并要求相邻（`merge.geometry.ts` + `PLOT-409-003`）
+
+- **问题**：`#83` 的合并边界取源地块顶点凸包，凸包只在成员地块首尾相接时才等于真并集。当时把「选中互不相邻的地块会框进中间空地」写成口径注释加前端警示，让操作人事后复核——本轮按用户要求改成服务端硬校验：不相邻就不给合。2026-11-11 那次真实复验留下的证据还在（两块合计 152.54 亩、凸包 199.63 亩，差额 47 亩是别人的田），这种事事后复核追不回来。
+- **判定口径**（`apps/plot-service/src/merge.geometry.ts`）：两个外环算相邻 = 边严格相交 **或** 一块整块套在另一块里 **或** 边界间隙不超过容差。共边、角对角、手绘错开一两米都算相邻。地块对先按两环重心投影到等距圆柱平面（米），常数与 `packages/shared/src/area.ts` 的面积口径、`infra-line.repository.ts` 的长度估算同源；田间尺度误差可忽略，更高精度应改用 PostGIS 的 `ST_Touches`/`ST_DWithin`。
+- **连通而不是逐对相邻**：合并要的是「这批地连成一片」，所以按相邻关系做 BFS 分组（`adjacencyGroups`），结果只有一组才放行。A-B、B-C 相接而 A 与 C 隔着 B 的串可以合并；只选 A 与 C 会被拒。
+- **容差可配**：`PLOT_MERGE_ADJACENCY_M`（默认 5 米，`.env.example` 已登记）。配成 0 表示必须严格共边；非法值（`abc`、负数）回落默认，免得配错之后相邻校验静默退化成「全部通过」。
+- **拒绝的形状**：`ConflictError` → 409 `PLOT-409-003`，文案直接回显分成几组（`…：编码A、编码B ｜ 编码C`），操作人一眼看出是「两块各不相干」而不是「差一点没接上」。校验在建档事务之前，被拒不落半块、不留半条事件（用例断言 `plot_records` 与 `plot_outbox` 均无新增）。
+- **顺带修掉一个真 bug**：`mergePlots` 的 `input.parcelName?.trim() !== "" ? input.parcelName!.trim() : …` 在**不传名称**时条件恒真、随即对 `undefined` 调 `.trim()` 抛错，被 HTTP 兜底成 400。前端弹窗的占位文案写着「默认沿用「××」」，也就是留空名称的合并从来没成功过——`#83` 的用例每次都显式传名称，这条继承分支没人走过。改为 `input.parcelName?.trim() ? … : first.parcelName`，并让新用例走留空路径断言沿用首块名称。
+- **前端**：`plot/List.vue` 合并弹窗的警示由「凸包可能框进空地，事后复核」改为「必须相邻，服务端会拒并提示分成几组」；409 的文案由 `utils/request.ts` 的统一拦截器弹 `ElMessage.error`，页面不重复处理。容差数值不写进前端文案（权威在服务端配置，写了就会漂移）。
+- **用例**：`merge-split.spec.ts` 由 7 个扩到 12 个——隔着空地 409 且零写入、串连三块放行（两端单独选仍 409）、容差 0/默认两种配置下同一对地块结论相反，外加 `相邻判定` 单测块覆盖共边/交叉/内含/留缝/退化环与分组扩散顺序。
 
 ## 下一步（中断后从这里继续）
 
@@ -560,8 +585,9 @@
    - ~~`EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环~~：`#96` 已做（灌溉指令 `DONE` 在同一事务写 `control_outbox`，`trace-service` 结档案、`message-service` 发通知，见 2026-11-12 结单回流一节）；~~**施肥作业的实际用量回流**没有对应载荷口径~~（已做，`control.fertilization.finished`，见 2026-11-12 施肥结单事件回流一节）；~~决策侧也尚未消费该事件做处方效果回流，仍待决~~（已做，见 2026-11-12「决策侧消费结单事件」一节：`decision_prescription_executions` 落库 + `GET /decision/executions`；`evaluateOutcome` 仍需人工在拿到复测墒情后触发，这不是缺口而是时机依赖外部读数）。
    - ~~`control_commands` 无 `tenant_id`（多租户下指令台账互通）~~：`#97` 已做（迁移 `032` + 仓储首参 + 可信头归属，见 2026-11-12 租户隔离一节）；~~**设备台账 `iot_devices` 仍是全局台账**，是否一并隔离待决~~（已做，迁移 `035` + `DeviceRepository` 首参 + `tenantOf` 归属，编号唯一改为租户内唯一，见 2026-11-12 设备台账租户隔离一节）；
    - ~~`.qoder/repowiki/**` 每次收尾都会被自动重生成（本轮 40+ 文件 M/D/??），与功能改动分开单独征询是否提交，目前仍未入库~~：本轮已按「单独一笔」入库（`62a3fea`，53 文件），此后每轮收尾仍会重生成，继续按「与功能改动分开、单独提交」处理；**注意重生成分支落后于当日功能**，事件类文档以 README / 本节为准；
-   - 内存模式与 SQL 模式的行为差异（如 016 CHECK 要求 `CANCELLED` 必留 `cancelled_at`，而内存种子留空）要不要抹平；
-   - 合并的凸包口径：选中互不相邻地块会框进中间空地，是否改为要求相邻校验或允许手工改边界；
+   - ~~内存模式与 SQL 模式的行为差异（如 016 CHECK 要求 `CANCELLED` 必留 `cancelled_at`，而内存种子留空）要不要抹平~~：本轮已扫（见 2026-11-12「抹平双模行为差异」一节）——排序 / 关键字语义 / 建档默认列 / `ON CONFLICT` 保留原行 / 引用逃逸 / 边界校验 / 演示种子七条轴全部对齐，检索语义收敛到 `@agri/shared` 的 `likePattern` + `keywordHits` 两处权威。**刻意保留**：内存审计日志 500 条上限（RAM 护栏，SQL 侧才是可追溯台账）、内存演示任务的 `finishedAreaMu`（权威值在 `plot_records.area_mu`，内存模式没台账可读，宁缺勿造）；
+   - ~~合并的凸包口径：选中互不相邻地块会框进中间空地，是否改为要求相邻校验或允许手工改边界~~：已改为服务端硬校验（`merge.geometry.ts` + `PLOT-409-003` + `PLOT_MERGE_ADJACENCY_M`，见 2026-11-12「地块合并要求相邻」一节）。**仍待决**：连成一片但整体呈凹形的地块，凸包照样会吞中间空地——现在只在留痕里给出合并后面积，没有回显「凸包比源面积和多出多少」，也没给手工改边界的入口；
+   - 演示库 `control_commands` 里还有 22 条 `036` 范围之外的陈旧 `QUEUED`（`id` 不带 `cmd-demo-` 前缀，2026-11-05 起人工/事件下发与冒烟残留，回执链路 `031` 上线前根本没法回执）。`control-service` 的 HTTP 模式只要跑满一个扫描周期（60 秒），收口任务就会把它们刷成 `FAILED` 并各推一条 `control.command.timeout` 告警。要么再来一次按「早于 `031` 建档」划范围的数据收口迁移（不推事件），要么认下「运行时收口 + 22 条告警」这个结果。
    - `operation_tasks` 无软删列，删除语义与地块/片区口径不一致（历史行硬删后无法辨别）。
 
 ## 验证记录

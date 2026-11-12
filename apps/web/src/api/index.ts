@@ -108,8 +108,8 @@ export const plotApi = {
     return { succeededCodes, failedCodes }
   },
   /**
-   * 合并地块：边界取源地块顶点凸包，面积由后端按合并边界现算；源地块整批归档。
-   * 互不相邻的地块凸包会框进中间空地，合并后请到编辑页复核边界。
+   * 合并地块：服务端要求所选地块边界相邻，不相邻时返回 409 并列出分成几组。
+   * 通过后边界取源地块顶点凸包，面积由后端按合并边界现算；源地块整批归档。
    */
   merge(data: { parcelCodes: string[]; parcelName?: string; plotType?: PlotType; remark?: string }): Promise<{ plot: Plot; sourceCodes: string[] }> {
     return post<{ plot: any; sourceCodes: string[] }>('/plots/merge', data)

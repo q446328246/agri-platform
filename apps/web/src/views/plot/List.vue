@@ -150,7 +150,7 @@
 
     <el-dialog v-model="mergeVisible" title="合并地块" width="560px">
       <el-alert type="warning" :closable="false" show-icon class="merge-alert">
-        <template #title>合并后边界取所选地块的凸包，面积为凸包边界现算值；地块不相邻时会框进中间空地，请在合并后到编辑页复核边界。</template>
+        <template #title>所选地块必须相邻（边界首尾相接，容差由服务端配置）才能合并：凸包会把不相邻地块之间的空地圈进新台账，服务端会直接拒掉并提示分成几组。合并后面积为新边界现算值。</template>
       </el-alert>
       <div class="merge-sources">
         <div v-for="row in mergeRows" :key="row.parcelCode" class="merge-source">

@@ -7,6 +7,7 @@ import type { PrismaService } from "@agri/db";
 import type { OutboxService } from "@agri/mq";
 import { ConflictError, NotFoundError, ValidationError, polygonAreaMu, roundAreaMu, snowflakeId, ulid } from "@agri/shared";
 
+import { DEFAULT_ADJACENCY_TOLERANCE_M, adjacencyGroups } from "./merge.geometry.js";
 import { PlotCodeService } from "./plot-code.service.js";
 import type { PlotPatch, PlotRecord, PlotRepository } from "./plot.repository.js";
 import { hullPolygon, ringPoints } from "./zone.geometry.js";
@@ -23,6 +24,19 @@ import { hullPolygon, ringPoints } from "./zone.geometry.js";
 export const PLOT_TYPES = ["FIELD", "GREENHOUSE", "ORCHARD", "AQUACULTURE"];
 /** 地块状态白名单，与迁移 011 的 CHECK 约束、前端 PlotStatus 枚举同源 */
 export const PLOT_STATUSES = ["DRAFT", "ACTIVE", "FALLOW", "ARCHIVED"];
+
+/**
+ * 合并相邻判定的间隙容差（米），可用 PLOT_MERGE_ADJACENCY_M 调整。
+ * 现场地块边界多为分别测绘，共边顶点错开一两米很常见，容差为 0 会把真邻居判成不相邻；
+ * 但放太宽等于允许把隔着一块田的地并进来，默认只容忍 5 米。非法值回落默认，
+ * 免得配成 `abc` 后合并校验静默变成「全部通过」。
+ */
+export function mergeAdjacencyToleranceM(): number {
+  const configured = process.env.PLOT_MERGE_ADJACENCY_M?.trim();
+  if (configured === undefined || configured === "") return DEFAULT_ADJACENCY_TOLERANCE_M;
+  const raw = Number(configured);
+  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_ADJACENCY_TOLERANCE_M;
+}
 
 /** 建档入参 */
 export interface RegisterPlotInput {
@@ -263,10 +277,11 @@ export class PlotService {
   /**
    * 地块合并：多块并一块。
    *
-   * 口径（与片区凸包同源，但有一处关键差异）：
-   * - 合并后边界 = 各源地块外环顶点的凸包。相邻共边地块的凸包即真并集；
-   *   选中互不相邻的地块会框进中间空地，因此接口不回显面积、留痕列出源编码，
-   *   操作人须在合并后到编辑页复核边界。
+   * 口径（与片区凸包同源，但有两处关键差异）：
+   * - **要求相邻**：所选地块的边界必须首尾相接（间隙不超过 `PLOT_MERGE_ADJACENCY_M`，
+   *   默认 5 米）且连成一片，否则 409 拒掉并回显分成几组。凸包只在成员相接时才等于
+   *   真并集，隔着别人的田做凸包会把中间空地圈进自家台账，在账面积凭空增长。
+   * - 合并后边界 = 各源地块外环顶点的凸包。
    * - 面积一律按合并后几何现算（polygonAreaMu → roundAreaMu），不是源面积求和：
    *   台账面积与边界必须逐位一致（迁移 015 起的唯一口径），求和会在凸包
    *   覆盖空地时造出新的漂移。
@@ -282,6 +297,14 @@ export class PlotService {
       if (!source) throw new NotFoundError(`地块不存在：${code}`, "PLOT-404-001");
       sources.push(source);
     }
+    const toleranceM = mergeAdjacencyToleranceM();
+    const groups = adjacencyGroups(sources.map((source) => ({ key: source.parcelCode, ring: ringPoints(source.geom) })), toleranceM);
+    if (groups.length > 1) {
+      throw new ConflictError(
+        `所选地块不相邻，合并要求边界首尾相接（间隙不超过 ${toleranceM} 米）：${groups.map((group) => group.join("、")).join(" ｜ ")}`,
+        "PLOT-409-003",
+      );
+    }
     const geom = hullPolygon(sources.flatMap((source) => ringPoints(source.geom)));
     if (!geom) throw new ValidationError("源地块边界顶点不足，无法生成合并边界");
     const ring = geom.coordinates[0] ?? [];
@@ -294,7 +317,7 @@ export class PlotService {
     const merged: PlotRecord = {
       parcelId: snowflakeId(),
       parcelCode,
-      parcelName: input.parcelName?.trim() !== "" ? input.parcelName!.trim() : first.parcelName,
+      parcelName: input.parcelName?.trim() ? input.parcelName.trim() : first.parcelName,
       tenantId: input.tenantId,
       farmId: first.farmId,
       areaMu,
