@@ -45,7 +45,9 @@ describe("控制指令事件消费", () => {
     await consumer.pollOnce();
 
     expect(commands.all()).toHaveLength(1);
+    // 归属跟着事件信封走，不是进程默认租户写死的
     expect(commands.all()[0]).toMatchObject({
+      tenantId: TENANT,
       type: "IRRIGATION",
       origin: "EVENT",
       status: "QUEUED",

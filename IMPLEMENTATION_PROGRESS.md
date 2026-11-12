@@ -414,6 +414,15 @@
 - **前端**：`views/device/Commands.vue` 状态筛选补「设备已接收/执行到位」，新增「只看超时未回执」复选（走 `?overdue=true`）、「生命周期」列（逐行铺 入队→下发→接收→到位/失败，逾期挂红标「超时未回执 N 分钟」）、「回执说明」列，以及按 `device:control` 权限显隐的操作列（`QUEUED` → 标记下发；`SENT/ACKED` → 登记回执；终态 → 已结单）。回执弹窗选 `ACKED/DONE/FAILED`，急停结单时强制勾「设备已确认到位」，`FAILED` 未填原因或急停未勾选时提交按钮 `disabled`（与服务端同口径，避免点开必 400）。`utils` 补五态文案与 tag 颜色 + `ESTOP: 急停`；`api` 增 `controlApi.dispatchCommand/reportReceipt` 与 `pending/overdue` 参数；`device/List.vue` 下发类型加急停，二次确认文案说明「需设备回报到位确认后才能结单」。
 - **用例**：新增 `apps/control-service/test/receipt.spec.ts`（跃迁表合法/非法与同态拒绝、内存跃迁版本 1→2→3 与时间字段按状态写入、陈旧版本与终态返回 `null`、`pendingMinutesOf` 取数口径、HTTP 全链路 202→提前 DONE 409→dispatch→重复 dispatch 幂等→ACKED→DONE→终态后 FAILED 409、报文校验 404/400、急停到位确认硬约束、`overdue=true` 只捞逾期两条且 `pending=true` 三条含终态排除、`describe.runIf(process.env.DB_URL)` 的真实库往返且 `finally` 清理）。网关 `authz.spec.ts` +2 条回调路由断言。**未跑验证**（按交付口径）。
 
+### 2026-11-12：控制指令租户隔离（`control_commands.tenant_id`）
+
+- **问题**：`005` 建表时把设备域当「全局台账」处理，`014` 也照此说明；但指令一旦带上线就是多团队共用一张表——甲农场能看到乙农场的急停记录既不合规，也没法按租户做留存与配额。
+- **迁移 `032_control_command_tenant.sql`**：`ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant-demo'`（不用「先加可空列再回填」：存量行含 `010` 演示种子全部属演示租户，Postgres 11+ 对常量默认值不重写表，历史库与应用镜像可各自升级）；新增 `(tenant_id, created_at DESC, id DESC)` 列表索引，并把在途部分索引 `idx_control_commands_open` 重建为租户前缀。**未应用到任何库**（按交付口径只在用户点名时迁移）。
+- **仓储**：`ControlCommand` 增 `tenantId`（第 2 个字段），`ControlCommandRepository` 的 `page/find/transition` 都以 `tenantId` 为首参（`create` 从记录本身取），跨租户的 id 一律当作不存在——`find` 回 `null`、`transition` 回 `null`（HTTP 层 404/409），SQL 的 `statusOf` 也带租户条件，陈旧记录越不过状态机。`toRecord` 直读 `tenant_id`，**不给回退默认值**：列没迁移就应当炸出来，而不是伪造归属。
+- **归属来源**：HTTP 侧 `tenantOf(req)` 只认网关透传的可信 `x-tenant-id`（网关丢弃客户端自报头，见 2026-11-08 权限一节），请求体里的 `tenantId` 一律忽略；无会话身份的设备回调落到进程 `TENANT_ID`，再退演示租户。事件侧 `buildCommand` 用 `event.tenantId`——哪个租户的事件触发就记在哪个租户名下，不读进程配置。
+- **用例**：`receipt.spec.ts` 全部仓储调用改带租户，新增「跨租户 id 当作不存在」（内存：查/跃迁/分页互不串）与 HTTP「指令归属只认可信租户头，请求体自报无效」（`tenant-a` 建的指令 `tenant-b` 列表为空、下发 404，同租户下发 200）；真实库分支补「换租户跃迁不生效」且 `find("tenant-other", id)` 为 `null`；`consumer.spec.ts` 断言自动指令 `tenantId` 等于事件信封租户。测试的 POST/GET 一律显式带 `x-tenant-id`，不依赖进程环境变量。**未跑验证**（按交付口径）。
+- **口径说明**：`014_iot_devices.sql` 那句「设备域与 control_commands 一致按全局台账」自此只对**设备台账**成立，指令台账已改为按租户隔离；已在 `032` 注释里写明，不回改历史迁移。
+
 ## 下一步（中断后从这里继续）
 
 > **交付口径（2026-11-11 起，用户长期要求）**：改完直接 `git commit` + `git push`，**不再**跑单元测试 / `tsc -b` / `pnpm build` / `smoke-*` 冒烟 / 浏览器实操验证，**不再**重建或重新部署 `app`、`edge` 镜像。迁移文件照常编写，只在用户点名时才应用到库；风险较高的改动收工时注明「未跑验证」即可。
@@ -447,7 +456,7 @@
 11. **待决（需用户点头，未擅自处理）**：
    - 超时未回执只做了「可见」（列表标记 + `overdue=true` 筛选），**没有**自动置 `FAILED` 或推事件——自动改状态需要 `control_outbox` 落库 + 中继（现只有 `plot_outbox`），且会覆盖现场迟到的真实回执，等用户确认策略；
    - `EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环；
-   - `control_commands` 无 `tenant_id`（多租户下指令台账互通），跨服务租户改造超出本批范围；
+   - ~~`control_commands` 无 `tenant_id`（多租户下指令台账互通）~~：`#97` 已做（迁移 `032` + 仓储首参 + 可信头归属，见 2026-11-12 租户隔离一节）；**设备台账 `iot_devices` 仍是全局台账**，是否一并隔离待决；
    - `.qoder/repowiki/**` 每次收尾都会被自动重生成（本轮 40+ 文件 M/D/??），与功能改动分开单独征询是否提交，目前仍未入库；
    - 内存模式与 SQL 模式的行为差异（如 016 CHECK 要求 `CANCELLED` 必留 `cancelled_at`，而内存种子留空）要不要抹平；
    - 合并的凸包口径：选中互不相邻地块会框进中间空地，是否改为要求相邻校验或允许手工改边界；

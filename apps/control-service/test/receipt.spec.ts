@@ -16,6 +16,9 @@ import type { ControlCommand } from "../src/control.repository.js";
 
 const servers: Server[] = [];
 
+/** 测试用租户；接口侧不带可信身份头会落到进程默认租户，这里显式写死避免受环境影响 */
+const TENANT = "tenant-demo";
+
 async function start(server: Server): Promise<string> {
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -33,6 +36,7 @@ afterEach(async () => {
 function command(overrides: Partial<ControlCommand> = {}): ControlCommand {
   return {
     id: "cmd-1",
+    tenantId: TENANT,
     deviceId: "device-fert-001",
     plotCode: "P-1",
     operatorId: "user-admin",
@@ -50,9 +54,14 @@ function command(overrides: Partial<ControlCommand> = {}): ControlCommand {
 async function postJson(base: string, path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(`${base}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", "x-tenant-id": TENANT, ...headers },
     body: JSON.stringify(body),
   });
+}
+
+/** 列表查询同样带可信租户头，否则跨租户隔离的用例要依赖进程环境变量 */
+function getJson(base: string, path: string, headers: Record<string, string> = { "x-tenant-id": TENANT }): Promise<Response> {
+  return fetch(`${base}${path}`, { headers });
 }
 
 const CONFIRM = { "x-user-id": "user-admin", "x-confirm-action": "CONFIRM" };
@@ -85,15 +94,15 @@ describe("指令仓储跃迁", () => {
   it("推进版本、按状态写回时间并保存结果快照；陈旧版本与非法跃迁不写入", async () => {
     const repository = new InMemoryControlCommandRepository([command()]);
 
-    const sent = await repository.transition({ id: "cmd-1", status: "SENT", at: "2026-11-12T00:01:00.000Z", version: 1 });
+    const sent = await repository.transition(TENANT, { id: "cmd-1", status: "SENT", at: "2026-11-12T00:01:00.000Z", version: 1 });
     expect(sent).toMatchObject({ status: "SENT", version: 2, sentAt: "2026-11-12T00:01:00.000Z" });
     expect(sent?.ackedAt).toBeUndefined();
     expect(sent?.finishedAt).toBeUndefined();
 
     // 网关与人工同时回填：拿着已消费的版本再推一次不生效
-    expect(await repository.transition({ id: "cmd-1", status: "ACKED", at: "2026-11-12T00:02:00.000Z", version: 1 })).toBeNull();
+    expect(await repository.transition(TENANT, { id: "cmd-1", status: "ACKED", at: "2026-11-12T00:02:00.000Z", version: 1 })).toBeNull();
 
-    const done = await repository.transition({
+    const done = await repository.transition(TENANT, {
       id: "cmd-1",
       status: "DONE",
       at: "2026-11-12T00:05:00.000Z",
@@ -103,9 +112,9 @@ describe("指令仓储跃迁", () => {
     });
     expect(done).toMatchObject({ status: "DONE", version: 3, finishedAt: "2026-11-12T00:05:00.000Z", receiptMessage: "灌完 18 方" });
     expect(done?.result).toEqual({ waterVolumeM3: 18 });
-    expect((await repository.find("cmd-1"))?.status).toBe("DONE");
+    expect((await repository.find(TENANT, "cmd-1"))?.status).toBe("DONE");
     // 终态之后的任何跃迁都被拒
-    expect(await repository.transition({ id: "cmd-1", status: "FAILED", at: "2026-11-12T00:06:00.000Z", version: 3 })).toBeNull();
+    expect(await repository.transition(TENANT, { id: "cmd-1", status: "FAILED", at: "2026-11-12T00:06:00.000Z", version: 3 })).toBeNull();
   });
 
   it("在途时长从最后一次状态推进时间起算，终态不参与超时", () => {
@@ -118,6 +127,16 @@ describe("指令仓储跃迁", () => {
       pendingMinutesOf(command({ status: "ACKED", sentAt: "2026-11-12T00:01:00.000Z", ackedAt: "2026-11-12T00:59:00.000Z" }), now),
     ).toBe(1);
     expect(pendingMinutesOf(command({ status: "DONE", finishedAt: "2026-11-12T00:30:00.000Z" }), now)).toBeUndefined();
+  });
+
+  it("跨租户的指令 id 一律当作不存在：查不到、跃不动、列表也不串", async () => {
+    const repository = new InMemoryControlCommandRepository([command(), command({ id: "cmd-2", tenantId: "tenant-other" })]);
+
+    expect(await repository.find(TENANT, "cmd-2")).toBeNull();
+    expect(await repository.find("tenant-other", "cmd-1")).toBeNull();
+    expect(await repository.transition(TENANT, { id: "cmd-2", status: "SENT", at: "2026-11-12T00:01:00.000Z", version: 1 })).toBeNull();
+    expect((await repository.page(TENANT, { page: 1, size: 20 })).items.map((item) => item.id)).toEqual(["cmd-1"]);
+    expect((await repository.page("tenant-other", { page: 1, size: 20 })).items.map((item) => item.id)).toEqual(["cmd-2"]);
   });
 });
 
@@ -159,9 +178,29 @@ describe("设备通道：下发确认与执行回执", () => {
     const closed = await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "FAILED", message: "补报故障" });
     expect(closed.status).toBe(409);
 
-    const list = await dataOf(await fetch(`${base}/api/v1/control/commands`));
+    const list = await dataOf(await getJson(base, "/api/v1/control/commands"));
     expect(list.total).toBe(1);
     expect(list.items[0]).toMatchObject({ id: created.id, status: "DONE", version: 4 });
+  });
+
+  it("指令归属只认可信租户头，请求体自报的 tenantId 不生效", async () => {
+    const base = await start(createControlHttpServer());
+
+    const created = await dataOf(
+      await postJson(
+        base,
+        "/api/v1/control/commands",
+        { deviceId: "device-fert-001", type: "IRRIGATION", parameters: {}, tenantId: "tenant-intruder" },
+        { ...CONFIRM, "x-tenant-id": "tenant-a" },
+      ),
+    );
+    expect(created.tenantId).toBe("tenant-a");
+
+    // 换租户查列表与下发都当作不存在
+    expect((await dataOf(await getJson(base, "/api/v1/control/commands", { "x-tenant-id": "tenant-b" }))).total).toBe(0);
+    expect((await dataOf(await getJson(base, "/api/v1/control/commands", { "x-tenant-id": "tenant-a" }))).total).toBe(1);
+    expect((await postJson(base, "/api/v1/control/device/dispatch", { commandId: created.id }, { "x-tenant-id": "tenant-b" })).status).toBe(404);
+    expect((await postJson(base, "/api/v1/control/device/dispatch", { commandId: created.id }, { "x-tenant-id": "tenant-a" })).status).toBe(200);
   });
 
   it("报文校验：未知指令 404，SENT 不是回执状态，FAILED 必须带原因，at 必须可解析", async () => {
@@ -234,7 +273,7 @@ describe("设备通道：下发确认与执行回执", () => {
     ]);
     const base = await start(createControlHttpServer(repository, { receiptTimeoutMin: 15 }));
 
-    const list = await dataOf(await fetch(`${base}/api/v1/control/commands?size=50`));
+    const list = await dataOf(await getJson(base, "/api/v1/control/commands?size=50"));
     const byId = new Map(list.items.map((item: any) => [item.id, item]));
     expect(byId.get("cmd-old").overdue).toBe(true);
     expect(byId.get("cmd-old").pendingMin).toBeGreaterThanOrEqual(39);
@@ -245,10 +284,10 @@ describe("设备通道：下发确认与执行回执", () => {
     expect(byId.get("cmd-done").pendingMin).toBeUndefined();
     expect(byId.get("cmd-done").overdue).toBe(false);
 
-    const overdue = await dataOf(await fetch(`${base}/api/v1/control/commands?overdue=true&size=50`));
+    const overdue = await dataOf(await getJson(base, "/api/v1/control/commands?overdue=true&size=50"));
     expect(overdue.items.map((item: any) => item.id).sort()).toEqual(["cmd-old", "cmd-sent"]);
 
-    const pending = await dataOf(await fetch(`${base}/api/v1/control/commands?pending=true&size=50`));
+    const pending = await dataOf(await getJson(base, "/api/v1/control/commands?pending=true&size=50"));
     expect(pending.total).toBe(3);
   });
 });
@@ -264,14 +303,16 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 回执列（真实库�
     try {
       await repository.create(command({ id, createdAt: new Date().toISOString() }));
 
-      const sent = await repository.transition({ id, status: "SENT", at: "2026-11-12T00:01:00.000Z", version: 1 });
-      expect(sent).toMatchObject({ id, status: "SENT", version: 2 });
+      const sent = await repository.transition(TENANT, { id, status: "SENT", at: "2026-11-12T00:01:00.000Z", version: 1 });
+      expect(sent).toMatchObject({ id, status: "SENT", version: 2, tenantId: TENANT });
       expect(sent?.sentAt?.startsWith("2026-11-12T00:01:00")).toBe(true);
 
-      expect(await repository.transition({ id, status: "ACKED", at: "2026-11-12T00:02:00.000Z", version: 1 })).toBeNull();
-      expect(await repository.transition({ id, status: "QUEUED", at: "2026-11-12T00:02:00.000Z", version: 2 })).toBeNull();
+      expect(await repository.transition(TENANT, { id, status: "ACKED", at: "2026-11-12T00:02:00.000Z", version: 1 })).toBeNull();
+      // 换租户拿同一个 id 跃迁：库里有记录也不许推进别人的指令
+      expect(await repository.transition("tenant-other", { id, status: "ACKED", at: "2026-11-12T00:02:00.000Z", version: 2 })).toBeNull();
+      expect(await repository.transition(TENANT, { id, status: "QUEUED", at: "2026-11-12T00:02:00.000Z", version: 2 })).toBeNull();
 
-      const acked = await repository.transition({
+      const acked = await repository.transition(TENANT, {
         id,
         status: "ACKED",
         at: "2026-11-12T00:02:00.000Z",
@@ -282,11 +323,13 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 回执列（真实库�
       expect(acked).toMatchObject({ status: "ACKED", version: 3, receiptMessage: "设备已接收" });
       expect(acked?.result).toEqual({ rssi: 9 });
 
-      const found = await repository.find(id);
+      const found = await repository.find(TENANT, id);
       expect(found?.version).toBe(3);
       expect(found?.ackedAt?.startsWith("2026-11-12T00:02:00")).toBe(true);
-      expect((await repository.page({ page: 1, size: 200, pending: true })).items.map((item) => item.id)).toContain(id);
-      expect((await repository.page({ page: 1, size: 200, pending: true, pendingOverMin: 60 })).items.map((item) => item.id)).not.toContain(id);
+      expect(await repository.find("tenant-other", id)).toBeNull();
+      expect((await repository.page(TENANT, { page: 1, size: 200, pending: true })).items.map((item) => item.id)).toContain(id);
+      expect((await repository.page("tenant-other", { page: 1, size: 200, pending: true })).items.map((item) => item.id)).not.toContain(id);
+      expect((await repository.page(TENANT, { page: 1, size: 200, pending: true, pendingOverMin: 60 })).items.map((item) => item.id)).not.toContain(id);
     } finally {
       await client.$executeRawUnsafe("DELETE FROM control_commands WHERE id = $1", id);
       await client.$disconnect();

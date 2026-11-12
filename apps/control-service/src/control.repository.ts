@@ -12,6 +12,9 @@ import { toIsoTimestamp } from "@agri/shared";
  * 生命周期由回执驱动：QUEUED 入队 → SENT 已下发到设备 → ACKED 设备已接收 →
  * DONE 执行到位，任一在途状态都可被 FAILED 收口。跃迁只允许沿 TRANSITIONS 走，
  * 并以 version 乐观锁兜住「设备网关与人工回填同时到达」的并发。
+ *
+ * 指令按租户隔离（迁移 032）：读、写、跃迁都要带 tenantId，跨租户的 id 一律当作不存在，
+ * 与 operation_tasks / video_ptz_commands 同一口径。
  */
 
 /** 指令类型；ESTOP 是急停，执行完成必须带到位确认 */
@@ -47,6 +50,8 @@ export function canTransition(from: ControlCommandStatus, to: ControlCommandStat
 /** 指令记录 */
 export interface ControlCommand {
   id: string;
+  /** 所属租户，由网关透传的可信身份或事件信封决定，不接受请求体自报 */
+  tenantId: string;
   deviceId: string;
   plotCode: string;
   operatorId: string;
@@ -108,10 +113,10 @@ export interface ControlCommandQuery {
 export interface ControlCommandRepository {
   /** 写入指令；来源事件已存在时返回 null */
   create(command: ControlCommand): Promise<ControlCommand | null>;
-  page(query: ControlCommandQuery): Promise<PageResult<ControlCommand>>;
-  find(id: string): Promise<ControlCommand | null>;
-  /** 沿合法跃迁表推进状态；记录不存在、版本过期或跃迁非法时返回 null */
-  transition(transition: CommandTransition): Promise<ControlCommand | null>;
+  page(tenantId: string, query: ControlCommandQuery): Promise<PageResult<ControlCommand>>;
+  find(tenantId: string, id: string): Promise<ControlCommand | null>;
+  /** 沿合法跃迁表推进状态；记录不存在、不属于该租户、版本过期或跃迁非法时返回 null */
+  transition(tenantId: string, transition: CommandTransition): Promise<ControlCommand | null>;
 }
 
 function toPage(items: ControlCommand[], total: number, page: number, size: number): PageResult<ControlCommand> {
@@ -127,11 +132,12 @@ export function pendingMinutesOf(command: ControlCommand, nowMs: number): number
 }
 
 const COLUMNS =
-  "id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, sent_at, acked_at, finished_at, receipt_message, result_json, version, created_at";
+  "id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, sent_at, acked_at, finished_at, receipt_message, result_json, version, created_at";
 
 function toRecord(row: Record<string, unknown>): ControlCommand {
   const record: ControlCommand = {
     id: String(row.id),
+    tenantId: String(row.tenant_id),
     deviceId: String(row.device_id),
     plotCode: String(row.plot_code ?? ""),
     operatorId: String(row.operator_id),
@@ -157,18 +163,19 @@ function toRecord(row: Record<string, unknown>): ControlCommand {
   return record;
 }
 
-/** PostgreSQL 实现，表结构由迁移 005 建立、031 扩展回执列 */
+/** PostgreSQL 实现，表结构由迁移 005 建立、031 扩展回执列、032 补租户归属 */
 export class SqlControlCommandRepository implements ControlCommandRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
   async create(command: ControlCommand): Promise<ControlCommand | null> {
     // 唯一索引冲突说明同一来源事件已生成指令，返回空表示无需重复写入
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `INSERT INTO control_commands (id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)
+      `INSERT INTO control_commands (id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13)
        ON CONFLICT DO NOTHING
        RETURNING ${COLUMNS}`,
       command.id,
+      command.tenantId,
       command.deviceId,
       command.plotCode,
       command.operatorId,
@@ -185,9 +192,9 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     return row ? toRecord(row) : null;
   }
 
-  async page(query: ControlCommandQuery): Promise<PageResult<ControlCommand>> {
-    const conditions: string[] = [];
-    const values: unknown[] = [];
+  async page(tenantId: string, query: ControlCommandQuery): Promise<PageResult<ControlCommand>> {
+    const conditions: string[] = ["tenant_id = $1"];
+    const values: unknown[] = [tenantId];
     if (query.plotCode !== undefined && query.plotCode !== "") {
       values.push(query.plotCode);
       conditions.push(`plot_code = $${values.length}`);
@@ -240,30 +247,33 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     return toPage(rows.map(toRecord), total, query.page, query.size);
   }
 
-  async find(id: string): Promise<ControlCommand | null> {
+  async find(tenantId: string, id: string): Promise<ControlCommand | null> {
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `SELECT ${COLUMNS} FROM control_commands WHERE id = $1`,
+      `SELECT ${COLUMNS} FROM control_commands WHERE tenant_id = $1 AND id = $2`,
+      tenantId,
       id,
     );
     return rows[0] ? toRecord(rows[0]) : null;
   }
 
-  async transition(transition: CommandTransition): Promise<ControlCommand | null> {
+  async transition(tenantId: string, transition: CommandTransition): Promise<ControlCommand | null> {
     // 跃迁合法性按库内当前状态判定，调用方拿着陈旧记录也绕不过状态机；
-    // 并发写入由 UPDATE 上的 version 条件拦住，两种失败都收敛成 null（HTTP 侧回 409）。
-    const current = await this.statusOf(transition.id);
+    // 并发写入由 UPDATE 上的 version 条件拦住，跨租户按「不存在」处理，
+    // 三种失败都收敛成 null（HTTP 侧分别回 409 / 409 / 404）。
+    const current = await this.statusOf(tenantId, transition.id);
     if (current === null || !canTransition(current, transition.status)) return null;
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `UPDATE control_commands
-          SET status = $3,
+          SET status = $4,
               version = version + 1,
-              sent_at = CASE WHEN $3 = 'SENT' THEN $4::timestamptz ELSE sent_at END,
-              acked_at = CASE WHEN $3 = 'ACKED' THEN $4::timestamptz ELSE acked_at END,
-              finished_at = CASE WHEN $3 IN ('DONE', 'FAILED') THEN $4::timestamptz ELSE finished_at END,
-              receipt_message = COALESCE($5::text, receipt_message),
-              result_json = COALESCE($6::jsonb, result_json)
-        WHERE id = $1 AND version = $2
+              sent_at = CASE WHEN $4 = 'SENT' THEN $5::timestamptz ELSE sent_at END,
+              acked_at = CASE WHEN $4 = 'ACKED' THEN $5::timestamptz ELSE acked_at END,
+              finished_at = CASE WHEN $4 IN ('DONE', 'FAILED') THEN $5::timestamptz ELSE finished_at END,
+              receipt_message = COALESCE($6::text, receipt_message),
+              result_json = COALESCE($7::jsonb, result_json)
+        WHERE tenant_id = $1 AND id = $2 AND version = $3
         RETURNING ${COLUMNS}`,
+      tenantId,
       transition.id,
       transition.version,
       transition.status,
@@ -274,9 +284,10 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     return rows[0] ? toRecord(rows[0]) : null;
   }
 
-  private async statusOf(id: string): Promise<ControlCommandStatus | null> {
+  private async statusOf(tenantId: string, id: string): Promise<ControlCommandStatus | null> {
     const rows = await this.client.$queryRawUnsafe<Array<{ status: string }>>(
-      "SELECT status FROM control_commands WHERE id = $1",
+      "SELECT status FROM control_commands WHERE tenant_id = $1 AND id = $2",
+      tenantId,
       id,
     );
     const status = rows[0]?.status;
@@ -302,9 +313,10 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     return record;
   }
 
-  async page(query: ControlCommandQuery): Promise<PageResult<ControlCommand>> {
+  async page(tenantId: string, query: ControlCommandQuery): Promise<PageResult<ControlCommand>> {
     const nowMs = Date.now();
     const filtered = this.rows
+      .filter((row) => row.tenantId === tenantId)
       .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
       .filter((row) => (query.origin ? row.origin === query.origin : true))
       .filter((row) => (query.type ? row.type === query.type : true))
@@ -322,13 +334,13 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
   }
 
-  async find(id: string): Promise<ControlCommand | null> {
-    const row = this.rows.find((item) => item.id === id);
+  async find(tenantId: string, id: string): Promise<ControlCommand | null> {
+    const row = this.rows.find((item) => item.tenantId === tenantId && item.id === id);
     return row ? structuredClone(row) : null;
   }
 
-  async transition(transition: CommandTransition): Promise<ControlCommand | null> {
-    const row = this.rows.find((item) => item.id === transition.id);
+  async transition(tenantId: string, transition: CommandTransition): Promise<ControlCommand | null> {
+    const row = this.rows.find((item) => item.tenantId === tenantId && item.id === transition.id);
     if (!row || row.version !== transition.version || !canTransition(row.status, transition.status)) return null;
     row.status = transition.status;
     row.version += 1;

@@ -258,6 +258,11 @@ agri-platform-nodejs-scaffold/
   `result.confirmed=true`，服务端拒绝「没人确认设备真停了」就结单。超时未回执只做**可见**不做**自动置败**：
   `pendingMin`/`overdue` 由 `COALESCE(acked_at, sent_at, created_at)` 与 `CONTROL_RECEIPT_TIMEOUT_MIN`（默认 15 分钟）
   现算，定时刷 FAILED 会覆盖现场迟到的真实回执，需要 `control_outbox` 与事件推送配合，属待决项。
+- **指令台账按租户隔离**：迁移 `032` 给 `control_commands` 补 `tenant_id`（`DEFAULT 'tenant-demo'`，存量行含
+  `010` 种子全部属演示租户，常量默认值不重写表）。仓储的读、写、跃迁都以 `tenantId` 为首参，跨租户的 id
+  一律当作不存在——查不到 404、跃不动返回 `null` 翻成 409，与 `operation_tasks`/`video_ptz_commands` 同口径。
+  归属只认网关透传的可信身份头（客户端自报的同名头在网关已被丢弃，请求体里的 `tenantId` 不参与），自动指令
+  则跟着事件信封的 `tenantId`；设备回调没有会话身份，落到进程 `TENANT_ID`，再退演示租户。
 - **消息先过偏好再去重**：消息文案与去重键在 `@agri/contracts` 的 `MESSAGE_TEMPLATES` 登记，
   契约包只做纯函数渲染。消费侧先查「租户 + 主题」偏好：关闭订阅直接跳过，低于最低级别也跳过；
   越限告警按「地块 + 指标 + 方向 + 小时」聚合，处方通知按来源事件唯一。没有偏好记录等同

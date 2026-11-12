@@ -31,6 +31,9 @@ const RECEIPT_STATUSES: ControlCommandStatus[] = ["ACKED", "DONE", "FAILED"];
 /** 超时未回执的默认阈值（分钟），可用 CONTROL_RECEIPT_TIMEOUT_MIN 调整 */
 const DEFAULT_RECEIPT_TIMEOUT_MIN = 15;
 
+/** 未配置 TENANT_ID 且请求没有可信租户头时的归属租户，与全仓演示租户同字面量 */
+const DEFAULT_TENANT = "tenant-demo";
+
 /** 列表与回执响应附带的在途信息 */
 type CommandView = ControlCommand & { pendingMin?: number; overdue: boolean };
 
@@ -48,6 +51,15 @@ function send<T>(res: ServerResponse, status: number, data: T | null, traceId: s
 
 function trace(req: IncomingMessage): string {
   return req.headers["x-request-id"]?.toString() || randomUUID();
+}
+
+/**
+ * 指令台账按租户隔离。
+ * 租户只认网关透传的可信身份头（客户端自报的 x-tenant-id 已在网关丢弃），请求体里的
+ * tenantId 一律忽略；设备回调没有会话身份，落到进程配置的 TENANT_ID——一套部署对一个现场。
+ */
+function tenantOf(req: IncomingMessage): string {
+  return req.headers["x-tenant-id"]?.toString().trim() || process.env.TENANT_ID?.trim() || DEFAULT_TENANT;
 }
 
 async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -157,7 +169,7 @@ export function createControlHttpServer(
 
       if (req.method === "GET" && url.pathname === "/api/v1/control/commands") {
         const nowMs = Date.now();
-        const page: PageResult<ControlCommand> = await repository.page(query(url.searchParams, timeoutMin));
+        const page: PageResult<ControlCommand> = await repository.page(tenantOf(req), query(url.searchParams, timeoutMin));
         send(res, 200, { ...page, items: page.items.map((item) => toView(item, timeoutMin, nowMs)) }, traceId);
         return;
       }
@@ -184,6 +196,8 @@ export function createControlHttpServer(
         }
         const command: ControlCommand = {
           id: randomUUID(),
+          // 归属只由可信身份头决定，请求体自报的 tenantId 不参与
+          tenantId: tenantOf(req),
           deviceId: String(body.deviceId ?? ""),
           plotCode: typeof body.plotCode === "string" ? body.plotCode : "",
           operatorId,
@@ -209,12 +223,13 @@ export function createControlHttpServer(
       // 免得网关重试时拿到 409 再猜自己有没有领到过。
       if (req.method === "POST" && url.pathname === "/api/v1/control/device/dispatch") {
         const body = await json(req);
-        const target = await repository.find(requiredText(body.commandId, "commandId"));
+        const tenantId = tenantOf(req);
+        const target = await repository.find(tenantId, requiredText(body.commandId, "commandId"));
         if (!target) { send(res, 404, null, traceId, "指令不存在"); return; }
         if (target.status === "FAILED") { send(res, 409, null, traceId, "指令已标记失败，不能再次下发"); return; }
         if (target.status !== "QUEUED") { send(res, 200, toView(target, timeoutMin, Date.now()), traceId); return; }
         const message = receiptText(body.message, "message");
-        const updated = await repository.transition({
+        const updated = await repository.transition(tenantId, {
           id: target.id,
           status: "SENT",
           at: receiptAt(body.at),
@@ -230,6 +245,7 @@ export function createControlHttpServer(
       // 急停指令的 DONE 必须带 result.confirmed=true，否则视为「没确认到位」不予结单。
       if (req.method === "POST" && url.pathname === "/api/v1/control/device/receipt") {
         const body = await json(req);
+        const tenantId = tenantOf(req);
         const status = requiredText(body.status, "status") as ControlCommandStatus;
         if (!RECEIPT_STATUSES.includes(status)) {
           send(res, 400, null, traceId, `status 需为 ${RECEIPT_STATUSES.join("/")} 之一，下发确认请用 /device/dispatch`);
@@ -238,7 +254,7 @@ export function createControlHttpServer(
         const message = receiptText(body.message, "message");
         const result = receiptResult(body.result);
         if (status === "FAILED" && message === undefined) throw new Error("FAILED 回执必须说明失败原因（message）");
-        const target = await repository.find(requiredText(body.commandId, "commandId"));
+        const target = await repository.find(tenantId, requiredText(body.commandId, "commandId"));
         if (!target) { send(res, 404, null, traceId, "指令不存在"); return; }
         // 急停的 DONE 必须有到位确认，否则等于「没人确认设备真的停了」就结单
         if (target.type === "ESTOP" && status === "DONE" && result?.confirmed !== true) {
@@ -250,7 +266,7 @@ export function createControlHttpServer(
           send(res, 409, null, traceId, `指令当前状态为 ${target.status}，不接受 ${status} 回执`);
           return;
         }
-        const updated = await repository.transition({
+        const updated = await repository.transition(tenantId, {
           id: target.id,
           status,
           at: receiptAt(body.at),

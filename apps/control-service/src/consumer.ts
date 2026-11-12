@@ -68,6 +68,8 @@ function buildCommand(
   if (typeof event.eventId !== "string" || !event.eventId.trim()) throw new Error("自动控制事件 eventId 不能为空");
   return {
     id: `CTL-${event.eventId}`,
+    // 归属跟着事件信封走：自动指令由哪个租户的事件触发就记在哪个租户名下
+    tenantId: event.tenantId,
     deviceId: `auto-${plotCode}`,
     plotCode,
     operatorId: AUTO_OPERATOR,
