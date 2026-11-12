@@ -325,6 +325,82 @@ describe("设备通道：下发确认与执行回执", () => {
   });
 });
 
+describe("设备通道：待执行指令轮询", () => {
+  /** 队列现场：同设备三条在途（含已下发未结单）+ 一条已结单 + 别家设备与别家租户各一条 */
+  function queueRepository(): InMemoryControlCommandRepository {
+    // 时间一律相对当前时刻取：写死某个瞬间会让 pendingMin/overdue 随真实时钟翻脸
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString();
+    return new InMemoryControlCommandRepository([
+      command({ id: "cmd-sent", status: "SENT", version: 2, createdAt: minutesAgo(45), sentAt: minutesAgo(30) }),
+      command({ id: "cmd-queued-1", createdAt: minutesAgo(2) }),
+      command({ id: "cmd-queued-2", createdAt: minutesAgo(1) }),
+      command({ id: "cmd-done", status: "DONE", createdAt: minutesAgo(90), finishedAt: minutesAgo(80) }),
+      command({ id: "cmd-other-device", deviceId: "device-fert-002", createdAt: minutesAgo(3) }),
+      command({ id: "cmd-other-tenant", tenantId: "tenant-other", createdAt: minutesAgo(4) }),
+    ]);
+  }
+
+  it("只回本设备的在途指令，且按下发先后正序", async () => {
+    const base = await start(createControlHttpServer(queueRepository(), { receiptTimeoutMin: 15 }));
+
+    const queued = await dataOf(await getJson(base, "/api/v1/control/device/pending?deviceId=device-fert-001"));
+    // 已下发未结单的 SENT 也要回来：网关崩在两轮之间时，靠这条把写了一半的活做完
+    expect(queued).toMatchObject({ total: 3, page: 1, size: 50, pages: 1 });
+    expect(queued.items.map((item: any) => item.id)).toEqual(["cmd-sent", "cmd-queued-1", "cmd-queued-2"]);
+    expect(queued.items[0]).toMatchObject({ status: "SENT", version: 2, deviceId: "device-fert-001", plotCode: "P-1", overdue: true });
+    expect(queued.items[0].pendingMin).toBeGreaterThanOrEqual(29);
+    expect(queued.items[1]).toMatchObject({ status: "QUEUED", version: 1, overdue: false });
+    // 参数原样带回：网关按剖面执行要知道分区与时长，不能只给一个 id
+    expect(queued.items[1].parameters).toEqual({ zones: [{ zoneCode: "ZONE-01", areaMu: 10, targetMm: 20 }] });
+  });
+
+  it("缺设备标识直接拒绝，翻页不重不漏，别家租户轮不到一条", async () => {
+    const base = await start(createControlHttpServer(queueRepository()));
+
+    const noDevice = await getJson(base, "/api/v1/control/device/pending");
+    expect(noDevice.status).toBe(400);
+    expect((await noDevice.json() as { message: string }).message).toContain("deviceId");
+
+    const first = await dataOf(await getJson(base, "/api/v1/control/device/pending?deviceId=device-fert-001&size=2"));
+    expect(first).toMatchObject({ total: 3, size: 2, pages: 2 });
+    expect(first.items.map((item: any) => item.id)).toEqual(["cmd-sent", "cmd-queued-1"]);
+    const second = await dataOf(await getJson(base, "/api/v1/control/device/pending?deviceId=device-fert-001&size=2&page=2"));
+    expect(second.items.map((item: any) => item.id)).toEqual(["cmd-queued-2"]);
+
+    // 换租户轮同一台设备编号：只看到自己那条，演示租户的在途指令一条也不串过来
+    const other = await dataOf(await getJson(base, "/api/v1/control/device/pending?deviceId=device-fert-001", { "x-tenant-id": "tenant-other" }));
+    expect(other).toMatchObject({ total: 1, pages: 1 });
+    expect(other.items.map((item: any) => item.id)).toEqual(["cmd-other-tenant"]);
+    expect((await dataOf(await getJson(base, "/api/v1/control/device/pending?deviceId=device-fert-002", { "x-tenant-id": "tenant-other" }))).total).toBe(0);
+  });
+
+  it("网关只用设备通道就能把指令从队列做到结单", async () => {
+    const base = await start(createControlHttpServer(new InMemoryControlCommandRepository(), { receiptTimeoutMin: 15 }));
+    const created = await dataOf(
+      await postJson(base, "/api/v1/control/commands", { deviceId: "device-fert-007", type: "IRRIGATION", parameters: { minutes: 10 } }, CONFIRM),
+    );
+
+    const before = await dataOf(await getJson(base, "/api/v1/control/device/pending?deviceId=device-fert-007"));
+    expect(before.items.map((item: any) => item.id)).toEqual([created.id]);
+    expect(before.items[0]).toMatchObject({ status: "QUEUED", version: 1, parameters: { minutes: 10 } });
+
+    // 领取只需队列里给的 id，状态推进由仓储的版本乐观锁兜住并发回填
+    const claimed = await dataOf(
+      await postJson(base, "/api/v1/control/device/dispatch", { commandId: created.id }),
+    );
+    expect(claimed).toMatchObject({ status: "SENT", version: 2 });
+
+    const inFlight = await dataOf(await getJson(base, "/api/v1/control/device/pending?deviceId=device-fert-007"));
+    expect(inFlight.items[0]).toMatchObject({ id: created.id, status: "SENT", version: 2 });
+
+    expect((await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "ACKED" })).status).toBe(200);
+    expect((await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "DONE", result: { waterVolumeM3: 6 } })).status).toBe(200);
+
+    const after = await dataOf(await getJson(base, "/api/v1/control/device/pending?deviceId=device-fert-007"));
+    expect(after).toMatchObject({ items: [], total: 0, pages: 0 });
+  });
+});
+
 const databaseUrl = process.env.DB_URL;
 
 describe.runIf(databaseUrl)("SqlControlCommandRepository 回执列（真实库）", () => {
@@ -372,6 +448,42 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 回执列（真实库�
       expect((await repository.page(TENANT, { page: 1, size: 200, pending: true, pendingOverMin: 1 })).items.map((item) => item.id)).toContain(id);
     } finally {
       await client.$executeRawUnsafe("DELETE FROM control_commands WHERE id = $1", id);
+      await client.$disconnect();
+    }
+  });
+
+  it("设备队列正序取最早下发的指令，正序翻页与倒序翻页互为镜像", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const repository = new SqlControlCommandRepository(client);
+    const suffix = Date.now();
+    const deviceId = `device-queue-smoke-${suffix}`;
+    // 三条在途指令：插入顺序刻意与创建时间相反，靠插入顺序排序的实现会在这里露馅
+    const newest = `cmd-queue-c-${suffix}`;
+    const middle = `cmd-queue-b-${suffix}`;
+    const oldest = `cmd-queue-a-${suffix}`;
+    const queue = [
+      { id: newest, createdAt: new Date(Date.now() - 1000).toISOString() },
+      { id: middle, createdAt: new Date(Date.now() - 2000).toISOString() },
+      { id: oldest, createdAt: new Date(Date.now() - 3000).toISOString() },
+    ];
+    try {
+      for (const item of queue) await repository.create(command({ id: item.id, deviceId, createdAt: item.createdAt }));
+
+      const asc = await repository.page(TENANT, { deviceId, pending: true, ascending: true, page: 1, size: 3 });
+      expect(asc.items.map((item) => item.id)).toEqual([oldest, middle, newest]);
+      expect(asc.total).toBe(3);
+      // 倒序仍是列表页的口径，两者互为镜像
+      const desc = await repository.page(TENANT, { deviceId, pending: true, page: 1, size: 3 });
+      expect(desc.items.map((item) => item.id)).toEqual([newest, middle, oldest]);
+      // 正序第二页拿到最后下发的那条：网关一次只领得动一条时也不会跳过最早的
+      expect((await repository.page(TENANT, { deviceId, pending: true, ascending: true, page: 2, size: 2 })).items.map((item) => item.id)).toEqual([newest]);
+
+      // 结单后退出队列
+      expect(await repository.transition(TENANT, { id: oldest, status: "SENT", at: new Date().toISOString(), version: 1 })).toMatchObject({ status: "SENT" });
+      expect((await repository.page(TENANT, { deviceId, pending: true, ascending: true, page: 1, size: 3 })).items.map((item) => item.id)).toEqual([oldest, middle, newest]);
+    } finally {
+      await client.$executeRawUnsafe("DELETE FROM control_commands WHERE device_id = $1", deviceId);
       await client.$disconnect();
     }
   });

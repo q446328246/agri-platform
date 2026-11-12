@@ -106,6 +106,8 @@ export interface ControlCommandQuery {
   pending?: boolean;
   /** 在途时长下限（分钟），配合 pending 筛超时未回执 */
   pendingOverMin?: number;
+  /** 按创建时间正序返回（默认倒序）：设备侧要按下发先后执行，倒序翻页会把最早的指令饿死 */
+  ascending?: boolean;
   page: number;
   size: number;
 }
@@ -260,10 +262,11 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     );
     const total = Number(totalRows[0]?.total ?? 0);
     values.push(query.size, (query.page - 1) * query.size);
+    const order = query.ascending ? "ASC" : "DESC";
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `SELECT ${COLUMNS}
        FROM control_commands ${where}
-       ORDER BY created_at DESC, id DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
+       ORDER BY created_at ${order}, id ${order} LIMIT $${values.length - 1} OFFSET $${values.length}`,
       ...values,
     );
     return toPage(rows.map(toRecord), total, query.page, query.size);
@@ -379,9 +382,10 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
       .filter((row) => (query.to ? row.createdAt <= query.to : true))
       .filter((row) => (query.pending ? PENDING_STATUSES.includes(row.status) : true))
       .filter((row) => isOverdue(row, nowMs, query.pendingOverMin));
-    // 排序与 SQL 侧一致（created_at DESC, id DESC）：内存里靠插入顺序，一旦有回填的
+    // 排序与 SQL 侧一致（created_at/id 同向，默认 DESC）：内存里靠插入顺序，一旦有回填的
     // 历史指令就会翻页，同一页两套模式拿到不同的行。
-    filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+    const rank = (left: ControlCommand, right: ControlCommand) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+    filtered.sort((a, b) => (query.ascending ? 1 : -1) * rank(a, b));
     const start = (query.page - 1) * query.size;
     return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
   }

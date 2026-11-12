@@ -20,9 +20,9 @@ import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, Co
  * 人工指令必须同时带操作人身份与二次确认头，自动指令只由事件消费写入，
  * 因此这里不提供「无身份下发」的入口。
  *
- * 指令的生命周期靠 `/api/v1/control/device/*` 这条设备通道推进：网关领取即
- * QUEUED→SENT，设备回执再推 ACKED/DONE/FAILED。该通道与遥测、视频 AI 回调共用
- * `DEVICE_CALLBACK_TOKEN`（x-device-token），现场没有设备网络时也允许持
+ * 指令的生命周期靠 `/api/v1/control/device/*` 这条设备通道推进：网关先轮 `/pending`
+ * 拿到本机在途指令，领取即 QUEUED→SENT，设备回执再推 ACKED/DONE/FAILED。该通道与遥测、
+ * 视频 AI 回调共用 `DEVICE_CALLBACK_TOKEN`（x-device-token），现场没有设备网络时也允许持
  * device:control 的用户人工回填，避免指令永远停在「已入队」。两个通道的归属都由
  * `tenantOf` 现取，不信任请求体自报的租户。
  *
@@ -38,6 +38,9 @@ const RECEIPT_STATUSES: ControlCommandStatus[] = ["ACKED", "DONE", "FAILED"];
 
 /** 超时未回执的默认阈值（分钟），可用 CONTROL_RECEIPT_TIMEOUT_MIN 调整 */
 export const DEFAULT_RECEIPT_TIMEOUT_MIN = 15;
+
+/** 网关一次轮询最多取多少条在途指令 */
+const MAX_PENDING_PAGE_SIZE = 50;
 
 /** 未配置 TENANT_ID 且请求没有可信租户头时的归属租户，与全仓演示租户同字面量 */
 export const DEFAULT_TENANT = "tenant-demo";
@@ -265,7 +268,27 @@ export function createControlHttpServer(
         return;
       }
 
-      // 设备通道 ①：网关领取指令，把入队推进为已下发。已推进过的指令按幂等返回，
+      // 设备通道 ①：网关轮询本机还在途的指令。领取接口只认 commandId，而现场网关手里
+      // 只有设备编号和回调令牌——没有它就只能靠人告诉它「该干活了」。
+      // 返回 QUEUED/SENT/ACKED 三态：崩在两次轮询之间的网关要能接着把已领取、
+      // 已写入但未结单的指令做完，而不是干等到超时被收口。
+      if (req.method === "GET" && url.pathname === "/api/v1/control/device/pending") {
+        const deviceId = url.searchParams.get("deviceId")?.trim();
+        if (!deviceId) { send(res, 400, null, traceId, "轮询待执行指令需要设备标识 deviceId"); return; }
+        const nowMs = Date.now();
+        const page: PageResult<ControlCommand> = await repository.page(tenantOf(req), {
+          deviceId,
+          pending: true,
+          // 按下发先后执行：倒序翻页会让最早的指令永远排在下一页
+          ascending: true,
+          page: Math.max(1, Number(url.searchParams.get("page") || 1)),
+          size: Math.min(MAX_PENDING_PAGE_SIZE, Math.max(1, Number(url.searchParams.get("size") || MAX_PENDING_PAGE_SIZE) || MAX_PENDING_PAGE_SIZE)),
+        });
+        send(res, 200, { ...page, items: page.items.map((item) => toView(item, timeoutMin, nowMs)) }, traceId);
+        return;
+      }
+
+      // 设备通道 ②：网关领取指令，把入队推进为已下发。已推进过的指令按幂等返回，
       // 免得网关重试时拿到 409 再猜自己有没有领到过。
       if (req.method === "POST" && url.pathname === "/api/v1/control/device/dispatch") {
         const body = await json(req);
@@ -287,7 +310,7 @@ export function createControlHttpServer(
         return;
       }
 
-      // 设备通道 ②：执行回执。SENT/ACKED → ACKED/DONE，任一在途状态都可被 FAILED 收口；
+      // 设备通道 ③：执行回执。SENT/ACKED → ACKED/DONE，任一在途状态都可被 FAILED 收口；
       // 急停指令的 DONE 必须带 result.confirmed=true，否则视为「没确认到位」不予结单。
       if (req.method === "POST" && url.pathname === "/api/v1/control/device/receipt") {
         const body = await json(req);
