@@ -7,6 +7,8 @@ import {
   dayRange,
   DEFAULT_TIME_ZONE,
   hectareToMu,
+  keywordHits,
+  likePattern,
   muToSquareMeter,
   omitUndefined,
   snowflakeId,
@@ -79,5 +81,20 @@ describe("共享工具", () => {
     expect(error.code).toBe("SYS-400-001");
     expect(error.httpStatus).toBe(400);
     expect(error.details?.[0]?.field).toBe("areaMu");
+  });
+
+  it("关键词检索是双模仓储的唯一口径：ILIKE 转义通配符、内存按字面量逐字段命中", () => {
+    expect(likePattern("东区")).toBe("%东区%");
+    // 不转义的话一个「%」就能把整表捞出来，而内存实现只会当字面量，同一个词两套结果
+    expect(likePattern("100%")).toBe("%100\\%%");
+    expect(likePattern("a_b")).toBe("%a\\_b%");
+    expect(likePattern("c\\d")).toBe("%c\\\\d%");
+
+    // 逐字段判定：拼起来找会让「号田」这种前一段尾巴接后一段开头的序列假命中
+    expect(keywordHits("号田", ["一号", "田东区"])).toBe(false);
+    expect(keywordHits("东区一号", ["东区一号田", "511723"])).toBe(true);
+    // 大小写不敏感，与 ILIKE 一致；缺字段不参与匹配
+    expect(keywordHits("SPRAY", ["spraying", undefined])).toBe(true);
+    expect(keywordHits("x", [undefined, undefined])).toBe(false);
   });
 });
