@@ -128,6 +128,38 @@ describe("消息模板与去重键", () => {
     expect(estop?.dedupeKey).not.toBe(draft?.dedupeKey);
   });
 
+  it("灌溉完成按指令结一笔账，用水量与时长都标来源", () => {
+    const payload = {
+      commandId: "cmd-9", parcelId: "P-7", deviceId: "device-irri-002",
+      waterVolume: 48.5, waterVolumeSource: "DEVICE" as const,
+      durationMin: 12, durationSource: "DEVICE" as const,
+      finishedAt: "2026-11-05T02:00:00.000Z",
+    };
+    const draft = buildMessageDraft(EventTopic.ControlIrrigationFinished, payload, context);
+    expect(draft).toMatchObject({ type: "NOTICE", level: "INFO", plotCode: "P-7" });
+    expect(draft?.title).toBe("灌溉执行完成：P-7");
+    expect(draft?.content).toContain("用水 48.5 立方米（设备实测）");
+    expect(draft?.content).toContain("历时 12 分钟（设备实测）");
+    expect(draft?.occurredAt).toBe("2026-11-05T02:00:00.000Z");
+
+    // 设备没报量时只说「按分区方案推算」，不把它写成实测
+    const estimated = buildMessageDraft(EventTopic.ControlIrrigationFinished, {
+      ...payload, commandId: "cmd-10", waterVolume: 30, waterVolumeSource: "PLAN", durationSource: "RUNTIME",
+    }, context);
+    expect(estimated?.content).toContain("用水 30 立方米（按分区方案推算）");
+    expect(estimated?.content).toContain("历时 12 分钟（按回执时间推算）");
+    // 用水量完全无从得出时明说未上报，不留空也不编数
+    const unmeasured = buildMessageDraft(EventTopic.ControlIrrigationFinished, {
+      ...payload, commandId: "cmd-11", waterVolume: undefined, waterVolumeSource: undefined,
+    }, context);
+    expect(unmeasured?.content).toContain("用水量未上报");
+
+    // 同一条指令只结一次账，换指令才另开一条
+    const again = buildMessageDraft(EventTopic.ControlIrrigationFinished, payload, { eventId: "evt-irri-2", occurredAt: context.occurredAt });
+    expect(again?.dedupeKey).toBe(draft?.dedupeKey);
+    expect(again?.dedupeKey).not.toBe(estimated?.dedupeKey);
+  });
+
   it("未登记模板的主题不生成消息，级别权重可比较", () => {
     expect(buildMessageDraft(EventTopic.OperationTaskCompleted, {}, context)).toBeNull();
     expect(isMessageTemplateTopic(EventTopic.TelemetryThresholdBreached)).toBe(true);
@@ -138,6 +170,7 @@ describe("消息模板与去重键", () => {
       EventTopic.DecisionPrescriptionIssued,
       EventTopic.PlotCreated,
       EventTopic.ControlCommandTimeout,
+      EventTopic.ControlIrrigationFinished,
     ]);
     expect(MESSAGE_LEVEL_RANK.CRITICAL).toBeGreaterThan(MESSAGE_LEVEL_RANK.WARNING);
   });

@@ -2,6 +2,12 @@ import type { PrismaClientLike } from "@agri/db";
 import { toIsoTimestamp } from "@agri/shared";
 
 export interface TraceRecord { id: string; traceCode: string; batchCode: string; plotCode: string; event: string; detail: string; operator: string; createdAt: string }
+
+/** 处方下发事件写入的档案事件编码 */
+export const PRESCRIPTION_EVENT = "PRESCRIPTION_ISSUED";
+
+/** 设备结单事件写入的档案事件编码：人工补录入口不提供，接口直接拒绝 */
+export const IRRIGATION_EVENT = "IRRIGATION_FINISHED";
 export interface TraceRepository { list(plotCode?: string, event?: string, batchCode?: string): Promise<TraceRecord[]>; create(record: TraceRecord): Promise<TraceRecord>; findByCode(traceCode: string): Promise<TraceRecord | null>; chain(batchCode: string): Promise<TraceRecord[]> }
 
 export class InMemoryTraceRepository implements TraceRepository {

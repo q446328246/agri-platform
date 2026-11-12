@@ -34,11 +34,7 @@
         <el-form-item label="地块编码"><el-input v-model="query.plotCode" placeholder="可选" clearable style="width: 170px" /></el-form-item>
         <el-form-item label="事件">
           <el-select v-model="query.event" placeholder="全部" clearable style="width: 140px">
-            <el-option label="处方生成" value="PRESCRIPTION_ISSUED" />
-            <el-option label="农事作业" value="FARM_OPERATION" />
-            <el-option label="作业完成" value="OPERATION_COMPLETED" />
-            <el-option label="投入品领用" value="INPUT_MATERIAL" />
-            <el-option label="采收" value="HARVEST" />
+            <el-option v-for="option in traceEventOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="关键词"><el-input v-model="query.keyword" placeholder="追溯码/详情/操作人" clearable style="width: 170px" /></el-form-item>
@@ -113,11 +109,7 @@
         </el-form-item>
         <el-form-item label="事件" prop="event">
           <el-select v-model="form.event" style="width: 180px">
-            <el-option label="农事作业" value="FARM_OPERATION" />
-            <el-option label="作业完成" value="OPERATION_COMPLETED" />
-            <el-option label="处方生成" value="PRESCRIPTION_ISSUED" />
-            <el-option label="投入品领用" value="INPUT_MATERIAL" />
-            <el-option label="采收" value="HARVEST" />
+            <el-option v-for="option in manualTraceEventOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="详情" prop="detail">
@@ -140,7 +132,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { traceApi } from '@/api'
 import { useUserStore } from '@/stores'
-import { formatDateTime, getTraceEventText, getTraceEventType } from '@/utils'
+import { formatDateTime, getTraceEventText, getTraceEventType, manualTraceEventOptions, traceEventOptions } from '@/utils'
 const userStore = useUserStore()
 const loading = ref(false)
 const records = ref<any[]>([])
@@ -183,7 +175,7 @@ async function load() {
 }
 function search() { page.page = 1; void load() }
 function resetQuery() { query.plotCode = ''; query.event = ''; query.batchCode = ''; query.keyword = ''; query.range = null; search() }
-/** 时间轴节点色：处方/采收绿、归档橙、其余蓝，与列表标签口径一致 */
+/** 时间轴节点色：已落地的作业（处方、灌溉结单、采收）绿、归档橙、其余蓝，与列表标签口径一致 */
 function traceTimelineType(event: string): 'success' | 'warning' | 'primary' {
   const kind = getTraceEventType(event)
   return kind === 'info' ? 'primary' : kind

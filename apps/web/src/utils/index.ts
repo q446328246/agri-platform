@@ -134,21 +134,32 @@ export function getControlStatusType(status: string): 'primary' | 'success' | 'i
   return map[status] || 'info'
 }
 
-/** 生产档案事件类型：事件自动写入与人工录入并存，链条含投入品、农事、处方、归档、采收 */
-export function getTraceEventText(event: string): string {
-  const map: Record<string, string> = {
-    PRESCRIPTION_ISSUED: '处方生成',
-    FARM_OPERATION: '农事作业',
-    OPERATION_COMPLETED: '作业完成',
-    INPUT_MATERIAL: '投入品领用',
-    SOWING: '播种',
-    HARVEST: '采收'
-  }
-  return map[event] || event || '-'
+/** 生产档案事件类型：事件自动写入与人工录入并存，链条含投入品、农事、处方、灌溉、归档、采收 */
+const TRACE_EVENT_LABELS: Record<string, string> = {
+  PRESCRIPTION_ISSUED: '处方生成',
+  IRRIGATION_FINISHED: '灌溉完成',
+  FARM_OPERATION: '农事作业',
+  OPERATION_COMPLETED: '作业完成',
+  INPUT_MATERIAL: '投入品领用',
+  SOWING: '播种',
+  HARVEST: '采收'
 }
 
+/** 由设备结单事件写入的档案：人工补录不提供，免得手填一条设备没做过的作业 */
+const DEVICE_ONLY_EVENTS = ['IRRIGATION_FINISHED']
+
+export function getTraceEventText(event: string): string {
+  return TRACE_EVENT_LABELS[event] || event || '-'
+}
+
+/** 档案事件下拉选项：与表格标签同一份来源，新增事件只改这里 */
+export const traceEventOptions = Object.entries(TRACE_EVENT_LABELS).map(([value, label]) => ({ value, label }))
+
+/** 人工补录可选的事件 */
+export const manualTraceEventOptions = traceEventOptions.filter((option) => !DEVICE_ONLY_EVENTS.includes(option.value))
+
 export function getTraceEventType(event: string): 'success' | 'warning' | 'info' {
-  if (event === 'PRESCRIPTION_ISSUED' || event === 'HARVEST') return 'success'
+  if (event === 'PRESCRIPTION_ISSUED' || event === 'IRRIGATION_FINISHED' || event === 'HARVEST') return 'success'
   if (event === 'OPERATION_COMPLETED') return 'warning'
   return 'info'
 }

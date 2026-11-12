@@ -440,6 +440,25 @@
 - **用例**：`receipt-sweeper.spec.ts`（只收口超时的在途指令、未到阈值与终态不动、再扫一轮不重复、`batchSize` 截断、事件归属/追踪/载荷取自指令且时长现算、缺事务句柄拒绝装配、带事务句柄时跃迁与入队同一 `tx`、现场回执抢版本时不收口也不留事件、单条失败不影响其余且回调 `onError`、跨租户候选各按行内租户收口）；`sql-control-outbox.spec.ts`（时间列映射 ISO、`enqueue` 脱离事务拒绝、`$3::jsonb` 落库、`markPublished/markFailed` 语句，外加 `describe.runIf(DB_URL)` 的真实库收口与「入队炸了跃迁跟着回滚」，候选限定自己造的指令、`finally` 清理）；`contracts/test/message-template.spec.ts` 补超时模板断言与模板主题清单；`message-service/test/command-timeout-closure.spec.ts` 验证事件 → 告警闭环、同指令不刷屏、急停级别更高。**未跑验证**（按交付口径）。
 - **前端**：`Commands.vue` 的「超时未回执」红标自此不再是纯展示——被收口的指令会以 `FAILED` 出现在台账里，回执说明写着「超过 N 分钟未收到设备回执（已等待 M 分钟），系统自动收口为失败」，消息中心同步出现告警。
 
+### 2026-11-12：灌溉结单事件回流（`control.irrigation.finished` 补生产者）
+
+- **问题**：`EventTopic.ControlIrrigationFinished` 自 `#76` 起只存在于契约里，全仓没有任何生产者——`#94` 之后设备 `DONE` 回执确实能落库（`finished_at`、`result_json` 都在），但「这块地到底灌了多少水、灌了多久」到指令表就断了，档案、消息、决策侧一概不知道作业发生过。追一个主题名去查生产方，答案是「没有」。
+- **契约**：`IrrigationFinishedPayload` 补齐 `commandId`（去重锚点）、`deviceId`、`finishedAt`，并把两个业务量改成**带来源的事实**：`waterVolume?` + `waterVolumeSource: "DEVICE" | "PLAN"`、`durationMin` + `durationSource: "DEVICE" | "RUNTIME"`。用水量改为可选——设备没报、参数也推不出方案总量时留空，不编一个数；来源标记让下游能区分实测与推算，文案与档案各按各自口径讲明白。
+- **生产者 `apps/control-service/src/irrigation-finished.ts`**（纯函数，三条取值正路都写明来源）：
+  - `resolveWaterVolume`：设备 `result.waterVolumeM3` 实测优先 → 否则按指令 `parameters.zones`（+ `flowM3h`，缺省走 `DEFAULT_FLOW_M3H`）现场调 `buildIrrigationPlan` 取 `totalWaterVolume` 记 `PLAN` → 历史脏参数（分区缺面积、定额越界）catch 成缺省，**不让结单接口因为算不出用水量而 500，也不退回一个估算值冒充实测**；
+  - `resolveDurationMin`：设备 `result.durationMin` 优先 → 否则 `finishedAt - (ackedAt ?? sentAt ?? createdAt)` 现算记 `RUNTIME`（起点与超时口径取同一个「最后一次状态推进时间」；没有下发时刻的历史行退到入队时间，此时时长是上界，所以必须标 `RUNTIME`）→ 时间戳不可解析给 0；
+  - `buildIrrigationFinished`：组装载荷，`commandId` 取指令 id。
+- **入队点**（`http.ts` 的 `POST /device/receipt`）：仅当 `status === "DONE" && type === "IRRIGATION"` 组装事件，并在**同一事务**里 `transition` 之后 `outbox.enqueue(tx, ControlIrrigationFinished, …, { traceId: "control-irrigation:<id>", producer: "control" })`；跃迁不成立（陈旧 `version` 拿 409）就不入队，绝不出现「事件已投递、状态还在 SENT」。同态 `DONE` 重复上报由 `#94` 的幂等早退挡住，不重复入队。施肥**不发**这个事件——载荷口径是「灌了多少水」，肥量另说，不借壳。内存模式不装消息表（与 `#95` 同一理由），只结单不发事件。
+- **装配约束**：`main.ts` 用 `const eventDeps = db && relay ? { outbox: relay, withTransaction: (run) => db.$transaction(run) } : {}` 同时喂给收口任务与 HTTP 服务；`ControlHttpOptions` 里只给 `outbox` 不给 `withTransaction` 在构造期直接抛「灌溉完成事件要落消息表时必须配置事务句柄」，杜绝状态与事件分家。
+- **消费闭环**：
+  - `trace-service`：`@registerHandler(ControlIrrigationFinished)` 写生产档案，`traceCode = TR-IRR-<commandId>`、`createdAt = finishedAt`（缺省退信封时间），`operator = event:control`；事件名常量 `IRRIGATION_EVENT = "IRRIGATION_FINISHED"` 与 `PRESCRIPTION_EVENT` 一起收进 `repository.ts`（此前 consumer 内重复声明，且从 consumer 导出会把 `@agri/mq` 拖进纯 HTTP 路径）。重复投递靠 `trace_records.trace_code` 唯一 + `ON CONFLICT DO NOTHING` 兜住。
+  - `message-service`：补 `@registerHandler` 走通用「模板渲染 → 偏好过滤 → 落库」，`dedupeKey = 主题:commandId`——同一指令不刷屏，换指令另开一条。模板文案把来源说出来：「用水 25.5 立方米（设备实测）」/「（按分区方案推算）」、「历时 20 分钟（设备实测）」/「（按回执时间推算）」，推不出用水量时直说「用水量未上报」。
+  - 订阅主题由处理器注册表推导，加处理器即加订阅，无需改配置。
+- **顺手修掉一个真实缺陷**：`buildMessageDraft` 之前是「`MESSAGE_TEMPLATES` 注册表 + 一段手写 switch」两套真相，switch 里只有 4 个分支，`ControlCommandTimeout`（`#95` 已注册）落到 `default` 返回 `null`——即 `#95` 的超时告警在真实链路上根本发不出来，只是当时的用例直连模板没走到这条分支。改为按 `isMessageTemplateTopic(topic)` 从 `MESSAGE_TEMPLATES[topic].render` 取渲染，注册即生效；`preference.spec.ts` 里写死的「主题数 = 4」同步改成 `MESSAGE_TEMPLATE_TOPICS.length` 推导。
+- **封住人工造数据的口子**：`IRRIGATION_FINISHED` 只能由设备结单事件写入，`POST /api/v1/trace/records` 收到该事件直接 400「灌溉完成由设备结单事件写入，不支持人工补录」；前端把事件标签抽成 `utils` 的 `TRACE_EVENT_LABELS`，派生 `traceEventOptions`（筛选，含全部）与 `manualTraceEventOptions`（新增弹窗，剔除 `DEVICE_ONLY_EVENTS`），溯源页与农事档案页的下拉都由这两者渲染，不再各写一份 `<el-option>`。时间轴配色同步：处方、灌溉结单、采收归绿（success），不再写死「处方绿」。
+- **用例**：`apps/control-service/test/irrigation-finished.spec.ts`（分区方案水量按 `waterVolumeOf` 现算断言、不写死立方米数；设备实测覆盖方案值且来源随之变 `DEVICE`；重复 DONE 不再入队；`traceId`/`producer`；FERTILIZATION 与 ESTOP 不推事件；无消息表时照常结单；缺事务句柄构造期抛错；陈旧版本 409 且 outbox 为空）；`sql-control-outbox.spec.ts` 增 `describe.runIf(DB_URL)` 的「DONE 与事件同一事务落库」（断言状态/版本、`control_outbox` 恰一条、`durationMin` 落在预期区间而非硬编码、重复 DONE 不翻倍，`finally` 按 trace_id 清理）；`trace-service/test/consumer.spec.ts`（入档字段、换 `eventId` 重投不重复建档、处方与结单并存）与 `http-chain.spec.ts`（人工补录 400 且列表为空）；`message-service/test/irrigation-finished-closure.spec.ts` 新文件 5 例（生成通知、实测与推算文案分开、未上报口径、按指令聚合、换指令另开 + 关闭偏好不落库）；`contracts/test/message-template.spec.ts` 补灌溉完成模板与主题清单第 6 项。**按交付口径未跑验证。**
+- **仍留作待决**：施肥作业的实际用量回流（需要另一条载荷口径）；决策侧消费该事件做处方效果回流（`evaluateOutcome` 目前仍由调用方手工触发）；未新增 `smoke-irrigation-finished` 脚本（演示库无真实设备，脚本只能自造回执）。
+
 ## 下一步（中断后从这里继续）
 
 > **交付口径（2026-11-11 起，用户长期要求）**：改完直接 `git commit` + `git push`，**不再**跑单元测试 / `tsc -b` / `pnpm build` / `smoke-*` 冒烟 / 浏览器实操验证，**不再**重建或重新部署 `app`、`edge` 镜像。迁移文件照常编写，只在用户点名时才应用到库；风险较高的改动收工时注明「未跑验证」即可。
@@ -472,7 +491,7 @@
    - ~~`PlotCreated` 下游消费~~：`#82` 已接入消息中心建档通知；`plot-service` 内存消费者仍只校验面积，属演示链路。
 11. **待决（需用户点头，未擅自处理）**：
    - ~~超时未回执只做了「可见」，没有自动置 `FAILED` 或推事件~~：`#95` 已做（迁移 `033` 建 `control_outbox` + `ControlReceiptSweeper` 同事务收口推事件 + 消息中心告警，见 2026-11-12 收口一节）。「会覆盖现场迟到的真实回执」这一顾虑按**先到先得**处理：收口与回执抢同一个 `version`，谁先到终态另一边拿 409，不做覆盖式改写；
-   - `EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环；
+   - ~~`EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环~~：`#96` 已做（灌溉指令 `DONE` 在同一事务写 `control_outbox`，`trace-service` 结档案、`message-service` 发通知，见 2026-11-12 结单回流一节）；**施肥作业的实际用量回流**没有对应载荷口径、决策侧也尚未消费该事件做处方效果回流，两者仍待决；
    - ~~`control_commands` 无 `tenant_id`（多租户下指令台账互通）~~：`#97` 已做（迁移 `032` + 仓储首参 + 可信头归属，见 2026-11-12 租户隔离一节）；**设备台账 `iot_devices` 仍是全局台账**，是否一并隔离待决；
    - `.qoder/repowiki/**` 每次收尾都会被自动重生成（本轮 40+ 文件 M/D/??），与功能改动分开单独征询是否提交，目前仍未入库；
    - 内存模式与 SQL 模式的行为差异（如 016 CHECK 要求 `CANCELLED` 必留 `cancelled_at`，而内存种子留空）要不要抹平；

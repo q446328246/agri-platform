@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
+import type { Server } from "node:http";
 
 import { EventTopic } from "@agri/contracts";
-import type { CommandTimeoutPayload } from "@agri/contracts";
+import type { CommandTimeoutPayload, IrrigationFinishedPayload } from "@agri/contracts";
 import type { OutboxRecord } from "@agri/mq";
 import { OutboxService } from "@agri/mq";
 import { PgClientAdapter } from "@agri/db";
 import type { Tx } from "@agri/db";
 
+import { waterVolumeOf } from "../src/command-spec.js";
 import { SqlControlCommandRepository } from "../src/control.repository.js";
+import { createControlHttpServer } from "../src/http.js";
 import { SqlControlOutboxStore } from "../src/outbox.repository.js";
 import { ControlReceiptSweeper } from "../src/receipt-sweeper.js";
 
@@ -21,6 +24,9 @@ import { ControlReceiptSweeper } from "../src/receipt-sweeper.js";
  */
 
 const TENANT = "tenant-demo";
+
+/** 真实库用例自己起的 HTTP 服务，收尾统一关闭 */
+const servers: Server[] = [];
 
 const row = {
   id: "outbox-control-1",
@@ -211,6 +217,71 @@ describe.runIf(databaseUrl)("超时收口真实库链路", () => {
       expect(await commands.find(TENANT, id)).toMatchObject({ status: "QUEUED", version: 1 });
     } finally {
       await client.$executeRawUnsafe("DELETE FROM control_commands WHERE id = $1", id);
+      await client.$disconnect();
+    }
+  });
+
+  it("SQL 模式结单：DONE 与灌溉完成事件同一事务落库", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const commands = new SqlControlCommandRepository(client);
+    const store = new SqlControlOutboxStore(client);
+    const id = `cmd-irri-finish-${Date.now()}`;
+    const traceId = `control-irrigation:${id}`;
+    const server = createControlHttpServer(commands, {
+      outbox: new OutboxService(store, { async publish() {} } as never, { tenantId: "tenant-boot", traceId: "boot", producer: "control" }),
+      withTransaction: (run) => client.$transaction(run),
+    });
+    try {
+      expect(await commands.create({
+        id,
+        tenantId: TENANT,
+        deviceId: "device-irri-smoke",
+        plotCode: "511723-000001-01-00001-0000-5",
+        operatorId: "user-admin",
+        type: "IRRIGATION",
+        parameters: { zones: [{ zoneCode: "ZONE-01", areaMu: 10, targetMm: 20 }] },
+        status: "SENT",
+        origin: "MANUAL",
+        reason: "灌溉完成事件冒烟",
+        version: 2,
+        createdAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+        sentAt: new Date(Date.now() - 19 * 60_000).toISOString(),
+      })).not.toBeNull();
+
+      servers.push(server);
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("测试服务未分配端口");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/control/device/receipt`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+        body: JSON.stringify({ commandId: id, status: "DONE", at: new Date().toISOString() }),
+      });
+      expect(response.status).toBe(200);
+      expect(await commands.find(TENANT, id)).toMatchObject({ status: "DONE", version: 3 });
+
+      const pending = (await store.listPending(500)).filter((record) => record.traceId === traceId);
+      expect(pending).toHaveLength(1);
+      const payload = pending[0]?.payload as IrrigationFinishedPayload;
+      expect(pending[0]).toMatchObject({ topic: EventTopic.ControlIrrigationFinished, tenantId: TENANT, producer: "control" });
+      expect(payload).toMatchObject({ commandId: id, parcelId: "511723-000001-01-00001-0000-5", waterVolumeSource: "PLAN", durationSource: "RUNTIME" });
+      // 用水量与指令方案同一口径，时长由 sentAt 到结单时刻现算
+      expect(payload.waterVolume).toBe(waterVolumeOf(10, 20));
+      expect(payload.durationMin).toBeGreaterThanOrEqual(18);
+      expect(payload.durationMin).toBeLessThanOrEqual(21);
+
+      // DONE 是终态，重复回执走幂等分支，不会再排一条事件
+      await fetch(`http://127.0.0.1:${address.port}/api/v1/control/device/receipt`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+        body: JSON.stringify({ commandId: id, status: "DONE", at: new Date().toISOString() }),
+      });
+      expect((await store.listPending(500)).filter((record) => record.traceId === traceId)).toHaveLength(1);
+    } finally {
+      await client.$executeRawUnsafe("DELETE FROM control_outbox WHERE trace_id = $1", traceId);
+      await client.$executeRawUnsafe("DELETE FROM control_commands WHERE id = $1", id);
+      await Promise.all(servers.splice(0).map((item) => new Promise<void>((resolve) => item.close(() => resolve()))));
       await client.$disconnect();
     }
   });

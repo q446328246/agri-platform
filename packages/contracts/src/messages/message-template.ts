@@ -1,4 +1,11 @@
-import type { CommandTimeoutPayload, PestDetectedPayload, PlotCreatedPayload, PrescriptionIssuedPayload, ThresholdBreachedPayload } from "../events/payload.js";
+import type {
+  CommandTimeoutPayload,
+  IrrigationFinishedPayload,
+  PestDetectedPayload,
+  PlotCreatedPayload,
+  PrescriptionIssuedPayload,
+  ThresholdBreachedPayload,
+} from "../events/payload.js";
 import { EventTopic } from "../events/topic.js";
 
 /**
@@ -8,9 +15,11 @@ import { EventTopic } from "../events/topic.js";
  * 前端展示、运维告警、测试断言都依赖同一套标题与级别。因此模板放在契约包里，
  * 只做纯函数渲染，不依赖任何能力包，也不负责落库。
  *
- * 去重键分两类：
+ * 去重键分三类：
  * - 越限告警按「地块 + 指标 + 方向 + 小时」聚合，抑制同一场灾害的一小时内刷屏；
- * - 处方通知按来源事件唯一，每份处方都要分别通知。
+ * - 处方通知按来源事件唯一，每份处方都要分别通知；
+ * - 指令相关消息（超时收口、灌溉完成）按指令唯一——事件重放或中继重试会换 eventId，
+ *   但同一条指令只该提醒一次。
  */
 
 /** 消息类型：ALERT 告警待处置，NOTICE 通知仅提醒 */
@@ -215,6 +224,33 @@ const commandTimeoutTemplate: MessageTemplate<CommandTimeoutPayload> = {
   },
 };
 
+/**
+ * 灌溉执行完成：DONE 回执回流的通知消息。
+ * 用水量与时长都标注来源——设备实测与方案推算的置信度不同，混在一起会把估算当成计量。
+ */
+const irrigationFinishedTemplate: MessageTemplate<IrrigationFinishedPayload> = {
+  topic: EventTopic.ControlIrrigationFinished,
+  label: "灌溉执行完成",
+  type: "NOTICE",
+  render(payload, context) {
+    const plotCode = payload.parcelId || "未绑定地块";
+    const water =
+      payload.waterVolume === undefined
+        ? "用水量未上报"
+        : `用水 ${payload.waterVolume} 立方米${payload.waterVolumeSource === "DEVICE" ? "（设备实测）" : "（按分区方案推算）"}`;
+    const duration = `历时 ${payload.durationMin} 分钟${payload.durationSource === "DEVICE" ? "（设备实测）" : "（按回执时间推算）"}`;
+    return {
+      type: "NOTICE",
+      level: "INFO",
+      title: `灌溉执行完成：${plotCode}`,
+      content: `设备 ${payload.deviceId} 已完成 ${plotCode} 的灌溉指令，${water}，${duration}。可在生产档案与指令台账中核对。`,
+      plotCode: payload.parcelId,
+      occurredAt: payload.finishedAt || context.occurredAt,
+      dedupeKey: `${EventTopic.ControlIrrigationFinished}:${payload.commandId}`,
+    };
+  },
+};
+
 /** 主题到模板的映射，新增消费主题时在这里登记 */
 export const MESSAGE_TEMPLATES = {
   [EventTopic.TelemetryThresholdBreached]: thresholdTemplate,
@@ -222,6 +258,7 @@ export const MESSAGE_TEMPLATES = {
   [EventTopic.DecisionPrescriptionIssued]: prescriptionTemplate,
   [EventTopic.PlotCreated]: plotCreatedTemplate,
   [EventTopic.ControlCommandTimeout]: commandTimeoutTemplate,
+  [EventTopic.ControlIrrigationFinished]: irrigationFinishedTemplate,
 } as const;
 
 /** 已登记模板的主题 */
@@ -247,16 +284,9 @@ export function buildMessageDraft(
   payload: unknown,
   context: MessageTemplateContext,
 ): MessageDraft | null {
-  switch (topic) {
-    case EventTopic.TelemetryThresholdBreached:
-      return thresholdTemplate.render(payload as ThresholdBreachedPayload, context);
-    case EventTopic.TelemetryPestDetected:
-      return pestDetectedTemplate.render(payload as PestDetectedPayload, context);
-    case EventTopic.DecisionPrescriptionIssued:
-      return prescriptionTemplate.render(payload as PrescriptionIssuedPayload, context);
-    case EventTopic.PlotCreated:
-      return plotCreatedTemplate.render(payload as PlotCreatedPayload, context);
-    default:
-      return null;
-  }
+  // 直接按主题从模板目录取渲染函数：漏登记只会是「模板没写」，不会出现
+  // 模板已注册、渲染分支却忘了加主题，消息静默丢失的情况。
+  if (!isMessageTemplateTopic(topic)) return null;
+  const render = MESSAGE_TEMPLATES[topic].render as (payload: unknown, context: MessageTemplateContext) => MessageDraft;
+  return render(payload, context);
 }

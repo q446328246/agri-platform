@@ -1,6 +1,6 @@
 import "reflect-metadata";
 
-import type { DomainEvent, PrescriptionIssuedPayload } from "@agri/contracts";
+import type { DomainEvent, IrrigationFinishedPayload, PrescriptionIssuedPayload } from "@agri/contracts";
 import { EventTopic } from "@agri/contracts";
 import {
   buildHandlers,
@@ -13,6 +13,7 @@ import {
 import type { EventLogStore } from "@agri/mq";
 
 import type { TraceRecord, TraceRepository } from "./repository.js";
+import { IRRIGATION_EVENT, PRESCRIPTION_EVENT } from "./repository.js";
 
 /**
  * 生产档案的事件消费。
@@ -20,6 +21,9 @@ import type { TraceRecord, TraceRepository } from "./repository.js";
  * 处方一旦生成就属于生产过程的一部分，需要进入追溯档案，供后续查询
  * 「哪块地在什么时间按什么建议作业」。档案只做追加记录，不修改处方本身，
  * 因此处理器里不调用决策服务。
+ *
+ * 灌溉结单同样入账：处方只是「建议」，DONE 回执带回来的用水量与时长才是「实际做了什么」。
+ * 两条档案事件分开保留，溯源链条才能既看到建议也看到执行。
  */
 
 /** 处方类型中文名，用于档案详情 */
@@ -28,9 +32,6 @@ const PLAN_LABELS: Record<PrescriptionIssuedPayload["planType"], string> = {
   fertilization: "施肥",
   pesticide: "植保",
 };
-
-/** 档案事件编码，与人工录入的作业事件区分 */
-const PRESCRIPTION_EVENT = "PRESCRIPTION_ISSUED";
 
 /** 事件消费处理器：一个方法对应一个主题 */
 export class TraceEventConsumer {
@@ -54,6 +55,31 @@ export class TraceEventConsumer {
       detail,
       operator: `event:${event.producer}`,
       createdAt: event.occurredAt,
+    };
+    await this.records.create(record);
+  }
+
+  /**
+   * 灌溉执行完成：把 DONE 回执带回来的实际用水量为地块补一条作业档案。
+   * 追溯码按指令固定，同一指令的重复投递只会命中同一条记录。
+   */
+  @registerHandler(EventTopic.ControlIrrigationFinished)
+  async onIrrigationFinished(event: DomainEvent<IrrigationFinishedPayload>): Promise<void> {
+    const payload = event.payload;
+    const water =
+      payload.waterVolume === undefined
+        ? "用水量未上报"
+        : `用水 ${payload.waterVolume} 立方米${payload.waterVolumeSource === "DEVICE" ? "（设备实测）" : "（按分区方案推算）"}`;
+    const duration = `历时 ${payload.durationMin} 分钟${payload.durationSource === "DEVICE" ? "（设备实测）" : "（按回执时间推算）"}`;
+    const record: TraceRecord = {
+      id: `TRACE-${event.eventId}`,
+      traceCode: `TR-IRR-${payload.commandId}`,
+      batchCode: "",
+      plotCode: payload.parcelId,
+      event: IRRIGATION_EVENT,
+      detail: `灌溉指令 ${payload.commandId} 执行到位（设备 ${payload.deviceId}）：${water}，${duration}`,
+      operator: `event:${event.producer}`,
+      createdAt: payload.finishedAt || event.occurredAt,
     };
     await this.records.create(record);
   }

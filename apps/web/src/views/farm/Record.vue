@@ -5,9 +5,7 @@
         <el-form-item label="地块编码"><el-input v-model="form.plotCode" clearable /></el-form-item>
         <el-form-item label="事件类型">
           <el-select v-model="form.event" placeholder="全部" clearable style="width: 150px">
-            <el-option label="处方生成" value="PRESCRIPTION_ISSUED" />
-            <el-option label="农事作业" value="FARM_OPERATION" />
-            <el-option label="作业完成" value="OPERATION_COMPLETED" />
+            <el-option v-for="option in traceEventOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="关键词">
@@ -58,7 +56,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { traceApi } from '@/api'
-import { formatDateTime, getTraceEventText, getTraceEventType } from '@/utils'
+import { formatDateTime, getTraceEventText, getTraceEventType, traceEventOptions } from '@/utils'
 const loading = ref(false)
 const records = ref<any[]>([])
 const total = ref(0)

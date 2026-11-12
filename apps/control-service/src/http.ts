@@ -3,6 +3,9 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 
 import type { ApiResponse, PageResult } from "@agri/contracts";
+import { EventTopic } from "@agri/contracts";
+import type { PrismaClientLike, Tx } from "@agri/db";
+import type { OutboxService } from "@agri/mq";
 import { authorizeRequest } from "@agri/shared";
 
 import { buildIrrigationPlan, validateCommandParameters } from "./command-spec.js";
@@ -10,6 +13,7 @@ import type { IrrigationPlanInput } from "./command-spec.js";
 import { CONTROL_STATUSES, canTransition, pendingMinutesOf } from "./control.repository.js";
 import { InMemoryControlCommandRepository } from "./control.repository.js";
 import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, ControlCommandType, ControlOrigin } from "./control.repository.js";
+import { buildIrrigationFinished } from "./irrigation-finished.js";
 
 /**
  * 控制指令 HTTP 接口。
@@ -20,7 +24,12 @@ import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, Co
  * 指令的生命周期靠 `/api/v1/control/device/*` 这条设备通道推进：网关领取即
  * QUEUED→SENT，设备回执再推 ACKED/DONE/FAILED。该通道与遥测、视频 AI 回调共用
  * `DEVICE_CALLBACK_TOKEN`（x-device-token），现场没有设备网络时也允许持
- * device:control 的用户人工回填，避免指令永远停在「已入队」。
+ * device:control 的用户人工回填，避免指令永远停在「已入队」。两个通道的归属都由
+ * `tenantOf` 现取，不信任请求体自报的租户。
+ *
+ * 装配了本地消息表（`outbox` + `withTransaction`）时，灌溉指令的 DONE 回执会在同一事务
+ * 里追加一条 `control.irrigation.finished` 待投递事件；没有消息表就没有事件，
+ * 状态照常结单——内存模式的事件出不了本进程，不值得为它假装一条闭环。
  */
 
 const COMMAND_TYPES: ControlCommandType[] = ["SEEDING", "IRRIGATION", "WEEDING", "FERTILIZATION", "ESTOP"];
@@ -154,11 +163,25 @@ function query(search: URLSearchParams, timeoutMin: number): {
   };
 }
 
+/** HTTP 装配参数：`outbox` 与 `withTransaction` 必须成对给出 */
+export interface ControlHttpOptions {
+  receiptTimeoutMin?: number;
+  /** 本地消息表；配置后灌溉结单同事务推一条完成事件 */
+  outbox?: OutboxService;
+  /** 事务句柄；配了消息表就必须给，否则状态改了事件却没落库 */
+  withTransaction?: PrismaClientLike["$transaction"];
+}
+
 export function createControlHttpServer(
   repository: ControlCommandRepository = new InMemoryControlCommandRepository(),
-  options: { receiptTimeoutMin?: number } = {},
+  options: ControlHttpOptions = {},
 ): Server {
+  if (options.outbox && !options.withTransaction) {
+    throw new Error("灌溉完成事件要落消息表时必须配置事务句柄，避免状态与事件分家");
+  }
   const timeoutMin = resolveReceiptTimeoutMin(options.receiptTimeoutMin);
+  const outbox = options.outbox;
+  const withTransaction = options.withTransaction;
   return createServer(async (req, res) => {
     const traceId = trace(req);
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -274,14 +297,32 @@ export function createControlHttpServer(
           send(res, 409, null, traceId, `指令当前状态为 ${target.status}，不接受 ${status} 回执`);
           return;
         }
-        const updated = await repository.transition(tenantId, {
+        const at = receiptAt(body.at);
+        const transition = {
           id: target.id,
           status,
-          at: receiptAt(body.at),
+          at,
           version: target.version,
           ...(message === undefined ? {} : { message }),
           ...(result === undefined ? {} : { result }),
-        });
+        };
+        // 只有灌溉指令结单会回流一条完成事件：施肥走的是同一台水肥机，但事件口径说的是「灌了多少水」，
+        // 把它算成灌溉用水会虚报——施肥的用水回流留作待决，不顺手挂上。
+        const finished = status === "DONE" && target.type === "IRRIGATION" ? buildIrrigationFinished(target, at, result) : undefined;
+        const apply = async (tx?: Tx): Promise<ControlCommand | null> => {
+          // 先跃迁再入队：跃迁被版本拦住时不留一条没人结单的事件
+          const updated = await repository.transition(tenantId, transition, tx);
+          if (!updated) return null;
+          if (finished && outbox) {
+            await outbox.enqueue(tx, EventTopic.ControlIrrigationFinished, finished, {
+              tenantId,
+              traceId: `control-irrigation:${target.id}`,
+              producer: "control",
+            });
+          }
+          return updated;
+        };
+        const updated = withTransaction ? await withTransaction(apply) : await apply(undefined);
         if (!updated) { send(res, 409, null, traceId, "指令状态已被其它回执推进，请刷新后重试"); return; }
         send(res, 200, toView(updated, timeoutMin, Date.now()), traceId);
         return;

@@ -1,6 +1,6 @@
 import "reflect-metadata";
 
-import { EventTopic } from "@agri/contracts";
+import { EventTopic, MESSAGE_TEMPLATE_TOPICS } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
 import { EventLogPublisher, InMemoryEventLogStore } from "@agri/mq";
 import { describe, expect, it } from "vitest";
@@ -121,9 +121,12 @@ describe("订阅偏好 HTTP 接口", () => {
     await withServer(async (base) => {
       const initial = await send(base, "GET", "/api/v1/messages/preferences");
       expect(initial.status).toBe(200);
-      expect(initial.body.data.items).toHaveLength(4);
+      expect(initial.body.data.items).toHaveLength(MESSAGE_TEMPLATE_TOPICS.length);
       expect(initial.body.data.items.map((item: { topic: string }) => item.topic)).toContain(EventTopic.TelemetryPestDetected);
       expect(initial.body.data.items.map((item: { topic: string }) => item.topic)).toContain(EventTopic.PlotCreated);
+      // 指令相关的两个主题同样进目录，现场可以单独关掉结单通知或超时告警
+      expect(initial.body.data.items.map((item: { topic: string }) => item.topic)).toContain(EventTopic.ControlIrrigationFinished);
+      expect(initial.body.data.items.map((item: { topic: string }) => item.topic)).toContain(EventTopic.ControlCommandTimeout);
       expect(initial.body.data.items[0]).toMatchObject({ enabled: true, minLevel: "INFO" });
       expect(initial.body.data.items[0]?.label).toBeTruthy();
 
