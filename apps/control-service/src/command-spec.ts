@@ -81,6 +81,35 @@ export function waterVolumeOf(areaMu: number, targetMm: number): number {
   return Number(((areaMu * SQUARE_METERS_PER_MU * targetMm) / 1000).toFixed(2));
 }
 
+/** 现场执行包络：网关只需要「开多久、开到多少」这两个数 */
+export interface ExecutionPlan {
+  totalDurationMin: number;
+  totalWaterVolume: number;
+}
+
+/**
+ * 从指令参数现算现场执行包络，供入队时写进 `parameters.plan`。
+ *
+ * 「阀门该开多久」在平台里只由分区面积与灌水定额推出（见 `buildIrrigationPlan`），
+ * 现场网关不重算一遍，否则亩转平方米、默认流量这两个常数就有两份口径。
+ * 非水肥指令、以及处方自动指令（参数里没有分区）算不出包络，返回 undefined 让调用方不写这个字段。
+ */
+export function executionPlanOf(type: string, parameters: Record<string, unknown>): ExecutionPlan | undefined {
+  if (type !== "IRRIGATION" && type !== "FERTILIZATION") return undefined;
+  const zones = parameters.zones;
+  if (!Array.isArray(zones) || zones.length === 0) return undefined;
+  const flowM3h = Number(parameters.flowM3h);
+  try {
+    const plan = buildIrrigationPlan({
+      zones: zones as IrrigationPlanInput["zones"],
+      ...(Number.isFinite(flowM3h) && flowM3h > 0 ? { flowM3h } : {}),
+    });
+    return { totalDurationMin: plan.totalDurationMin, totalWaterVolume: plan.totalWaterVolume };
+  } catch {
+    return undefined;
+  }
+}
+
 /** 校验水肥相关参数，返回错误明细；空数组表示通过 */
 export function validateIrrigationParameters(parameters: Record<string, unknown>): string[] {
   const errors: string[] = [];

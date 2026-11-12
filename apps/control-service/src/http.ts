@@ -8,7 +8,7 @@ import type { OutboxService } from "@agri/mq";
 import { authorizeRequest } from "@agri/shared";
 
 import { buildFinishedEvent } from "./command-finished.js";
-import { buildIrrigationPlan, validateCommandParameters } from "./command-spec.js";
+import { buildIrrigationPlan, executionPlanOf, validateCommandParameters } from "./command-spec.js";
 import type { IrrigationPlanInput } from "./command-spec.js";
 import { CONTROL_STATUSES, canTransition, pendingMinutesOf } from "./control.repository.js";
 import { InMemoryControlCommandRepository } from "./control.repository.js";
@@ -243,6 +243,8 @@ export function createControlHttpServer(
           send(res, 400, null, traceId, parameterErrors.join("；"));
           return;
         }
+        // 把执行包络随指令一起入队：现场网关据此判断开多久、开到多少，不必自己重算方案
+        const plan = executionPlanOf(type, parameters);
         const command: ControlCommand = {
           id: randomUUID(),
           // 归属只由可信身份头决定，请求体自报的 tenantId 不参与
@@ -252,7 +254,7 @@ export function createControlHttpServer(
           operatorId,
           confirmedAt: new Date().toISOString(),
           type,
-          parameters,
+          parameters: plan === undefined ? parameters : { ...parameters, plan },
           status: "QUEUED",
           origin: "MANUAL",
           reason: typeof body.reason === "string" && body.reason !== "" ? body.reason : "人工确认执行",

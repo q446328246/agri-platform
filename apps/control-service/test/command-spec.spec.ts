@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Server } from "node:http";
 
-import { buildIrrigationPlan, validateCommandParameters, validateIrrigationParameters, waterVolumeOf } from "../src/command-spec.js";
+import { buildIrrigationPlan, executionPlanOf, validateCommandParameters, validateIrrigationParameters, waterVolumeOf } from "../src/command-spec.js";
 import { createControlHttpServer } from "../src/http.js";
 
 const servers: Server[] = [];
@@ -65,6 +65,22 @@ describe("水肥参数规范", () => {
     expect(plan.recipe).toEqual({ nitrogen: 2, phosphorus: 1, potassium: 1, totalKg: 60 });
     expect(plan.stir).toEqual({ durationMin: 15, rpm: 60 });
   });
+
+  it("现场执行包络取自方案，算不出就不给", () => {
+    const zones = [{ areaMu: 10, targetMm: 10 }];
+    const envelope = (input: Parameters<typeof buildIrrigationPlan>[0]) => {
+      const plan = buildIrrigationPlan(input);
+      return { totalDurationMin: plan.totalDurationMin, totalWaterVolume: plan.totalWaterVolume };
+    };
+    // 包络必须与预演同一口径：网关不重算，这里若漂移现场就按两份账开水阀
+    expect(executionPlanOf("IRRIGATION", { zones, flowM3h: 20 })).toEqual(envelope({ zones, flowM3h: 20 }));
+    // 流量缺省时由方案侧的权威常量推出，不在此重复写那个数
+    expect(executionPlanOf("IRRIGATION", { zones })).toEqual(envelope({ zones }));
+    // 处方自动指令只有明细没有分区，包络算不出来说明现场无法按量收口
+    expect(executionPlanOf("IRRIGATION", { items: [{ materialCode: "N", dosage: 5 }] })).toBeUndefined();
+    expect(executionPlanOf("FERTILIZATION", { zones })).toEqual(envelope({ zones }));
+    expect(executionPlanOf("ESTOP", { zones })).toBeUndefined();
+  });
 });
 
 describe("控制指令 HTTP 接口", () => {
@@ -78,6 +94,29 @@ describe("控制指令 HTTP 接口", () => {
     expect(response.status).toBe(400);
     const body = await response.json() as { message: string };
     expect(body.message).toContain("areaMu 必须大于 0");
+  });
+
+  it("入队将分区参数现算的执行包络随指令落库", async () => {
+    const base = await start(createControlHttpServer());
+    const parameters = { zones: [{ areaMu: 8, targetMm: 15 }], flowM3h: 25 };
+    const created = await fetch(`${base}/api/v1/control/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-user-id": "user-admin", "x-confirm-action": "CONFIRM" },
+      body: JSON.stringify({ deviceId: "device-pump-001", type: "IRRIGATION", parameters }),
+    });
+    expect(created.status).toBe(202);
+    const accepted = await created.json() as { data: { id: string } };
+
+    const listed = await fetch(`${base}/api/v1/control/commands?deviceId=device-pump-001&size=50`);
+    const body = await listed.json() as { data: { items: Array<{ id: string; parameters: Record<string, unknown> }> } };
+    const stored = body.data.items.find((item) => item.id === accepted.data.id)?.parameters;
+    if (!stored) throw new Error("入队的指令没有出现在设备队列里");
+    const plan = stored.plan as { totalDurationMin: number; totalWaterVolume: number };
+    const derived = buildIrrigationPlan(parameters);
+    // 现场网关读的就是这两个数：入队时算一次，网关侧不再重算
+    expect(plan).toEqual({ totalDurationMin: derived.totalDurationMin, totalWaterVolume: derived.totalWaterVolume });
+    // 原参数不因包络而丢失或改写
+    expect(stored.zones).toEqual(parameters.zones);
   });
 
   it("灌溉方案预演返回方案但不写指令表", async () => {

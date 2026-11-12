@@ -42,11 +42,15 @@ export interface ModbusProfile {
   label: string;
   /** 启停线圈（FC05）：开写 0xFF00，关写 0x0000 */
   switchCoil: number;
-  /** 运行反馈线圈（FC01）：为真才认为设备真的动了 */
-  runFeedbackCoil: number;
-  /** 故障线圈（FC01）：为真时指令收口成 FAILED */
-  faultCoil: number;
-  /** 累计计量；无计量设备为 null，回执只报到位不报作业量 */
+  /**
+   * 运行反馈（FC02 离散输入）：为真才认为设备真的动了。
+   * 反馈位与故障位刻意不走线圈地址空间：现场控制柜的线圈镜像跟着输出映像走，
+   * 用 FC01 读回来等于把自己刚写的值当反馈，急停会「立刻到位」。
+   */
+  runFeedbackInput: number;
+  /** 故障输入（FC02）：为真时指令收口成 FAILED */
+  faultInput: number;
+  /** 累计计量（FC03 保持寄存器，占两个寄存器）；无计量设备为 null，回执只报到位不报作业量 */
   meter: ModbusMeter | null;
   /** 允许配用的台账类型：只有执行类设备能被网关写线圈，传感器配剖面等于对着表计下令 */
   applicableTypes: DeviceType[];
@@ -62,24 +66,24 @@ export const MODBUS_PROFILES: Record<string, ModbusProfile> = {
   SWITCH_ONLY: {
     label: "启停型（只有开关，无计量）",
     switchCoil: 0x0000,
-    runFeedbackCoil: 0x0000,
-    faultCoil: 0x0001,
+    runFeedbackInput: 0x0000,
+    faultInput: 0x0001,
     meter: null,
     applicableTypes: ["IRRIGATION_PUMP", "IRRIGATION_VALVE", "FERTILIZER_VALVE", "INSECT_LAMP", "AGRICULTURAL_DRONE", "AUTO_TRACTOR"],
   },
   WATER_M3: {
     label: "灌溉计量（启停 + 累计流量 m³）",
     switchCoil: 0x0000,
-    runFeedbackCoil: 0x0000,
-    faultCoil: 0x0001,
+    runFeedbackInput: 0x0000,
+    faultInput: 0x0001,
     meter: { register: 0x0000, wordOrder: "HIGH_FIRST", scale: 0.001, unit: "m³" },
     applicableTypes: ["IRRIGATION_PUMP", "IRRIGATION_VALVE"],
   },
   FERTILIZER_L: {
     label: "水肥计量（启停 + 累计出液 L）",
     switchCoil: 0x0010,
-    runFeedbackCoil: 0x0010,
-    faultCoil: 0x0011,
+    runFeedbackInput: 0x0000,
+    faultInput: 0x0001,
     meter: { register: 0x0020, wordOrder: "LOW_FIRST", scale: 0.1, unit: "L" },
     applicableTypes: ["FERTILIZER_VALVE"],
   },
