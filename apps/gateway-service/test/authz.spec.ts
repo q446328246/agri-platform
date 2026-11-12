@@ -30,6 +30,9 @@ describe("网关路由鉴权策略", () => {
     expect(resolveRouteRule("GET", "/api/v1/zones/map")).toEqual({ kind: "permission", code: "plot:read" });
     expect(resolveRouteRule("POST", "/api/v1/zones/ZONE-01/plots")).toEqual({ kind: "permission", code: "plot:write" });
     expect(resolveRouteRule("POST", "/api/v1/control/commands")).toEqual({ kind: "permission", code: "device:control" });
+    // 设备通道（领取下发与执行回执）按回调凭证放行，与遥测上报、视频 AI 回调同一套
+    expect(resolveRouteRule("POST", "/api/v1/control/device/dispatch")).toEqual({ kind: "callback", write: "device:control" });
+    expect(resolveRouteRule("POST", "/api/v1/control/device/receipt")).toEqual({ kind: "callback", write: "device:control" });
     // 文件随地块、视频随设备
     expect(resolveRouteRule("GET", "/api/v1/files/1/content")).toEqual({ kind: "permission", code: "plot:read" });
     expect(resolveRouteRule("POST", "/api/v1/video/cameras/camera-001/ptz")).toEqual({ kind: "permission", code: "device:control" });

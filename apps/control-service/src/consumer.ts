@@ -77,6 +77,7 @@ function buildCommand(
     origin: "EVENT",
     sourceEventId: event.eventId,
     reason,
+    version: 1,
     createdAt: event.occurredAt,
   };
 }

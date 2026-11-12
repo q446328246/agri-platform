@@ -400,6 +400,20 @@
 - **前端**：`views/farm/Navigation.vue` 改为双模式（同一张底图）。「地块间转场」保持原勾选多点 + 机耕道沿路里程；「全地块覆盖」点选单块地，输入幅宽/重叠/方向（自动或手工）/作业与转移速度/入场起点，请求边界由 `parsePlotBoundary` 现取该地块几何（维度换回 `[经度, 纬度]`）并带上台账亩数。右侧显示方向（含「自动」标记）、带间距、带数、掉头次数、作业/转移里程、耗时、覆盖倍数与逐条作业带（`pass>1` 标「第 n 段」）；地图画目标地块金边 + 作业带绿实线（≤24 条才标序号）+ 掉头橙虚线 + 入场黄虚线。`api/index.ts` 增 `operationApi.planCoverage/getCoveragePlans` 与 `CoverageRequest/CoverageLane/CoveragePlan` 契约。
 - **用例**：新增 `apps/operation-service/test/coverage.spec.ts`（等距布带条数与里程、相邻带首尾相接无回头路、覆盖倍数与漏作业/重铺提示、含内环跳洞拆段、方向自动挑不劣于任何手工方向、入场里程与 `turnCount`、碎段合并与 2000 条上限拒算、退化几何拒算、入参校验、HTTP 200/400/历史与租户隔离）。**按 2026-11-11 起的交付口径未跑测试与构建，仅代码与用例落盘。**
 
+### 2026-11-12：控制指令回执状态机（下发确认 + 执行回执 + 急停到位）
+
+- **问题**：`control_commands` 只有 `QUEUED/SENT/FAILED` 三态，且**全仓没有任何一处代码把 QUEUED 推进到 SENT**——库里的 `SENT` 行全部来自演示种子 `010_demo_data.sql` 手填，真实链路入队即终点。设备到底收没收到、执行到不到位、失败卡在哪一步，事后无从复盘；急停这类必须确认到位的指令也没有任何约束（`smoke:filters` 的「指令·状态 status=SENT」项也只是在核对那几行种子）。
+- **生命周期**：`QUEUED → SENT → ACKED → DONE`，任一在途状态（`QUEUED/SENT/ACKED`）都可被 `FAILED` 收口，终态不可再改。跃迁表与合法性判断放在 `control.repository.ts`（`TRANSITIONS` + `canTransition`），同态重复上报**不算跃迁**，由端点按幂等返回。
+- **迁移 `031_control_command_receipt.sql`**：重建 `status` CHECK 纳入 `ACKED/DONE`，`type` CHECK 纳入 `ESTOP`（急停与农事四类共用一条回执链路）；新增 `sent_at`/`acked_at`/`finished_at`/`receipt_message`/`result_json`/`version`；补 `receipt_order_check`（先下发、再接收、后结束，乱序时间直接拒绝）与在途部分索引 `idx_control_commands_open`（`WHERE status IN ('QUEUED','SENT','ACKED')`，终态行不参与扫描）。旧行全部落在新枚举子集内，不回填。**未应用到任何库**（按交付口径只在用户点名时迁移）。
+- **仓储双模**：`transition()` 内存与 SQL 同一套语义——SQL 侧先 `statusOf(id)` 取库内真实状态判合法（取不到行 = 非法，早退 `null`），再 `UPDATE ... WHERE id = $1 AND version = $2 RETURNING` 做乐观锁，状态列用 `CASE` 只写当前跃迁该落的时间戳，`receipt_message`/`result_json` 用 `COALESCE` 保留旧值；版本冲突返回 `null`，由 HTTP 层翻成 409。查询新增 `pending`（只看非终态）与 `pendingOverMin`（超时），SQL 用 `now() - COALESCE(acked_at, sent_at, created_at) > make_interval(mins => $n)`，内存实现同口径。
+- **超时不靠定时改状态**：`pendingMinutesOf(command, now)` 由 `COALESCE(ackedAt, sentAt, createdAt)` **现算**，HTTP 侧 `toView()` 给每条在途指令附 `pendingMin` 与 `overdue`；阈值走 `CONTROL_RECEIPT_TIMEOUT_MIN`（默认 15 分钟，`.env.example` 已登记）。这样既不虚构设备行为，也不会把演示库里的历史指令自动刷成 FAILED。031 也**不回填** `sent_at`：历史 `SENT` 行没有可信的下发时刻，宁可回退到 `created_at` 显示「已等待 N 分钟」，也不造一个假时间——因此演示库里那几条 `010` 种子的 SENT 指令会带「超时未回执」红标，这是如实反映「无人确认设备收到」，不是缺陷。
+- **设备通道（复用 `DEVICE_CALLBACK_TOKEN` 白名单思路）**：
+  - `POST /api/v1/control/device/dispatch`：网关领取，`QUEUED → SENT`；未知指令 404，`FAILED` 后拒绝再下发 409，已推进过的幂等返回 200 现有记录（重试不用猜自己有没有领到）。
+  - `POST /api/v1/control/device/receipt`：`status` 只收 `ACKED/DONE/FAILED`（想报 `SENT` → 400 并指明改用 `dispatch`）；`FAILED` 必须带 `message`；`at` 给了就必须可解析；`result` 必须是 JSON 对象；**急停 `ESTOP` 的 `DONE` 必须带 `result.confirmed === true`**，否则 400「必须带到位确认」——服务端硬约束，不靠前端勾选。非法跃迁 409 带上当前状态，版本冲突 409 提示刷新。
+  - 服务侧 `authorizeRequest(..., callbackPaths: ["/api/v1/control/device"])`，与遥测/视频 AI 回调同一套 `x-device-token`；网关 `authz.ts` 增两条 `{ kind: "callback", write: "device:control" }` 路由。回调路径特意做成扁平的 `/device/dispatch|receipt` 而不是挂在 `/commands` 下——`matches()` 是 `pathname === path || startsWith(path + "/")`，挂 `/commands` 会让设备令牌顺带获得建指令的写权限。现场没有设备网络时，持 `device:control` 的用户也能人工回填，指令不会永远停在「已入队」。
+- **前端**：`views/device/Commands.vue` 状态筛选补「设备已接收/执行到位」，新增「只看超时未回执」复选（走 `?overdue=true`）、「生命周期」列（逐行铺 入队→下发→接收→到位/失败，逾期挂红标「超时未回执 N 分钟」）、「回执说明」列，以及按 `device:control` 权限显隐的操作列（`QUEUED` → 标记下发；`SENT/ACKED` → 登记回执；终态 → 已结单）。回执弹窗选 `ACKED/DONE/FAILED`，急停结单时强制勾「设备已确认到位」，`FAILED` 未填原因或急停未勾选时提交按钮 `disabled`（与服务端同口径，避免点开必 400）。`utils` 补五态文案与 tag 颜色 + `ESTOP: 急停`；`api` 增 `controlApi.dispatchCommand/reportReceipt` 与 `pending/overdue` 参数；`device/List.vue` 下发类型加急停，二次确认文案说明「需设备回报到位确认后才能结单」。
+- **用例**：新增 `apps/control-service/test/receipt.spec.ts`（跃迁表合法/非法与同态拒绝、内存跃迁版本 1→2→3 与时间字段按状态写入、陈旧版本与终态返回 `null`、`pendingMinutesOf` 取数口径、HTTP 全链路 202→提前 DONE 409→dispatch→重复 dispatch 幂等→ACKED→DONE→终态后 FAILED 409、报文校验 404/400、急停到位确认硬约束、`overdue=true` 只捞逾期两条且 `pending=true` 三条含终态排除、`describe.runIf(process.env.DB_URL)` 的真实库往返且 `finally` 清理）。网关 `authz.spec.ts` +2 条回调路由断言。**未跑验证**（按交付口径）。
+
 ## 下一步（中断后从这里继续）
 
 > **交付口径（2026-11-11 起，用户长期要求）**：改完直接 `git commit` + `git push`，**不再**跑单元测试 / `tsc -b` / `pnpm build` / `smoke-*` 冒烟 / 浏览器实操验证，**不再**重建或重新部署 `app`、`edge` 镜像。迁移文件照常编写，只在用户点名时才应用到库；风险较高的改动收工时注明「未跑验证」即可。
@@ -423,7 +437,7 @@
 8. **已完成**：管理员强制同步接口 `POST /api/v1/weather/sync-now`，需 `weather:sync` 权限（网关与服务双侧拦截）；bypass `dailyCallLimit`不走上限判定；前端 `views/weather/Index.vue` 顶部同步条仅管理员可见。单测新增 4 个端点用例 + 1 个 force bypass 用例 + 1 个网关路由用例（共 +6）。
 9. **已完成**：和风 WebAPI v7→v1 接口迁移（`QWeatherMapper` 抽象、`createQWeatherClientV1`、经纬度参数、`X-QW-Api-Key`/JWT 认证、16 方位中文映射、severity/color 三向映射）；v1 无专属 Host 时自动不启动同步器，适配本地开发；旧接口可通过 `QWEATHER_API_VERSION=v7` 过渡。单测 +11（基线 216 → 227），冒烟 88 项全 PASS。
 10. **未完成 / 外部依赖（需外部条件或用户确认，未擅自伪造）**：
-   - 真实设备闭环：农机/水肥/云台的实际执行回执、急停到位确认依赖现场硬件与协议对接，当前只有指令下发与人工/事件状态流转；
+   - 真实设备闭环：**平台侧的回执链路已补齐**（`#94`：`/control/device/dispatch` 领取 + `/control/device/receipt` 回执 + 急停到位确认 + 超时未回执标记，见 2026-11-12 一节）。仍缺的是**现场硬件与协议对接**——`dispatch`/`receipt` 的调用方（农机 T-Box、水肥机控制器、云台网关）需按此契约接入，平台不代替设备自发回执；
    - ~~覆盖式路径规划~~：`#92/#93` 已实现牛耕式全地块布带（见 2026-11-12 一节）；**真实农机调度**仍需现场硬件与协议对接，方案目前只落到「可叠加地图的连续路径 + 里程/耗时」，不下发到车；
    - 决策侧内置图像识别模型、模型效果评审：识别仍由 `video-service` AI 事件承接，平台侧不内置/不评测模型；
    - 溯源下游环节（加工 / 物流 / 质检）：无外部系统可对接，`#77` 链条时间轴已如实标注为待接入，不编造节点；
@@ -431,6 +445,9 @@
    - ~~地块合并 / 拆分~~：`#83` 已实现（凸包合并 + 操作人逐块画界拆分，见 2026-11-11 一节）；破坏性操作只经用户在前端真实触发，不代跑演示库。
    - ~~`PlotCreated` 下游消费~~：`#82` 已接入消息中心建档通知；`plot-service` 内存消费者仍只校验面积，属演示链路。
 11. **待决（需用户点头，未擅自处理）**：
+   - 超时未回执只做了「可见」（列表标记 + `overdue=true` 筛选），**没有**自动置 `FAILED` 或推事件——自动改状态需要 `control_outbox` 落库 + 中继（现只有 `plot_outbox`），且会覆盖现场迟到的真实回执，等用户确认策略；
+   - `EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环；
+   - `control_commands` 无 `tenant_id`（多租户下指令台账互通），跨服务租户改造超出本批范围；
    - `.qoder/repowiki/**` 每次收尾都会被自动重生成（本轮 40+ 文件 M/D/??），与功能改动分开单独征询是否提交，目前仍未入库；
    - 内存模式与 SQL 模式的行为差异（如 016 CHECK 要求 `CANCELLED` 必留 `cancelled_at`，而内存种子留空）要不要抹平；
    - 合并的凸包口径：选中互不相邻地块会框进中间空地，是否改为要求相邻校验或允许手工改边界；
@@ -746,3 +763,4 @@
 | 2026-11-11 | 重建 `app`+`edge` 后经网关提交超限切法（92.25 亩地块，两块各 69.94 / 合计 139.88） | 400「子地块合计 139.88 亩超过原地块 92.25 亩」，演示库基线前后逐项相同（23 块 / 1271.07 亩、留痕 15、事件 26）→ 拒绝路径零写入；edge 产物含 `Split-CJcjH4nz.js` |
 | 2026-11-11 | 迁移 `030` 一次性库全量应用 + 演示库应用 + 冒烟复跑 | 8 行 / 6 类型 / 4 状态，016 CHECK 零违规，重放 `INSERT 0 0` 幂等；`agri` 基线仅任务数 0→8（地块 23 / 1271.07 亩、消息 35、留痕 15、事件 26 未动）；`smoke:demo` 37/37、`smoke:filters` 38/38 全 PASS（此前「农事任务 ≥8」与任务筛选两项 FAIL 转绿） |
 | 2026-11-12 | 覆盖式作业规划（`coverage.ts` + 两条 HTTP 路由 + 导航页双模式 + `coverage.spec.ts`） | **未跑验证**（按 2026-11-11 起的交付口径：不跑测试 / 不做 `tsc`、`build`，不重建镜像），仅静态核对字段口径与面积常数一致；风险点：新算法的条数/里程断言未经实际执行，前端未经浏览器操作确认 |
+| 2026-11-12 | 控制指令回执状态机（迁移 `031` + `control.repository.ts` 跃迁/乐观锁 + `/control/device/dispatch\|receipt` + 网关两条回调路由 + `Commands.vue` 生命周期列与回执弹窗 + `receipt.spec.ts`） | **未跑验证**，迁移也未应用到任何库。静态核对项：`SENT/ACKED/DONE`  CHECK 与 `PENDING_STATUSES`/`TRANSITIONS` 一致、`create` 的两处调用方（`http.ts`/`consumer.ts`）都补了必填 `version: 1`、`canTransition` 对未知状态返回 false、`callbackPaths` 用扁平 `/device` 不与 `/commands` 构成前缀关系、`smoke-consumers`/`smoke-gateway` 仍断言 `QUEUED` 未受影响、超时分钟数按 `COALESCE(acked,sent,created)` 手算复核（40/2/30 与终态四条 → overdue 命中 `cmd-old`+`cmd-sent`）。风险点：SQL 侧 `transition` 的 `CASE`/`COALESCE` 参数序（$1 id / $2 version / $3 status / $4 at / $5 message / $6 result）未经真实库执行；前端未经浏览器操作确认 |

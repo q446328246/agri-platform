@@ -791,12 +791,20 @@ export interface CoveragePlan {
 }
 
 export const controlApi = {
-  getCommands(params?: { plotCode?: string; origin?: 'EVENT' | 'MANUAL'; type?: string; status?: string; deviceId?: string; from?: string; to?: string; page?: number; size?: number }): Promise<PageResult<any>> {
+  getCommands(params?: { plotCode?: string; origin?: 'EVENT' | 'MANUAL'; type?: string; status?: string; deviceId?: string; from?: string; to?: string; pending?: boolean; overdue?: boolean; page?: number; size?: number }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/control/commands', cleanParams(params))
   },
   /** 人工下发控制指令：需二次确认头，reason 写明处置依据供指令列表与生产档案复盘 */
   sendCommand(data: { deviceId: string; plotCode?: string; type: string; parameters?: Record<string, unknown>; reason?: string }): Promise<any> {
     return post<any>('/control/commands', data, { headers: { 'X-Confirm-Action': 'CONFIRM' } })
+  },
+  /** 标记指令已下发到设备（QUEUED→SENT）；设备网关接入前由人工确认这一步真实发生 */
+  dispatchCommand(commandId: string): Promise<any> {
+    return post<any>('/control/device/dispatch', { commandId })
+  },
+  /** 登记设备回执：ACKED 已接收、DONE 执行到位、FAILED 失败（急停的 DONE 必须带到位确认） */
+  reportReceipt(data: { commandId: string; status: 'ACKED' | 'DONE' | 'FAILED'; message?: string; result?: Record<string, unknown> }): Promise<any> {
+    return post<any>('/control/device/receipt', data)
   },
   /** 变量灌溉方案预演：只算不执行，返回分区时序与累计供水曲线 */
   buildIrrigationPlan(data: IrrigationPlanInput): Promise<IrrigationPlan> {

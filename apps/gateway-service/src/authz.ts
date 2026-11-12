@@ -86,6 +86,9 @@ export function resolveRouteRule(method: string, pathname: string): RouteRule {
   if (method === "POST" && path === "/api/v1/telemetry/report") return { kind: "callback", write: "telemetry:write" };
   if (method === "POST" && path === "/api/v1/telemetry/pest-events") return { kind: "callback", write: "telemetry:write" };
   if (method === "POST" && path === "/api/v1/video/ai-events") return { kind: "callback", write: "device:control" };
+  // 控制指令的设备通道：网关领取与执行回执同用这套共享凭证
+  if (method === "POST" && path === "/api/v1/control/device/dispatch") return { kind: "callback", write: "device:control" };
+  if (method === "POST" && path === "/api/v1/control/device/receipt") return { kind: "callback", write: "device:control" };
   if (matchesPrefix(path, "/api/v1/auth/userinfo") || matchesPrefix(path, "/api/v1/auth/logout")) return { kind: "session" };
   if (matchesPrefix(path, "/api/v1/auth/users") || matchesPrefix(path, "/api/v1/auth/internal")) return { kind: "permission", code: "system:user" };
   if (matchesPrefix(path, "/api/v1/platform/roles")) return { kind: "permission", code: "system:role" };

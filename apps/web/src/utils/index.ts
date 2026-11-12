@@ -105,24 +105,33 @@ export function getControlTypeText(type: string): string {
     SEEDING: '播种',
     IRRIGATION: '灌溉',
     WEEDING: '除草',
-    FERTILIZATION: '水肥'
+    FERTILIZATION: '水肥',
+    ESTOP: '急停'
   }
   return map[type] || type
 }
 
+/** 控制指令生命周期：入队 → 已下发 → 设备已接收 → 执行到位，任一在途状态都可能失败 */
 export function getControlStatusText(status: string): string {
   const map: Record<string, string> = {
     QUEUED: '已入队',
     SENT: '已下发',
-    FAILED: '下发失败'
+    ACKED: '设备已接收',
+    DONE: '执行到位',
+    FAILED: '失败'
   }
   return map[status] || status
 }
 
-export function getControlStatusType(status: string): 'warning' | 'success' | 'danger' {
-  if (status === 'SENT') return 'success'
-  if (status === 'FAILED') return 'danger'
-  return 'warning'
+export function getControlStatusType(status: string): 'primary' | 'success' | 'info' | 'warning' | 'danger' {
+  const map: Record<string, 'primary' | 'success' | 'info' | 'warning' | 'danger'> = {
+    QUEUED: 'info',
+    SENT: 'warning',
+    ACKED: 'primary',
+    DONE: 'success',
+    FAILED: 'danger'
+  }
+  return map[status] || 'info'
 }
 
 /** 生产档案事件类型：事件自动写入与人工录入并存，链条含投入品、农事、处方、归档、采收 */

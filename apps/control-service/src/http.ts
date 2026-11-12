@@ -7,6 +7,7 @@ import { authorizeRequest } from "@agri/shared";
 
 import { buildIrrigationPlan, validateCommandParameters } from "./command-spec.js";
 import type { IrrigationPlanInput } from "./command-spec.js";
+import { CONTROL_STATUSES, canTransition, pendingMinutesOf } from "./control.repository.js";
 import { InMemoryControlCommandRepository } from "./control.repository.js";
 import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, ControlCommandType, ControlOrigin } from "./control.repository.js";
 
@@ -15,9 +16,23 @@ import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, Co
  *
  * 人工指令必须同时带操作人身份与二次确认头，自动指令只由事件消费写入，
  * 因此这里不提供「无身份下发」的入口。
+ *
+ * 指令的生命周期靠 `/api/v1/control/device/*` 这条设备通道推进：网关领取即
+ * QUEUED→SENT，设备回执再推 ACKED/DONE/FAILED。该通道与遥测、视频 AI 回调共用
+ * `DEVICE_CALLBACK_TOKEN`（x-device-token），现场没有设备网络时也允许持
+ * device:control 的用户人工回填，避免指令永远停在「已入队」。
  */
 
-const COMMAND_TYPES: ControlCommandType[] = ["SEEDING", "IRRIGATION", "WEEDING", "FERTILIZATION"];
+const COMMAND_TYPES: ControlCommandType[] = ["SEEDING", "IRRIGATION", "WEEDING", "FERTILIZATION", "ESTOP"];
+
+/** 回执可上报的目标状态；SENT 由 dispatch 负责，不算回执 */
+const RECEIPT_STATUSES: ControlCommandStatus[] = ["ACKED", "DONE", "FAILED"];
+
+/** 超时未回执的默认阈值（分钟），可用 CONTROL_RECEIPT_TIMEOUT_MIN 调整 */
+const DEFAULT_RECEIPT_TIMEOUT_MIN = 15;
+
+/** 列表与回执响应附带的在途信息 */
+type CommandView = ControlCommand & { pendingMin?: number; overdue: boolean };
 
 function send<T>(res: ServerResponse, status: number, data: T | null, traceId: string, message = ""): void {
   const body: ApiResponse<T> = {
@@ -48,8 +63,51 @@ function endOfDay(value: string): string {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:59.999Z` : value;
 }
 
+/** 取必填文本字段；抛错由外层统一回 400 */
+function requiredText(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim() === "") throw new Error(`${field} 不能为空`);
+  return value.trim();
+}
+
+/** 回执时间：缺省取当前时间，给了就必须可解析 */
+function receiptAt(value: unknown): string {
+  if (value === undefined || value === null || value === "") return new Date().toISOString();
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new Error("at 需为 ISO 时间字符串");
+  return new Date(value).toISOString();
+}
+
+function receiptText(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") throw new Error(`${field} 需为文本`);
+  return value.trim();
+}
+
+function receiptResult(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error("result 需为 JSON 对象");
+  return value as Record<string, unknown>;
+}
+
+/** 给指令附加在途信息：终态没有 pendingMin，超阈值即标记 overdue */
+function toView(command: ControlCommand, timeoutMin: number, nowMs: number): CommandView {
+  const waited = pendingMinutesOf(command, nowMs);
+  return { ...command, ...(waited === undefined ? {} : { pendingMin: waited }), overdue: waited !== undefined && waited >= timeoutMin };
+}
+
 /** 解析分页与过滤条件，页码与条数在边界内被修正 */
-function query(search: URLSearchParams): { plotCode?: string; origin?: ControlOrigin; type?: ControlCommandType; status?: ControlCommandStatus; deviceId?: string; from?: string; to?: string; page: number; size: number } {
+function query(search: URLSearchParams, timeoutMin: number): {
+  plotCode?: string;
+  origin?: ControlOrigin;
+  type?: ControlCommandType;
+  status?: ControlCommandStatus;
+  deviceId?: string;
+  from?: string;
+  to?: string;
+  pending?: boolean;
+  pendingOverMin?: number;
+  page: number;
+  size: number;
+} {
   const page = Math.max(1, Number(search.get("page") || 1));
   const size = Math.min(200, Math.max(1, Number(search.get("size") || 20)));
   const plotCode = search.get("plotCode");
@@ -59,14 +117,18 @@ function query(search: URLSearchParams): { plotCode?: string; origin?: ControlOr
   const deviceId = search.get("deviceId");
   const from = search.get("from");
   const to = search.get("to");
+  const pending = search.get("pending") === "true";
+  const overdue = search.get("overdue") === "true";
   return {
     ...(plotCode ? { plotCode } : {}),
     ...(origin === "EVENT" || origin === "MANUAL" ? { origin } : {}),
     ...(type && COMMAND_TYPES.includes(type as ControlCommandType) ? { type: type as ControlCommandType } : {}),
-    ...(status === "QUEUED" || status === "SENT" || status === "FAILED" ? { status: status as ControlCommandStatus } : {}),
+    ...(status && (CONTROL_STATUSES as readonly string[]).includes(status) ? { status: status as ControlCommandStatus } : {}),
     ...(deviceId ? { deviceId } : {}),
     ...(from ? { from } : {}),
     ...(to ? { to: endOfDay(to) } : {}),
+    ...(pending || overdue ? { pending: true } : {}),
+    ...(overdue ? { pendingOverMin: timeoutMin } : {}),
     page,
     size,
   };
@@ -74,7 +136,9 @@ function query(search: URLSearchParams): { plotCode?: string; origin?: ControlOr
 
 export function createControlHttpServer(
   repository: ControlCommandRepository = new InMemoryControlCommandRepository(),
+  options: { receiptTimeoutMin?: number } = {},
 ): Server {
+  const timeoutMin = Math.max(1, Number(options.receiptTimeoutMin ?? process.env.CONTROL_RECEIPT_TIMEOUT_MIN ?? DEFAULT_RECEIPT_TIMEOUT_MIN) || DEFAULT_RECEIPT_TIMEOUT_MIN);
   return createServer(async (req, res) => {
     const traceId = trace(req);
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -83,13 +147,18 @@ export function createControlHttpServer(
         send(res, 200, { status: "ok", service: "control" }, traceId);
         return;
       }
-      // 查指令需要设备查看权限，下发指令需要设备控制权限
-      const denied = authorizeRequest(req, { read: "device:read", write: "device:control" });
+      // 查指令需要设备查看权限，下发指令需要设备控制权限；设备通道另认 x-device-token
+      const denied = authorizeRequest(req, {
+        read: "device:read",
+        write: "device:control",
+        callbackPaths: ["/api/v1/control/device"],
+      });
       if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
 
       if (req.method === "GET" && url.pathname === "/api/v1/control/commands") {
-        const page: PageResult<ControlCommand> = await repository.page(query(url.searchParams));
-        send(res, 200, page, traceId);
+        const nowMs = Date.now();
+        const page: PageResult<ControlCommand> = await repository.page(query(url.searchParams, timeoutMin));
+        send(res, 200, { ...page, items: page.items.map((item) => toView(item, timeoutMin, nowMs)) }, traceId);
         return;
       }
 
@@ -124,6 +193,7 @@ export function createControlHttpServer(
           status: "QUEUED",
           origin: "MANUAL",
           reason: typeof body.reason === "string" && body.reason !== "" ? body.reason : "人工确认执行",
+          version: 1,
           createdAt: new Date().toISOString(),
         };
         if (!command.deviceId) {
@@ -131,7 +201,65 @@ export function createControlHttpServer(
           return;
         }
         await repository.create(command);
-        send(res, 202, command, traceId);
+        send(res, 202, toView(command, timeoutMin, Date.now()), traceId);
+        return;
+      }
+
+      // 设备通道 ①：网关领取指令，把入队推进为已下发。已推进过的指令按幂等返回，
+      // 免得网关重试时拿到 409 再猜自己有没有领到过。
+      if (req.method === "POST" && url.pathname === "/api/v1/control/device/dispatch") {
+        const body = await json(req);
+        const target = await repository.find(requiredText(body.commandId, "commandId"));
+        if (!target) { send(res, 404, null, traceId, "指令不存在"); return; }
+        if (target.status === "FAILED") { send(res, 409, null, traceId, "指令已标记失败，不能再次下发"); return; }
+        if (target.status !== "QUEUED") { send(res, 200, toView(target, timeoutMin, Date.now()), traceId); return; }
+        const message = receiptText(body.message, "message");
+        const updated = await repository.transition({
+          id: target.id,
+          status: "SENT",
+          at: receiptAt(body.at),
+          version: target.version,
+          ...(message === undefined ? {} : { message }),
+        });
+        if (!updated) { send(res, 409, null, traceId, "指令状态已被其它回执推进，请刷新后重试"); return; }
+        send(res, 200, toView(updated, timeoutMin, Date.now()), traceId);
+        return;
+      }
+
+      // 设备通道 ②：执行回执。SENT/ACKED → ACKED/DONE，任一在途状态都可被 FAILED 收口；
+      // 急停指令的 DONE 必须带 result.confirmed=true，否则视为「没确认到位」不予结单。
+      if (req.method === "POST" && url.pathname === "/api/v1/control/device/receipt") {
+        const body = await json(req);
+        const status = requiredText(body.status, "status") as ControlCommandStatus;
+        if (!RECEIPT_STATUSES.includes(status)) {
+          send(res, 400, null, traceId, `status 需为 ${RECEIPT_STATUSES.join("/")} 之一，下发确认请用 /device/dispatch`);
+          return;
+        }
+        const message = receiptText(body.message, "message");
+        const result = receiptResult(body.result);
+        if (status === "FAILED" && message === undefined) throw new Error("FAILED 回执必须说明失败原因（message）");
+        const target = await repository.find(requiredText(body.commandId, "commandId"));
+        if (!target) { send(res, 404, null, traceId, "指令不存在"); return; }
+        // 急停的 DONE 必须有到位确认，否则等于「没人确认设备真的停了」就结单
+        if (target.type === "ESTOP" && status === "DONE" && result?.confirmed !== true) {
+          send(res, 400, null, traceId, "急停指令的执行完成回执必须带到位确认（result.confirmed=true）");
+          return;
+        }
+        if (target.status === status) { send(res, 200, toView(target, timeoutMin, Date.now()), traceId); return; }
+        if (!canTransition(target.status, status)) {
+          send(res, 409, null, traceId, `指令当前状态为 ${target.status}，不接受 ${status} 回执`);
+          return;
+        }
+        const updated = await repository.transition({
+          id: target.id,
+          status,
+          at: receiptAt(body.at),
+          version: target.version,
+          ...(message === undefined ? {} : { message }),
+          ...(result === undefined ? {} : { result }),
+        });
+        if (!updated) { send(res, 409, null, traceId, "指令状态已被其它回执推进，请刷新后重试"); return; }
+        send(res, 200, toView(updated, timeoutMin, Date.now()), traceId);
         return;
       }
 

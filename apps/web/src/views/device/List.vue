@@ -451,7 +451,7 @@ async function submitConfig() {
 
 /* ---------------- 控制指令 ---------------- */
 
-const commandTypeOptions = ['IRRIGATION', 'FERTILIZATION', 'SEEDING', 'WEEDING'].map((value) => ({ value, label: getControlTypeText(value) }))
+const commandTypeOptions = ['IRRIGATION', 'FERTILIZATION', 'SEEDING', 'WEEDING', 'ESTOP'].map((value) => ({ value, label: getControlTypeText(value) }))
 
 const commandVisible = ref(false)
 const sending = ref(false)
@@ -563,8 +563,10 @@ async function submitCommand() {
     return
   }
   const summary = `${commandForm.deviceName}：${getControlTypeText(commandForm.type)}${isWaterFertilizer.value ? `，${commandForm.zones.length} 个分区` : ''}`
+  // 急停的「执行到位」必须由设备侧到位确认背书，确认框里先说清楚
+  const followUp = commandForm.type === 'ESTOP' ? '急停指令需设备回报到位确认后才能结单。' : ''
   try {
-    await ElMessageBox.confirm(`确认下发指令？${summary}。指令入队后即进入执行队列。`, '二次确认', {
+    await ElMessageBox.confirm(`确认下发指令？${summary}。指令入队后即进入执行队列，${followUp}后续在「控制指令」页按回执推进状态。`, '二次确认', {
       type: 'warning',
       confirmButtonText: '确认下发',
       cancelButtonText: '取消'

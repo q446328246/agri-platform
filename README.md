@@ -250,6 +250,14 @@ agri-platform-nodejs-scaffold/
   翻译成自动指令（执行人 `system:event`、保留 `sourceEventId`），`trace-service` 把处方
   写入生产档案（追溯码 `TR-PRES-<eventId>`）；重复事件由幂等键、指令唯一索引与档案
   追溯码三层兜住。植保处方与其它指标越限不自动下令，仍由消息中心提醒人工处置。
+- **指令要有回执才算下过**：控制指令走 `QUEUED → SENT → ACKED → DONE`，任一在途状态都可被 `FAILED` 收口，
+  终态不可再改；跃迁表 + `version` 乐观锁在 `control.repository.ts`，设备通道 `POST /control/device/dispatch`
+  领取、`POST /control/device/receipt` 回执（迁移 031 补时间戳、结果快照与时序 CHECK）。该通道与遥测、视频 AI
+  回调共用 `DEVICE_CALLBACK_TOKEN`，路径特意做成扁平的 `/device/*` 而非挂在 `/commands` 下——白名单匹配是
+  前缀式的，挂上去等于把建指令的写权限一起交给设备令牌。急停（`ESTOP`）的 `DONE` **必须**带
+  `result.confirmed=true`，服务端拒绝「没人确认设备真停了」就结单。超时未回执只做**可见**不做**自动置败**：
+  `pendingMin`/`overdue` 由 `COALESCE(acked_at, sent_at, created_at)` 与 `CONTROL_RECEIPT_TIMEOUT_MIN`（默认 15 分钟）
+  现算，定时刷 FAILED 会覆盖现场迟到的真实回执，需要 `control_outbox` 与事件推送配合，属待决项。
 - **消息先过偏好再去重**：消息文案与去重键在 `@agri/contracts` 的 `MESSAGE_TEMPLATES` 登记，
   契约包只做纯函数渲染。消费侧先查「租户 + 主题」偏好：关闭订阅直接跳过，低于最低级别也跳过；
   越限告警按「地块 + 指标 + 方向 + 小时」聚合，处方通知按来源事件唯一。没有偏好记录等同
