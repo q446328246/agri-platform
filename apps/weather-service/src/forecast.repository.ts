@@ -239,8 +239,8 @@ export class InMemoryForecastRepository implements ForecastRepository {
   private readonly hours: WeatherHourlyPoint[] = [];
 
   constructor(seed: { days?: WeatherForecastDay[]; hours?: WeatherHourlyPoint[] } = {}) {
-    this.days.push(...(seed.days ?? []));
-    this.hours.push(...(seed.hours ?? []));
+    this.days.push(...(seed.days ?? []).map((row) => ({ ...row })));
+    this.hours.push(...(seed.hours ?? []).map((row) => ({ ...row })));
   }
 
   async upcoming(from: Date, days: number): Promise<WeatherForecastDay[]> {
@@ -250,7 +250,8 @@ export class InMemoryForecastRepository implements ForecastRepository {
     return [...this.days]
       .filter((row) => row.date >= start && row.date < end)
       .sort((a, b) => a.date.localeCompare(b.date))
-      .slice(0, span);
+      .slice(0, span)
+      .map((row) => ({ ...row }));
   }
 
   async hourly(from: Date, hours: number): Promise<WeatherHourlyPoint[]> {
@@ -258,7 +259,8 @@ export class InMemoryForecastRepository implements ForecastRepository {
     return [...this.hours]
       .filter((row) => row.hourAt >= start)
       .sort((a, b) => a.hourAt.localeCompare(b.hourAt))
-      .slice(0, Math.max(1, Math.min(168, hours)));
+      .slice(0, Math.max(1, Math.min(168, hours)))
+      .map((row) => ({ ...row }));
   }
 
   async lastRefreshedAt(): Promise<string | undefined> {
@@ -269,27 +271,29 @@ export class InMemoryForecastRepository implements ForecastRepository {
   async create(_tx: unknown, input: CreateForecastInput): Promise<WeatherForecastDay> {
     const day: WeatherForecastDay = { id: ulid(), ...input };
     this.days.push(day);
-    return day;
+    return { ...day };
   }
 
   async upsertDay(input: CreateForecastInput): Promise<WeatherForecastDay> {
     const hit = this.days.find((row) => row.date === input.date && row.city === input.city);
     if (hit) {
       Object.assign(hit, input);
-      return hit;
+      return { ...hit };
     }
     const day: WeatherForecastDay = { id: ulid(), ...input };
     this.days.push(day);
-    return day;
+    return { ...day };
   }
 
   async upsertHour(hour: WeatherHourlyPoint): Promise<void> {
     const hit = this.hours.find((row) => row.hourAt === hour.hourAt);
     if (hit) {
-      Object.assign(hit, hour);
+      // 时次已存在时沿用原 id，与 SQL 的 ON CONFLICT (hour_at) DO UPDATE 一致：
+      // 照单 Object.assign 会把 id 也换掉，两套模式下同一时次的记录标识就对不上了。
+      Object.assign(hit, hour, { id: hit.id });
       return;
     }
-    this.hours.push(hour);
+    this.hours.push({ ...hour });
   }
 
   async deleteHoursBefore(from: Date): Promise<number> {
@@ -307,7 +311,7 @@ export class InMemoryForecastRepository implements ForecastRepository {
   }
 
   all(): WeatherForecastDay[] {
-    return [...this.days];
+    return this.days.map((row) => ({ ...row }));
   }
 }
 

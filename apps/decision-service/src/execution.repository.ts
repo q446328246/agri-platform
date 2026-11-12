@@ -162,25 +162,30 @@ export class InMemoryExecutionRepository implements ExecutionRepository {
 
   async record(input: PrescriptionExecution): Promise<PrescriptionExecution | null> {
     if (this.rows.some((row) => row.commandId === input.commandId)) return null;
-    this.rows.unshift({ ...input });
-    return input;
+    const row = structuredClone(input);
+    this.rows.unshift(row);
+    return structuredClone(row);
   }
 
   async list(query: ExecutionQuery = {}): Promise<PrescriptionExecution[]> {
     const limit = Math.min(200, Math.max(1, query.limit ?? 50));
+    // 与 SQL 的 ORDER BY finished_at DESC, id DESC 同序：插入序在补录旧结单时会把历史排到最后一条之后
     return this.rows
       .filter((row) => (query.prescriptionId ? row.prescriptionId === query.prescriptionId : true))
       .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
-      .slice(0, limit);
+      .sort((a, b) => b.finishedAt.localeCompare(a.finishedAt) || b.id.localeCompare(a.id))
+      .slice(0, limit)
+      .map((row) => structuredClone(row));
   }
 
   async findByCommandId(commandId: string): Promise<PrescriptionExecution | null> {
-    return this.rows.find((row) => row.commandId === commandId) ?? null;
+    const row = this.rows.find((item) => item.commandId === commandId);
+    return row ? structuredClone(row) : null;
   }
 
   /** 全部记录，供测试断言 */
   all(): PrescriptionExecution[] {
-    return [...this.rows];
+    return this.rows.map((row) => structuredClone(row));
   }
 }
 

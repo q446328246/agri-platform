@@ -1,5 +1,6 @@
 import type { PrismaClientLike, Tx } from "@agri/db";
 import type { PageResult } from "@agri/contracts";
+import { keywordHits, likePattern } from "@agri/shared";
 
 /**
  * 消息中心仓储。
@@ -141,7 +142,7 @@ export class SqlMessageRepository implements MessageRepository {
       conditions.push(`plot_code = $${values.length}`);
     }
     if (query.keyword !== undefined && query.keyword !== "") {
-      values.push(`%${query.keyword}%`);
+      values.push(likePattern(query.keyword));
       conditions.push(`(title ILIKE $${values.length} OR content ILIKE $${values.length})`);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -210,40 +211,48 @@ export class InMemoryMessageRepository implements MessageRepository {
   }
 
   async create(input: MessageRecord): Promise<MessageRecord | null> {
+    // 三条去重口径与库里的唯一索引一一对应：主键 id、来源事件（全局）、
+    // 去重键（迁移 006 的索引带 tenant_id，跨租户不该互相顶掉）。
+    if (this.rows.some((row) => row.id === input.id)) return null;
     if (input.sourceEventId !== undefined && this.rows.some((row) => row.sourceEventId === input.sourceEventId)) {
       return null;
     }
-    if (input.dedupeKey !== undefined && this.rows.some((row) => row.dedupeKey === input.dedupeKey)) {
+    if (input.dedupeKey !== undefined && this.rows.some((row) => row.tenantId === input.tenantId && row.dedupeKey === input.dedupeKey)) {
       return null;
     }
-    const record: MessageRecord = { ...input };
+    // 新建的消息一律是未读，与 SQL 侧 INSERT 写死 FALSE 同一口径：
+    // 「一入库就标已读」的入口没有业务含义，留着只会让两套模式给出不同的未读角标。
+    const record: MessageRecord = { ...input, read: false };
     this.rows.unshift(record);
-    return record;
+    return structuredClone(record);
   }
 
   async page(query: MessageQuery): Promise<PageResult<MessageRecord>> {
+    const keyword = query.keyword;
     const filtered = this.rows
       .filter((row) => (query.tenantId ? row.tenantId === query.tenantId : true))
       .filter((row) => (query.type ? row.type === query.type : true))
       .filter((row) => (query.level ? row.level === query.level : true))
       .filter((row) => (query.read === undefined ? true : row.read === query.read))
       .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
-      .filter((row) => (query.keyword ? `${row.title}${row.content}`.includes(query.keyword) : true))
+      .filter((row) => (keyword ? keywordHits(keyword, [row.title, row.content]) : true))
       .filter((row) => (query.from ? row.createdAt >= query.from : true))
       .filter((row) => (query.to ? row.createdAt <= query.to : true));
+    filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
     const start = (query.page - 1) * query.size;
-    return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
+    return toPage(filtered.slice(start, start + query.size).map((row) => structuredClone(row)), filtered.length, query.page, query.size);
   }
 
   async findById(id: string, tenantId?: string): Promise<MessageRecord | null> {
-    return this.rows.find((row) => row.id === id && (tenantId ? row.tenantId === tenantId : true)) ?? null;
+    const row = this.rows.find((item) => item.id === id && (tenantId ? item.tenantId === tenantId : true));
+    return row ? structuredClone(row) : null;
   }
 
   async markRead(id: string, tenantId?: string): Promise<MessageRecord | null> {
     const row = this.rows.find((item) => item.id === id && (tenantId ? item.tenantId === tenantId : true));
     if (!row) return null;
     row.read = true;
-    return row;
+    return structuredClone(row);
   }
 
   async unreadCount(tenantId?: string): Promise<number> {

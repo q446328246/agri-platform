@@ -123,11 +123,14 @@ export class SqlRuleRepository implements RuleRepository {
   }
 
   async save(rule: TelemetryRule): Promise<TelemetryRule> {
-    await this.client.$executeRawUnsafe(
+    // ON CONFLICT 保留的是原有行的 id（指标+地块+级别这一档只有一行），
+    // 所以返回值必须回读那一行：把调用方带来的新 id 原样返回，前端下一步按 id 操作就找不到规则了。
+    const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `INSERT INTO telemetry_rules (id, metric, plot_code, direction, threshold, level, message, enabled, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (metric, plot_code, level) DO UPDATE SET direction = EXCLUDED.direction, threshold = EXCLUDED.threshold,
-         message = EXCLUDED.message, enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at`,
+         message = EXCLUDED.message, enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at
+       RETURNING id, metric, plot_code, direction, threshold, level, message, enabled, updated_at`,
       rule.id,
       rule.metric,
       rule.plotCode,
@@ -138,7 +141,9 @@ export class SqlRuleRepository implements RuleRepository {
       rule.enabled,
       rule.updatedAt,
     );
-    return rule;
+    const saved = rows[0];
+    if (!saved) throw new Error("阈值规则写入失败");
+    return toRule(saved);
   }
 
   async remove(metric: string, plotCode?: string, level?: RuleLevel): Promise<boolean> {
@@ -170,7 +175,10 @@ export class InMemoryRuleRepository implements RuleRepository {
   }
 
   async list(): Promise<TelemetryRule[]> {
-    return [...this.rows.values()].sort((a, b) => `${a.metric}${a.plotCode}${a.level}`.localeCompare(`${b.metric}${b.plotCode}${b.level}`));
+    // 与 SQL 的 ORDER BY metric, plot_code, level 逐字段比较，而不是把三段拼成一串比
+    return [...this.rows.values()].sort(
+      (a, b) => a.metric.localeCompare(b.metric) || a.plotCode.localeCompare(b.plotCode) || a.level.localeCompare(b.level),
+    );
   }
 
   async findEnabled(metric: string, plotCode?: string): Promise<TelemetryRule[]> {
@@ -180,8 +188,14 @@ export class InMemoryRuleRepository implements RuleRepository {
   }
 
   async save(rule: TelemetryRule): Promise<TelemetryRule> {
-    this.rows.set(ruleKey(rule.metric, rule.plotCode, rule.level), rule);
-    return rule;
+    // 与 SQL 的 ON CONFLICT DO UPDATE 同一口径：同一档规则保留原有 id 与键字段，
+    // 只覆盖方向、阈值、文案、开关与更新时间。整行替换会让每次保存都换掉规则 id。
+    const existing = this.rows.get(ruleKey(rule.metric, rule.plotCode, rule.level));
+    const saved: TelemetryRule = existing
+      ? { ...existing, direction: rule.direction, threshold: rule.threshold, message: rule.message, enabled: rule.enabled, updatedAt: rule.updatedAt }
+      : { ...rule };
+    this.rows.set(ruleKey(saved.metric, saved.plotCode, saved.level), saved);
+    return { ...saved };
   }
 
   async remove(metric: string, plotCode?: string, level?: RuleLevel): Promise<boolean> {

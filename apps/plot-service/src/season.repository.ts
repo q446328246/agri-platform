@@ -231,28 +231,32 @@ export class InMemoryCropSeasonRepository implements CropSeasonRepository {
   private readonly rows: CropSeason[] = [];
 
   constructor(seed: CropSeason[] = []) {
-    this.rows.push(...seed);
+    this.rows.push(...seed.map((row) => structuredClone(row)));
   }
 
   async listByTenant(tenantId: string): Promise<CropSeason[]> {
     return this.rows
       .filter((row) => row.tenantId === tenantId && row.deletedAt === undefined)
-      .sort((a, b) => b.seasonYear - a.seasonYear || b.seasonIndex - a.seasonIndex || b.createdAt.localeCompare(a.createdAt));
+      .sort((a, b) => b.seasonYear - a.seasonYear || b.seasonIndex - a.seasonIndex || b.createdAt.localeCompare(a.createdAt))
+      .map((row) => structuredClone(row));
   }
 
   async listByPlot(tenantId: string, plotCode: string): Promise<CropSeason[]> {
     return this.rows
       .filter((row) => row.tenantId === tenantId && row.plotCode === plotCode && row.deletedAt === undefined)
-      .sort(compareRotation);
+      .sort(compareRotation)
+      .map((row) => structuredClone(row));
   }
 
   async findByCode(seasonCode: string): Promise<CropSeason | null> {
-    return this.rows.find((row) => row.seasonCode === seasonCode && row.deletedAt === undefined) ?? null;
+    const row = this.rows.find((item) => item.seasonCode === seasonCode && item.deletedAt === undefined);
+    return row ? structuredClone(row) : null;
   }
 
   async create(_tx: unknown, record: CropSeason): Promise<CropSeason> {
-    this.rows.push(record);
-    return record;
+    const row = structuredClone(record);
+    this.rows.push(row);
+    return structuredClone(row);
   }
 
   async update(_tx: unknown, seasonCode: string, patch: CropSeasonPatch): Promise<CropSeason | null> {
@@ -268,7 +272,7 @@ export class InMemoryCropSeasonRepository implements CropSeasonRepository {
     if (patch.status !== undefined) row.status = patch.status;
     if (patch.yieldKg !== undefined) row.yieldKg = patch.yieldKg;
     if (patch.note !== undefined) row.note = patch.note;
-    return row;
+    return structuredClone(row);
   }
 
   async remove(_tx: unknown, seasonCode: string, deletedAt: string): Promise<boolean> {

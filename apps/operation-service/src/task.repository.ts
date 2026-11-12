@@ -76,12 +76,35 @@ export class InMemoryTaskRepository implements TaskRepository {
     const task = this.tasks.find((row) => row.id === id && row.tenantId === tenantId);
     return task ? structuredClone(task) : null;
   }
-  async create(task: Task): Promise<Task> { this.tasks.push(structuredClone(task)); return structuredClone(task); }
+  async create(task: Task): Promise<Task> {
+    // 建档只写 SQL 侧 INSERT 的那几列：状态恒为 PENDING、版本从 1 起算，
+    // 开工/完工/取消时刻与作业结果都由跃迁写入。照抄调用方塞进来的状态会让内存模式
+    // 凭空出现「已完成」任务，而 SQL 模式压根不认这些列。
+    const record: Task = {
+      id: task.id,
+      tenantId: task.tenantId,
+      plotCode: task.plotCode,
+      type: task.type,
+      name: task.name,
+      status: "PENDING",
+      ...(task.scheduledAt === undefined ? {} : { scheduledAt: task.scheduledAt }),
+      ...(task.scheduledEndAt === undefined ? {} : { scheduledEndAt: task.scheduledEndAt }),
+      ...(task.assigneeName === undefined ? {} : { assigneeName: task.assigneeName }),
+      createdAt: task.createdAt,
+      version: 1,
+    };
+    this.tasks.push(record);
+    return structuredClone(record);
+  }
   async transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult): Promise<Task | null> {
-    const stored = this.tasks.find((row) => row.id === task.id && row.tenantId === task.tenantId && row.version === task.version);
-    if (!stored || !canTransition(stored.status, status)) return null;
-    if (stored.status === status) return structuredClone(stored);
+    const stored = this.tasks.find((row) => row.id === task.id && row.tenantId === task.tenantId);
+    // 跃迁合法性按调用方拿到的快照判定，与 SQL 侧 `canTransition(task.status, status)` 一致
+    if (!stored || !canTransition(task.status, status)) return null;
+    // 重复提交同一状态是幂等重放，不看版本：SQL 侧在这里直接回读当前行
+    if (task.status === status) return structuredClone(stored);
     if (status === "COMPLETED" && !result) return null;
+    // 真正的写入仍受乐观锁与快照状态约束（SQL 的 UPDATE 带 version 和 status 条件）
+    if (stored.version !== task.version || stored.status !== task.status) return null;
     stored.status = status;
     stored.version += 1;
     if (status === "RUNNING") stored.startedAt = at;

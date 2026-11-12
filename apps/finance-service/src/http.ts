@@ -30,12 +30,35 @@ function filterEntries(rows: FinanceEntry[], search: URLSearchParams): FinanceEn
 function hasExtraFilters(search: URLSearchParams): boolean {
   return ["kind", "category", "season", "keyword", "from", "to"].some((name) => (search.get(name) || "").trim() !== "");
 }
+/**
+ * 登记入参按库里的 CHECK 口径校验（迁移 001：kind ∈ INPUT/OUTPUT、amount >= 0）。
+ * 不挡的话同一笔请求两套模式结果不同：SQL 模式撞 CHECK 报 400，内存模式照单全收，
+ * 负数「支出」还会把利润算反；kind 缺省或拼错一律当 INPUT，等于把支出记成收入。
+ */
+function toEntry(body: Record<string, unknown>): FinanceEntry {
+  const kind = body.kind === "INPUT" || body.kind === "OUTPUT" ? body.kind : undefined;
+  if (!kind) throw new Error("收支类型必须是 INPUT 或 OUTPUT");
+  const raw = body.amount;
+  const amount = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
+  if (!Number.isFinite(amount) || amount < 0) throw new Error("金额必须是不小于 0 的数字");
+  return {
+    id: randomUUID(),
+    plotCode: String(body.plotCode ?? ""),
+    season: String(body.season ?? new Date().getFullYear()),
+    kind,
+    category: String(body.category ?? "OTHER"),
+    amount,
+    unit: String(body.unit ?? "元"),
+    note: String(body.note ?? ""),
+    createdAt: new Date().toISOString(),
+  };
+}
 export function createFinanceHttpServer(repository: FinanceRepository = new InMemoryFinanceRepository()): Server { return createServer(async (req, res) => { const traceId = trace(req); const url = new URL(req.url ?? "/", "http://localhost"); try {
   if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "finance" }, traceId); return; }
   const denied = authorizeRequest(req, { read: "finance:read", write: "finance:write" });
   if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
   if (req.method === "GET" && url.pathname === "/api/v1/finance/entries") { const plotCode = url.searchParams.get("plotCode") ?? undefined; send(res, 200, filterEntries(await repository.list(plotCode), url.searchParams), traceId); return; }
-  if (req.method === "POST" && url.pathname === "/api/v1/finance/entries") { const body = await json(req); const entry = { id: randomUUID(), plotCode: String(body.plotCode ?? ""), season: String(body.season ?? new Date().getFullYear()), kind: body.kind === "OUTPUT" ? "OUTPUT" as const : "INPUT" as const, category: String(body.category ?? "OTHER"), amount: Number(body.amount ?? 0), unit: String(body.unit ?? "元"), note: String(body.note ?? ""), createdAt: new Date().toISOString() }; await repository.create(entry); send(res, 201, entry, traceId); return; }
+  if (req.method === "POST" && url.pathname === "/api/v1/finance/entries") { const entry = toEntry(await json(req)); await repository.create(entry); send(res, 201, entry, traceId); return; }
   if (req.method === "GET" && url.pathname === "/api/v1/finance/summary") {
     const plotCode = url.searchParams.get("plotCode") ?? undefined;
     if (!hasExtraFilters(url.searchParams)) { send(res, 200, await repository.summary(plotCode), traceId); return; }

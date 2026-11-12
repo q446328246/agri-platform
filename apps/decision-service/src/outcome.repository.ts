@@ -211,17 +211,23 @@ export class InMemoryOutcomeRepository implements OutcomeRepository {
   private readonly rows: PrescriptionOutcome[] = [];
 
   async create(input: PrescriptionOutcome): Promise<PrescriptionOutcome> {
-    this.rows.unshift({ ...input });
-    return input;
+    const row = structuredClone(input);
+    this.rows.unshift(row);
+    return structuredClone(row);
   }
 
   async findLatest(prescriptionId: string): Promise<PrescriptionOutcome | null> {
-    return this.rows.find((row) => row.prescriptionId === prescriptionId) ?? null;
+    // 与 SQL 的 ORDER BY evaluated_at DESC, id DESC LIMIT 1 同序取最新一条评估
+    const rows = this.rows
+      .filter((row) => row.prescriptionId === prescriptionId)
+      .sort((a, b) => b.evaluatedAt.localeCompare(a.evaluatedAt) || b.id.localeCompare(a.id));
+    const latest = rows[0];
+    return latest ? structuredClone(latest) : null;
   }
 
   /** 全部记录，供测试断言 */
   all(): PrescriptionOutcome[] {
-    return [...this.rows];
+    return this.rows.map((row) => structuredClone(row));
   }
 }
 

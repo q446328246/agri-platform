@@ -1,6 +1,6 @@
 import type { PageResult } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
-import { toIsoTimestamp } from "@agri/shared";
+import { keywordHits, likePattern, toIsoTimestamp } from "@agri/shared";
 
 /**
  * 平台角色与审计日志仓储。
@@ -79,6 +79,11 @@ function toPage<T>(items: T[], total: number, page: number, size: number): PageR
   return { items, total, page, size, pages: Math.ceil(total / size) };
 }
 
+/** 内存仓储进出记录一律深拷贝：SQL 模式每次读都是新建对象，交出同一份引用会让调用方改手就污染存储 */
+function toMemoryRole(record: RoleRecord): RoleRecord {
+  return { ...record, permissions: [...record.permissions] };
+}
+
 function toRole(row: Record<string, unknown>, permissions: string[] = []): RoleRecord {
   return {
     id: String(row.id),
@@ -110,34 +115,39 @@ export class InMemoryRoleRepository implements RoleRepository {
   private readonly rows: RoleRecord[];
 
   constructor(seed: RoleRecord[] = []) {
-    this.rows = seed.map((record) => ({ ...record, permissions: [...record.permissions] }));
+    this.rows = seed.map((record) => toMemoryRole(record));
   }
 
   async page(query: RoleQuery): Promise<PageResult<RoleRecord>> {
     const filtered = this.rows
       .filter((row) => (query.tenantId ? row.tenantId === query.tenantId : true))
-      .filter((row) => (query.keyword ? row.name.includes(query.keyword) || row.code.includes(query.keyword) : true));
+      .filter((row) => (query.keyword ? keywordHits(query.keyword, [row.name, row.code]) : true));
+    filtered.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
     const start = (query.page - 1) * query.size;
-    return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
+    return toPage(filtered.slice(start, start + query.size).map((row) => toMemoryRole(row)), filtered.length, query.page, query.size);
   }
 
   async findById(id: string): Promise<RoleRecord | null> {
-    return this.rows.find((row) => row.id === id) ?? null;
+    const row = this.rows.find((item) => item.id === id);
+    return row ? toMemoryRole(row) : null;
   }
 
   async findByCode(tenantId: string, code: string): Promise<RoleRecord | null> {
-    return this.rows.find((row) => row.tenantId === tenantId && row.code === code) ?? null;
+    const row = this.rows.find((item) => item.tenantId === tenantId && item.code === code);
+    return row ? toMemoryRole(row) : null;
   }
 
   async create(record: RoleRecord): Promise<RoleRecord> {
-    this.rows.push(record);
-    return record;
+    const row = toMemoryRole(record);
+    this.rows.push(row);
+    return toMemoryRole(row);
   }
 
   async update(record: RoleRecord): Promise<RoleRecord> {
-    const index = this.rows.findIndex((row) => row.id === record.id);
-    if (index >= 0) this.rows[index] = record;
-    return record;
+    const row = toMemoryRole(record);
+    const index = this.rows.findIndex((item) => item.id === record.id);
+    if (index >= 0) this.rows[index] = row;
+    return toMemoryRole(row);
   }
 
   async remove(id: string): Promise<void> {
@@ -147,7 +157,11 @@ export class InMemoryRoleRepository implements RoleRepository {
 
   async seed(records: RoleRecord[]): Promise<void> {
     for (const record of records) {
-      if (!this.rows.some((row) => row.id === record.id)) this.rows.push({ ...record, permissions: [...record.permissions] });
+      // 幂等键与 SQL 的 ON CONFLICT (tenant_id, code) 对齐：按 id 判重的话，
+      // 换 id 的同租户同编码角色在内存里会重复入库，库里却被冲突挡掉。
+      if (!this.rows.some((row) => row.tenantId === record.tenantId && row.code === record.code)) {
+        this.rows.push(toMemoryRole(record));
+      }
     }
   }
 }
@@ -180,7 +194,7 @@ export class SqlRoleRepository implements RoleRepository {
       conditions.push(`tenant_id = $${values.length}`);
     }
     if (query.keyword) {
-      values.push(`%${query.keyword}%`);
+      values.push(likePattern(query.keyword));
       conditions.push(`(name ILIKE $${values.length} OR code ILIKE $${values.length})`);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -294,20 +308,25 @@ export class InMemoryAuditRepository implements AuditRepository {
   async page(query: AuditQuery): Promise<PageResult<AuditRecord>> {
     const filtered = this.rows
       .filter((row) => (query.tenantId ? row.tenantId === query.tenantId : true))
-      .filter((row) => (query.keyword ? `${row.action}${row.operator}${row.resource}${row.detail}`.includes(query.keyword) : true));
+      // 四个字段各自匹配：拼成一串会产生跨字段的假命中（上一条的尾巴接下一条的开头），SQL 模式没有这种行
+      .filter((row) => (query.keyword ? keywordHits(query.keyword, [row.action, row.operator, row.resource, row.detail]) : true));
+    // SQL 按 created_at DESC, id DESC 出页，只靠 unshift 的插入序在补写历史日志时会错位
+    filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
     const start = (query.page - 1) * query.size;
-    return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
+    return toPage(filtered.slice(start, start + query.size).map((row) => ({ ...row })), filtered.length, query.page, query.size);
   }
 
   async create(record: AuditRecord): Promise<AuditRecord> {
-    this.rows.unshift(record);
+    const row = { ...record };
+    this.rows.unshift(row);
+    // 内存只做进程内留痕，截断是为了 bound 住驻留条数；库里的审计日志是全量的，不受这里影响
     if (this.rows.length > 500) this.rows.length = 500;
-    return record;
+    return { ...row };
   }
 
   /** 全部记录，供测试断言 */
   all(): AuditRecord[] {
-    return [...this.rows];
+    return this.rows.map((row) => ({ ...row }));
   }
 }
 
@@ -323,7 +342,7 @@ export class SqlAuditRepository implements AuditRepository {
       conditions.push(`tenant_id = $${values.length}`);
     }
     if (query.keyword) {
-      values.push(`%${query.keyword}%`);
+      values.push(likePattern(query.keyword));
       conditions.push(`(action ILIKE $${values.length} OR operator ILIKE $${values.length} OR resource ILIKE $${values.length} OR detail ILIKE $${values.length})`);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";

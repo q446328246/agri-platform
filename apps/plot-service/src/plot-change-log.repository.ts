@@ -87,17 +87,20 @@ export class InMemoryPlotChangeLogRepository implements PlotChangeLogRepository 
   private readonly rows: PlotChangeLog[] = [];
 
   constructor(seed: PlotChangeLog[] = []) {
-    this.rows.push(...seed);
+    this.rows.push(...seed.map((row) => structuredClone(row)));
   }
 
   async append(_tx: unknown, log: PlotChangeLog): Promise<PlotChangeLog> {
-    this.rows.push(log);
-    return log;
+    const row = structuredClone(log);
+    this.rows.push(row);
+    return structuredClone(row);
   }
 
   async listByPlot(tenantId: string, parcelCode: string): Promise<PlotChangeLog[]> {
+    // 与 SQL 的 ORDER BY created_at DESC, id DESC 同序，并深拷贝：留痕里的 before/after 是嵌套对象
     return this.rows
       .filter((row) => row.tenantId === tenantId && row.parcelCode === parcelCode)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+      .map((row) => structuredClone(row));
   }
 }

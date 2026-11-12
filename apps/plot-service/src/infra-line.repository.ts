@@ -206,22 +206,25 @@ export class InMemoryInfraLineRepository implements InfraLineRepository {
   private readonly rows: InfraLine[] = [];
 
   constructor(seed: InfraLine[] = []) {
-    this.rows.push(...seed);
+    this.rows.push(...seed.map((row) => structuredClone(row)));
   }
 
   async listByTenant(tenantId: string): Promise<InfraLine[]> {
     return this.rows
       .filter((row) => row.tenantId === tenantId && row.deletedAt === undefined)
-      .sort((a, b) => a.lineCode.localeCompare(b.lineCode));
+      .sort((a, b) => a.lineCode.localeCompare(b.lineCode))
+      .map((row) => structuredClone(row));
   }
 
   async findByCode(lineCode: string): Promise<InfraLine | null> {
-    return this.rows.find((row) => row.lineCode === lineCode && row.deletedAt === undefined) ?? null;
+    const row = this.rows.find((item) => item.lineCode === lineCode && item.deletedAt === undefined);
+    return row ? structuredClone(row) : null;
   }
 
   async create(_tx: unknown, record: InfraLine): Promise<InfraLine> {
-    this.rows.push(record);
-    return record;
+    const row = structuredClone(record);
+    this.rows.push(row);
+    return structuredClone(row);
   }
 
   async update(_tx: unknown, lineCode: string, patch: InfraLinePatch): Promise<InfraLine | null> {
@@ -229,10 +232,10 @@ export class InMemoryInfraLineRepository implements InfraLineRepository {
     if (!row) return null;
     if (patch.lineName !== undefined) row.lineName = patch.lineName;
     if (patch.lineType !== undefined) row.lineType = patch.lineType;
-    if (patch.geom !== undefined) row.geom = patch.geom;
+    if (patch.geom !== undefined) row.geom = structuredClone(patch.geom);
     if (patch.lengthM !== undefined) row.lengthM = patch.lengthM;
     if (patch.plotCode !== undefined) row.plotCode = patch.plotCode;
-    return row;
+    return structuredClone(row);
   }
 
   async remove(_tx: unknown, lineCode: string, deletedAt: string): Promise<boolean> {

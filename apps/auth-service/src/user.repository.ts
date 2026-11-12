@@ -1,6 +1,6 @@
 import type { PageResult } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
-import { toIsoTimestamp } from "@agri/shared";
+import { keywordHits, likePattern, toIsoTimestamp } from "@agri/shared";
 
 import { hashPassword } from "./password.js";
 
@@ -68,7 +68,8 @@ function toPage<T>(items: T[], total: number, page: number, size: number): PageR
 
 function matchesKeyword(record: UserRecord, keyword?: string): boolean {
   if (!keyword) return true;
-  return record.username.includes(keyword) || record.name.includes(keyword) || record.phone.includes(keyword);
+  // 与 SQL 的 `username ILIKE … OR name ILIKE … OR phone ILIKE …` 同口径：分字段、不分大小写
+  return keywordHits(keyword, [record.username, record.name, record.phone]);
 }
 
 /** 内存实现：未接数据库的本地模式与测试使用 */
@@ -84,27 +85,33 @@ export class InMemoryUserRepository implements UserRepository {
       .filter((row) => (query.tenantId ? row.tenantId === query.tenantId : true))
       .filter((row) => (query.status ? row.status === query.status : true))
       .filter((row) => matchesKeyword(row, query.keyword));
+    // SQL 出页按 created_at ASC, id ASC，内存按插入序会随建号顺序漂移，两套模式翻页结果不同
+    filtered.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
     const start = (query.page - 1) * query.size;
-    return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
+    return toPage(filtered.slice(start, start + query.size).map((row) => structuredClone(row)), filtered.length, query.page, query.size);
   }
 
   async findById(id: string): Promise<UserRecord | null> {
-    return this.rows.find((row) => row.id === id) ?? null;
+    const row = this.rows.find((item) => item.id === id);
+    return row ? structuredClone(row) : null;
   }
 
   async findByUsername(tenantId: string, username: string): Promise<UserRecord | null> {
-    return this.rows.find((row) => row.tenantId === tenantId && row.username === username) ?? null;
+    const row = this.rows.find((item) => item.tenantId === tenantId && item.username === username);
+    return row ? structuredClone(row) : null;
   }
 
   async create(record: UserRecord): Promise<UserRecord> {
-    this.rows.push(record);
-    return record;
+    const row = structuredClone(record);
+    this.rows.push(row);
+    return structuredClone(row);
   }
 
   async update(record: UserRecord): Promise<UserRecord> {
-    const index = this.rows.findIndex((row) => row.id === record.id);
-    if (index >= 0) this.rows[index] = record;
-    return record;
+    const row = structuredClone(record);
+    const index = this.rows.findIndex((item) => item.id === record.id);
+    if (index >= 0) this.rows[index] = row;
+    return structuredClone(row);
   }
 
   async updatePassword(id: string, passwordHash: string, updatedAt: string): Promise<void> {
@@ -121,7 +128,11 @@ export class InMemoryUserRepository implements UserRepository {
 
   async seed(records: UserRecord[]): Promise<void> {
     for (const record of records) {
-      if (!this.rows.some((row) => row.id === record.id)) this.rows.push({ ...record, roles: [...record.roles], permissions: [...record.permissions] });
+      // 幂等键与 SQL 的 ON CONFLICT (tenant_id, username) 对齐：只按 id 判重的话，
+      // 换一个 id 的同租户同名账号会在内存里重复入库，库里却被冲突挡掉。
+      if (!this.rows.some((row) => row.tenantId === record.tenantId && row.username === record.username)) {
+        this.rows.push(structuredClone(record));
+      }
     }
   }
 }
@@ -190,7 +201,7 @@ export class SqlUserRepository implements UserRepository {
       conditions.push(`status = $${values.length}`);
     }
     if (query.keyword) {
-      values.push(`%${query.keyword}%`);
+      values.push(likePattern(query.keyword));
       conditions.push(`(username ILIKE $${values.length} OR name ILIKE $${values.length} OR phone ILIKE $${values.length})`);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";

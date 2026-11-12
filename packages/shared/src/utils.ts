@@ -51,6 +51,25 @@ export function chunk<T>(items: T[], size: number): T[][] {
 }
 
 /**
+ * 把用户输入的关键词包成 ILIKE 模式。
+ * `%` 与 `_` 是 LIKE 的通配符，不转义的话一个「%」就能把整表捞出来，
+ * 而内存实现按字面量子串匹配，同一个关键词两套模式结果不同。
+ */
+export function likePattern(keyword: string): string {
+  return `%${keyword.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+}
+
+/**
+ * 内存实现的关键词命中判定，与 SQL 的 `f1 ILIKE 模式 OR f2 ILIKE 模式 …` 同口径：
+ * 每个字段各自做大小写不敏感的字面量子串匹配，而不是把字段拼起来再找。
+ * 拼接会造出跨字段的假命中（前一个字段的尾巴接上后一个字段开头），分页列表在两套模式下就会给出不同结果。
+ */
+export function keywordHits(keyword: string, fields: Array<string | undefined>): boolean {
+  const needle = keyword.toLowerCase();
+  return fields.some((field) => field !== undefined && field.toLowerCase().includes(needle));
+}
+
+/**
  * 异步等待。
  * @param ms 毫秒
  */

@@ -104,6 +104,22 @@ function receiptAt(value: unknown): string {
   return new Date(value).toISOString();
 }
 
+/**
+ * 回执时刻必须顺着生命周期走（迁移 031 的 receipt_order_check）。
+ * 这条校验放在入口而不是靠数据库约束：SQL 模式撞 CHECK 会变成 500，内存模式却照收，
+ * 两套部署对同一个错报文给出不同答复。
+ */
+function assertReceiptOrder(command: ControlCommand, status: ControlCommandStatus, at: string): void {
+  const previous = command.ackedAt ?? command.sentAt;
+  const label = status === "DONE" ? "结单" : "失败收口";
+  if (status === "ACKED" && command.sentAt !== undefined && Date.parse(at) < Date.parse(command.sentAt)) {
+    throw new Error(`接收回执的时刻（${at}）早于下发时刻（${command.sentAt}）`);
+  }
+  if ((status === "DONE" || status === "FAILED") && previous !== undefined && Date.parse(at) < Date.parse(previous)) {
+    throw new Error(`${label}回执的时刻（${at}）早于上一次状态推进（${previous}）`);
+  }
+}
+
 function receiptText(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") throw new Error(`${field} 需为文本`);
@@ -298,6 +314,7 @@ export function createControlHttpServer(
           send(res, 409, null, traceId, `指令当前状态为 ${target.status}，不接受 ${status} 回执`);
           return;
         }
+        assertReceiptOrder(target, status, at);
         const transition = {
           id: target.id,
           status,

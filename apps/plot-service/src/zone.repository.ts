@@ -59,16 +59,22 @@ export class InMemoryZoneRepository implements ZoneRepository {
   private readonly rows: PlotZone[] = [];
 
   async listByTenant(tenantId: string): Promise<PlotZone[]> {
-    return this.rows.filter((row) => row.tenantId === tenantId && row.deletedAt === undefined);
+    // 与 SQL 的 ORDER BY zone_code 同序，并且一律深拷贝：片区记录嵌了 geom，交出存储引用等于绕过 update 改库
+    return this.rows
+      .filter((row) => row.tenantId === tenantId && row.deletedAt === undefined)
+      .sort((a, b) => a.zoneCode.localeCompare(b.zoneCode))
+      .map((row) => structuredClone(row));
   }
 
   async findByCode(zoneCode: string): Promise<PlotZone | null> {
-    return this.rows.find((row) => row.zoneCode === zoneCode && row.deletedAt === undefined) ?? null;
+    const row = this.rows.find((item) => item.zoneCode === zoneCode && item.deletedAt === undefined);
+    return row ? structuredClone(row) : null;
   }
 
   async create(_tx: unknown, zone: PlotZone): Promise<PlotZone> {
-    this.rows.push(zone);
-    return zone;
+    const row = structuredClone(zone);
+    this.rows.push(row);
+    return structuredClone(row);
   }
 
   async update(_tx: unknown, zoneCode: string, patch: ZonePatch): Promise<PlotZone | null> {
@@ -77,9 +83,9 @@ export class InMemoryZoneRepository implements ZoneRepository {
     if (patch.zoneName !== undefined) row.zoneName = patch.zoneName;
     if (patch.color !== undefined) row.color = patch.color;
     if (patch.description !== undefined) row.description = patch.description;
-    if (patch.geom !== undefined) row.geom = patch.geom;
+    if (patch.geom !== undefined) row.geom = structuredClone(patch.geom);
     row.updatedAt = patch.updatedAt;
-    return row;
+    return structuredClone(row);
   }
 
   async remove(_tx: unknown, zoneCode: string, deletedAt: string): Promise<boolean> {

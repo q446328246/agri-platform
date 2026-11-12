@@ -222,14 +222,18 @@ export class InMemoryReadingRepository implements ReadingRepository {
   async create(_tx: unknown, input: CreateReadingInput): Promise<Reading> {
     const reading: Reading = { id: ulid(), ...input };
     this.rows.push(reading);
-    return reading;
+    // SQL 模式返回的是新构造的对象，内存模式若直接交出同一份引用，调用方改手写读数就能污染存储
+    return structuredClone(reading);
   }
 
   async latest(deviceId?: string): Promise<Reading[]> {
     const rows = deviceId ? this.rows.filter((row) => row.deviceId === deviceId) : this.rows;
     const byKey = new Map<string, Reading>();
     for (const row of [...rows].sort((a, b) => a.recordedAt.localeCompare(b.recordedAt))) byKey.set(`${row.deviceId}::${row.metric}::${row.depthCm ?? ""}`, row);
-    return [...byKey.values()];
+    // 与 SQL 的 ORDER BY device_id, metric 同序，否则两套模式返回的列表顺序不同
+    return [...byKey.values()]
+      .sort((a, b) => a.deviceId.localeCompare(b.deviceId) || a.metric.localeCompare(b.metric) || (a.depthCm ?? 0) - (b.depthCm ?? 0))
+      .map((row) => structuredClone(row));
   }
 
   async history(query: HistoryQuery): Promise<Reading[]> {
@@ -242,7 +246,8 @@ export class InMemoryReadingRepository implements ReadingRepository {
       .filter((row) => (query.from ? row.recordedAt >= query.from : true))
       .filter((row) => (query.to ? row.recordedAt <= query.to : true))
       .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
-      .slice(0, limit);
+      .slice(0, limit)
+      .map((row) => structuredClone(row));
   }
 
   async historySeries(query: HistoryQuery): Promise<ReadingPoint[]> {
@@ -255,7 +260,7 @@ export class InMemoryReadingRepository implements ReadingRepository {
   }
 
   all(): Reading[] {
-    return [...this.rows];
+    return this.rows.map((row) => structuredClone(row));
   }
 }
 
@@ -263,12 +268,20 @@ export class InMemoryAlertRepository implements AlertRepository {
   private readonly rows: TelemetryAlert[] = [];
 
   async create(_tx: unknown, alert: TelemetryAlert): Promise<TelemetryAlert> {
-    this.rows.push(alert);
-    return alert;
+    // SQL 的 INSERT 写死 handled=FALSE 且没有 handled_at 列，内存模式不能照单全收调用方传来的这两个字段
+    const row: TelemetryAlert = { ...alert, handled: false };
+    delete row.handledAt;
+    this.rows.push(row);
+    return structuredClone(row);
   }
 
   async pending(): Promise<TelemetryAlert[]> {
-    return this.rows.filter((row) => !row.handled);
+    // 与 SQL 的 ORDER BY created_at DESC LIMIT 200 同序同量
+    return this.rows
+      .filter((row) => !row.handled)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 200)
+      .map((row) => structuredClone(row));
   }
 
   async markHandled(id: string): Promise<boolean> {
@@ -284,7 +297,7 @@ export class InMemoryAlertRepository implements AlertRepository {
   }
 
   all(): TelemetryAlert[] {
-    return [...this.rows];
+    return this.rows.map((row) => structuredClone(row));
   }
 }
 

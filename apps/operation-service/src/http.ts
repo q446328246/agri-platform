@@ -13,16 +13,21 @@ import type { Task, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType 
 const hoursFromNow = (hours: number): string => new Date(Date.now() + hours * 3600000).toISOString();
 /** 演示农事任务：覆盖六种作业类型与四种状态，任务调度页一进就能看到排程
  * startedAt/completedAt 与状态对齐（进行中的任务按计划时间开工，已完成的补一个作业时长），
- * 已取消的任务从未开工，不留时间戳。 */
+ * 已取消的留一个取消时刻——迁移 016 的 CHECK 要求 CANCELLED 必有 cancelled_at，
+ * 缺了它这行在 SQL 模式根本插不进去，两套模式的任务台账就会对不上（见迁移 030）。
+ * 负责人与计划工时按迁移 030 的种子逐条对齐（scheduled_end_at = scheduled_at + 工时），
+ * 内存种子缺这两列时，同一批演示任务在两套模式下会给出不同的排程视图。
+ * 已知残留差异：030 的 result_json.finishedAreaMu 取自 plot_records.area_mu（地块台账现取），
+ * 内存模式没有台账可读，已完成任务只能不带作业面积——宁缺勿造，不在种子里写死一个数。 */
 const demoTasks: Omit<Task, "version">[] = [
-  { id: "task-demo-001", tenantId: "tenant-demo", plotCode: "511723-000001-02-00005-0000-C", type: "IRRIGATION", name: "西区一号田补灌执行", status: "RUNNING", scheduledAt: hoursFromNow(-4), createdAt: hoursFromNow(-8), startedAt: hoursFromNow(-4) },
-  { id: "task-demo-002", tenantId: "tenant-demo", plotCode: "511723-000001-01-00003-0000-T", type: "SPRAYING", name: "东区三号田病虫害喷防", status: "PENDING", scheduledAt: hoursFromNow(6), createdAt: hoursFromNow(-10) },
-  { id: "task-demo-003", tenantId: "tenant-demo", plotCode: "511723-000001-03-00009-0000-J", type: "FERTILIZATION", name: "联片二号田抽穗期追肥", status: "PENDING", scheduledAt: hoursFromNow(20), createdAt: hoursFromNow(-26) },
-  { id: "task-demo-004", tenantId: "tenant-demo", plotCode: "511723-000001-04-00012-0000-D", type: "TILLAGE", name: "演练田耕整地作业", status: "PENDING", scheduledAt: hoursFromNow(30), createdAt: hoursFromNow(-30) },
-  { id: "task-demo-005", tenantId: "tenant-demo", plotCode: "511723-000001-03-00010-0000-U", type: "WEEDING", name: "联片三号田除草作业", status: "RUNNING", scheduledAt: hoursFromNow(-2), createdAt: hoursFromNow(-14), startedAt: hoursFromNow(-2) },
-  { id: "task-demo-006", tenantId: "tenant-demo", plotCode: "511723-000001-01-00001-0000-5", type: "IRRIGATION", name: "东区一号田水肥一体化追肥", status: "COMPLETED", scheduledAt: hoursFromNow(-50), createdAt: hoursFromNow(-60), startedAt: hoursFromNow(-50), completedAt: hoursFromNow(-46) },
-  { id: "task-demo-007", tenantId: "tenant-demo", plotCode: "511723-000001-02-00007-0000-0", type: "SPRAYING", name: "西区三号田叶面肥喷施", status: "COMPLETED", scheduledAt: hoursFromNow(-96), createdAt: hoursFromNow(-110), startedAt: hoursFromNow(-96), completedAt: hoursFromNow(-93) },
-  { id: "task-demo-008", tenantId: "tenant-demo", plotCode: "511723-000001-01-00002-0000-Z", type: "SEEDING", name: "东区二号田机插秧", status: "CANCELLED", scheduledAt: hoursFromNow(-140), createdAt: hoursFromNow(-150) },
+  { id: "task-demo-001", tenantId: "tenant-demo", plotCode: "511723-000001-02-00005-0000-C", type: "IRRIGATION", name: "西区一号田补灌执行", status: "RUNNING", scheduledAt: hoursFromNow(-4), scheduledEndAt: hoursFromNow(-1), assigneeName: "张建国", createdAt: hoursFromNow(-8), startedAt: hoursFromNow(-4) },
+  { id: "task-demo-002", tenantId: "tenant-demo", plotCode: "511723-000001-01-00003-0000-T", type: "SPRAYING", name: "东区三号田病虫害喷防", status: "PENDING", scheduledAt: hoursFromNow(6), scheduledEndAt: hoursFromNow(8), assigneeName: "李秀芳", createdAt: hoursFromNow(-10) },
+  { id: "task-demo-003", tenantId: "tenant-demo", plotCode: "511723-000001-03-00009-0000-J", type: "FERTILIZATION", name: "联片二号田抽穗期追肥", status: "PENDING", scheduledAt: hoursFromNow(20), scheduledEndAt: hoursFromNow(24), assigneeName: "王德明", createdAt: hoursFromNow(-26) },
+  { id: "task-demo-004", tenantId: "tenant-demo", plotCode: "511723-000001-04-00012-0000-D", type: "TILLAGE", name: "演练田耕整地作业", status: "PENDING", scheduledAt: hoursFromNow(30), scheduledEndAt: hoursFromNow(36), assigneeName: "赵光辉", createdAt: hoursFromNow(-30) },
+  { id: "task-demo-005", tenantId: "tenant-demo", plotCode: "511723-000001-03-00010-0000-U", type: "WEEDING", name: "联片三号田除草作业", status: "RUNNING", scheduledAt: hoursFromNow(-2), scheduledEndAt: hoursFromNow(3), assigneeName: "陈利军", createdAt: hoursFromNow(-14), startedAt: hoursFromNow(-2) },
+  { id: "task-demo-006", tenantId: "tenant-demo", plotCode: "511723-000001-01-00001-0000-5", type: "IRRIGATION", name: "东区一号田水肥一体化追肥", status: "COMPLETED", scheduledAt: hoursFromNow(-50), scheduledEndAt: hoursFromNow(-46), assigneeName: "张建国", createdAt: hoursFromNow(-60), startedAt: hoursFromNow(-50), completedAt: hoursFromNow(-46) },
+  { id: "task-demo-007", tenantId: "tenant-demo", plotCode: "511723-000001-02-00007-0000-0", type: "SPRAYING", name: "西区三号田叶面肥喷施", status: "COMPLETED", scheduledAt: hoursFromNow(-96), scheduledEndAt: hoursFromNow(-93), assigneeName: "李秀芳", createdAt: hoursFromNow(-110), startedAt: hoursFromNow(-96), completedAt: hoursFromNow(-93) },
+  { id: "task-demo-008", tenantId: "tenant-demo", plotCode: "511723-000001-01-00002-0000-Z", type: "SEEDING", name: "东区二号田机插秧", status: "CANCELLED", scheduledAt: hoursFromNow(-140), scheduledEndAt: hoursFromNow(-132), assigneeName: "王德明", createdAt: hoursFromNow(-150), cancelledAt: hoursFromNow(-141) },
 ];
 class InputError extends Error {}
 function send<T>(res: ServerResponse, status: number, data: T | null, traceId: string, message = ""): void {

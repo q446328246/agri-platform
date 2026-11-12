@@ -167,7 +167,8 @@ export function createMessageHttpServer(dependencies?: MessageDependencies): Ser
           title,
           content: String(body.content ?? ""),
           level: toLevel(body.level),
-          read: body.read === true,
+          // 手工新建的通知一律按未读入库；已读只能通过 /read 明确标一次
+          read: false,
           createdAt: String(body.createdAt ?? new Date().toISOString()),
           ...(typeof body.plotCode === "string" && body.plotCode.trim() ? { plotCode: body.plotCode.trim() } : {}),
         });

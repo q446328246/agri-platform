@@ -158,7 +158,7 @@ export class InMemoryPrescriptionRepository implements PrescriptionRepository {
   private readonly rows: PrescriptionRecord[] = [];
 
   constructor(records: PrescriptionRecord[] = []) {
-    this.rows.push(...records);
+    this.rows.push(...records.map((row) => toMemoryPrescription(row)));
   }
 
   async create(_tx: unknown, input: CreatePrescriptionInput): Promise<PrescriptionRecord> {
@@ -169,24 +169,33 @@ export class InMemoryPrescriptionRepository implements PrescriptionRepository {
       ...(input.actions.length > 0 ? { issuedAt: input.generatedAt } : {}),
     });
     this.rows.unshift(record);
-    return record;
+    return toMemoryPrescription(record);
   }
 
   async listByPlot(query: PrescriptionQuery): Promise<PrescriptionRecord[]> {
     const limit = Math.min(200, Math.max(1, query.limit ?? 20));
+    // 与 SQL 的 ORDER BY generated_at DESC 同序：只靠 unshift 的插入序，补录历史处方就会排到最新
     return this.rows
       .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
       .filter((row) => (query.status ? row.status === query.status : true))
-      .slice(0, limit);
+      .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
+      .slice(0, limit)
+      .map((row) => toMemoryPrescription(row));
   }
 
   async findById(id: string): Promise<PrescriptionRecord | null> {
-    return this.rows.find((row) => row.id === id) ?? null;
+    const row = this.rows.find((item) => item.id === id);
+    return row ? toMemoryPrescription(row) : null;
   }
 
   all(): PrescriptionRecord[] {
-    return [...this.rows];
+    return this.rows.map((row) => toMemoryPrescription(row));
   }
+}
+
+/** 内存进出记录一律深拷贝：处方里嵌了 inputs / matchedRules / actions，交出存储引用会被调用方改手污染 */
+function toMemoryPrescription(row: PrescriptionRecord): PrescriptionRecord {
+  return structuredClone(row);
 }
 
 /** 生成处方标识：ULID，按时间有序便于排序 */

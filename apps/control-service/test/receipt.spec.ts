@@ -237,6 +237,35 @@ describe("设备通道：下发确认与执行回执", () => {
     expect((await dataOf(await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "ACKED" }))).status).toBe("ACKED");
   });
 
+  it("回执时刻不许倒流：早于上一次状态推进一律 400，指令留在原状态", async () => {
+    const base = await start(createControlHttpServer());
+    const created = await dataOf(
+      await postJson(base, "/api/v1/control/commands", { deviceId: "device-fert-009", type: "IRRIGATION", parameters: {} }, CONFIRM),
+    );
+    // 下发时刻固定为 08:00，后续回执时刻都相对它构造，两套仓储走同一条入口校验
+    expect(
+      (await postJson(base, "/api/v1/control/device/dispatch", { commandId: created.id, at: "2026-11-12T08:00:00.000Z" })).status,
+    ).toBe(200);
+
+    const earlyAck = await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "ACKED", at: "2026-11-12T07:59:00.000Z", message: "补报接收" });
+    expect(earlyAck.status).toBe(400);
+    expect((await earlyAck.json() as { message: string }).message).toContain("早于下发时刻");
+
+    // 倒流的接收回执被拒后指令仍停在 SENT，不能被写成半截生命周期
+    const listed = await dataOf(await getJson(base, "/api/v1/control/commands?deviceId=device-fert-009"));
+    expect(listed.items.find((item: { id: string }) => item.id === created.id)).toMatchObject({ status: "SENT", sentAt: "2026-11-12T08:00:00.000Z" });
+
+    const earlyDone = await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "FAILED", at: "2026-11-12T07:30:00.000Z", message: "补报故障" });
+    expect(earlyDone.status).toBe(400);
+    expect((await earlyDone.json() as { message: string }).message).toContain("早于上一次状态推进");
+
+    expect((await dataOf(await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "ACKED", at: "2026-11-12T08:01:00.000Z", message: "设备已接收" }))).status).toBe("ACKED");
+    const done = await dataOf(
+      await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "DONE", at: "2026-11-12T08:05:00.000Z", message: "按方案灌完", result: { waterVolumeM3: 12 } }),
+    );
+    expect(done).toMatchObject({ status: "DONE", ackedAt: "2026-11-12T08:01:00.000Z", finishedAt: "2026-11-12T08:05:00.000Z" });
+  });
+
   it("急停指令的执行到位必须带到位确认，勾上确认后才结单", async () => {
     const base = await start(createControlHttpServer());
     const created = await dataOf(

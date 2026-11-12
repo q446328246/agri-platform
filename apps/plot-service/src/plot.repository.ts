@@ -82,12 +82,14 @@ export class InMemoryPlotRepository implements PlotRepository {
   private readonly rows: PlotRecord[] = [];
 
   async findByCode(_tx: unknown, parcelCode: string): Promise<PlotRecord | null> {
-    return this.rows.find((row) => row.parcelCode === parcelCode && row.deletedAt === undefined) ?? null;
+    const row = this.rows.find((item) => item.parcelCode === parcelCode && item.deletedAt === undefined);
+    return row ? toMemoryPlot(row) : null;
   }
 
   async create(_tx: unknown, record: PlotRecord): Promise<PlotRecord> {
-    this.rows.push(record);
-    return record;
+    const row = toMemoryPlot(record);
+    this.rows.push(row);
+    return toMemoryPlot(row);
   }
 
   async update(_tx: unknown, parcelCode: string, patch: PlotPatch): Promise<PlotRecord | null> {
@@ -113,7 +115,7 @@ export class InMemoryPlotRepository implements PlotRepository {
     assign("remark", patch.remark);
     if (patch.geom !== undefined) row.geom = patch.geom;
     row.updatedAt = patch.updatedAt;
-    return row;
+    return toMemoryPlot(row);
   }
 
   async remove(_tx: unknown, parcelCode: string, deletedAt: string): Promise<boolean> {
@@ -125,13 +127,22 @@ export class InMemoryPlotRepository implements PlotRepository {
   }
 
   async listByTenant(tenantId: string): Promise<PlotRecord[]> {
-    return this.rows.filter((row) => row.tenantId === tenantId && row.deletedAt === undefined);
+    // 与 SQL 的 ORDER BY created_at DESC 同序：建档顺序不等于展示顺序，补录旧地块时插入序会串位
+    return this.rows
+      .filter((row) => row.tenantId === tenantId && row.deletedAt === undefined)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((row) => toMemoryPlot(row));
   }
 
   /** 全部记录，供断言使用 */
   all(): PlotRecord[] {
-    return [...this.rows];
+    return this.rows.map((row) => toMemoryPlot(row));
   }
+}
+
+/** 内存进出记录一律深拷贝：地块记录嵌了 geom，交出存储引用后调用方改手就会绕过 update 直接改库 */
+function toMemoryPlot(record: PlotRecord): PlotRecord {
+  return structuredClone(record);
 }
 
 /** PostgreSQL 适配器。表结构由服务迁移管理，仓储只依赖 @agri/db 的最小客户端契约。 */

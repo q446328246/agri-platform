@@ -140,13 +140,17 @@ export function pendingMinutesOf(command: ControlCommand, nowMs: number): number
 }
 
 /**
- * 是否已超时未回执：在途且等待时长达到阈值。
+ * 是否已超时未回执：在途且等待时长超过阈值。
  * 列表筛选与定时收口必须同一个判断，否则「页面上标红」和「后台真正收口」会变成两套口径。
+ * 这里按毫秒精确比较、用严格大于，与 SQL 侧 `now() - … > make_interval(mins => n)` 对齐：
+ * 先四舍五入再比大小会让内存模式把只差半分钟的行也算成超时。
  */
 function isOverdue(command: ControlCommand, nowMs: number, timeoutMin: number | undefined): boolean {
   if (timeoutMin === undefined) return true;
-  const waited = pendingMinutesOf(command, nowMs);
-  return waited !== undefined && waited >= timeoutMin;
+  if (!PENDING_STATUSES.includes(command.status)) return false;
+  const since = overdueSinceMs(command);
+  if (!Number.isFinite(since)) return false;
+  return nowMs - since > timeoutMin * 60_000;
 }
 
 const COLUMNS =
@@ -344,9 +348,22 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     if (command.sourceEventId !== undefined && this.rows.some((row) => row.sourceEventId === command.sourceEventId)) {
       return null;
     }
-    const record: ControlCommand = { ...command, parameters: { ...command.parameters } };
+    // 建档只写 SQL 侧 INSERT 的那几列：版本从 1 起算，在途时间戳与回执一律由跃迁写入。
+    // 照单全收调用方塞来的 version/sentAt 会让内存模式凭空铺出「已下发」的假记录，
+    // 而 SQL 模式把这类列留给默认值，同一个夹具两套模式跑出不同的行。
+    const record: ControlCommand = {
+      ...command,
+      parameters: { ...command.parameters },
+      version: 1,
+      status: command.status,
+    };
+    delete record.sentAt;
+    delete record.ackedAt;
+    delete record.finishedAt;
+    delete record.receiptMessage;
+    delete record.result;
     this.rows.unshift(record);
-    return record;
+    return structuredClone(record);
   }
 
   async page(tenantId: string, query: ControlCommandQuery): Promise<PageResult<ControlCommand>> {
@@ -362,6 +379,9 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
       .filter((row) => (query.to ? row.createdAt <= query.to : true))
       .filter((row) => (query.pending ? PENDING_STATUSES.includes(row.status) : true))
       .filter((row) => isOverdue(row, nowMs, query.pendingOverMin));
+    // 排序与 SQL 侧一致（created_at DESC, id DESC）：内存里靠插入顺序，一旦有回填的
+    // 历史指令就会翻页，同一页两套模式拿到不同的行。
+    filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
     const start = (query.page - 1) * query.size;
     return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
   }

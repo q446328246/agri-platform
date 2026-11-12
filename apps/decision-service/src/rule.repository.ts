@@ -139,17 +139,18 @@ export class InMemoryRuleRepository implements RuleRepository {
   }
 
   async list(): Promise<Rule[]> {
-    return sortRules(this.rows.filter((row) => row.deletedAt === undefined));
+    return sortRules(this.rows.filter((row) => row.deletedAt === undefined)).map((row) => structuredClone(row));
   }
 
   async findById(id: string): Promise<Rule | null> {
-    return this.rows.find((row) => row.id === id && row.deletedAt === undefined) ?? null;
+    const row = this.rows.find((item) => item.id === id && item.deletedAt === undefined);
+    return row ? structuredClone(row) : null;
   }
 
   async create(input: CreateRuleInput): Promise<Rule> {
-    const rule: Rule = { ...input, condition: { ...input.condition }, action: { ...input.action } };
+    const rule: Rule = structuredClone(input);
     this.rows.push(rule);
-    return rule;
+    return structuredClone(rule);
   }
 
   async update(id: string, patch: UpdateRuleInput): Promise<Rule | null> {
@@ -160,10 +161,10 @@ export class InMemoryRuleRepository implements RuleRepository {
     if (patch.enabled !== undefined) row.enabled = patch.enabled;
     if (patch.expression !== undefined) row.expression = patch.expression;
     if (patch.priority !== undefined) row.priority = patch.priority;
-    if (patch.condition !== undefined) row.condition = { ...patch.condition };
-    if (patch.action !== undefined) row.action = { ...patch.action };
+    if (patch.condition !== undefined) row.condition = structuredClone(patch.condition);
+    if (patch.action !== undefined) row.action = structuredClone(patch.action);
     row.updatedAt = patch.updatedAt;
-    return row;
+    return structuredClone(row);
   }
 
   async remove(id: string, deletedAt: string): Promise<boolean> {

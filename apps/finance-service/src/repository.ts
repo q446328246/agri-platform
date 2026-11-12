@@ -47,8 +47,8 @@ export function aggregateReport(rows: FinanceEntry[]): FinanceReport {
 
 export class InMemoryFinanceRepository implements FinanceRepository {
   private readonly entries: FinanceEntry[] = [];
-  async list(plotCode?: string): Promise<FinanceEntry[]> { return [...this.entries].filter((entry) => !plotCode || entry.plotCode === plotCode); }
-  async create(entry: FinanceEntry): Promise<FinanceEntry> { this.entries.unshift(entry); return entry; }
+  async list(plotCode?: string): Promise<FinanceEntry[]> { return [...this.entries].filter((entry) => !plotCode || entry.plotCode === plotCode).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((entry) => ({ ...entry })); }
+  async create(entry: FinanceEntry): Promise<FinanceEntry> { const row = { ...entry }; this.entries.unshift(row); return { ...row }; }
   async summary(plotCode?: string): Promise<FinanceSummary> { const rows = await this.list(plotCode); const input = rows.filter((row) => row.kind === "INPUT").reduce((sum, row) => sum + row.amount, 0); const output = rows.filter((row) => row.kind === "OUTPUT").reduce((sum, row) => sum + row.amount, 0); return { plotCode: plotCode ?? null, input, output, profit: output - input, currency: "CNY" }; }
   async report(plotCode?: string): Promise<FinanceReport> { return aggregateReport(await this.list(plotCode)); }
 }

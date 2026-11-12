@@ -106,7 +106,9 @@ export class SqlAlertRepository {
 
   /** 撤销预警：置 active=false，用于演示「雨过天晴解除大风预警」 */
   async deactivate(alertCode: string): Promise<boolean> {
-    return (await this.client.$executeRawUnsafe(`UPDATE weather_alerts SET active = FALSE WHERE alert_code = $1`, alertCode)) > 0;
+    // 带 active = TRUE，返回值才是「本次真的解除了一条在效预警」；
+    // 不加的话重复解除第二次仍命中行并返回 true，内存模式却返回 false。
+    return (await this.client.$executeRawUnsafe(`UPDATE weather_alerts SET active = FALSE WHERE alert_code = $1 AND active = TRUE`, alertCode)) > 0;
   }
 
   async count(): Promise<number> {
@@ -130,13 +132,16 @@ export class InMemoryAlertRepository {
       .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
       .filter((row) => (query.activeOnly ? row.active : true))
       .sort((a, b) => b.issuedAt.localeCompare(a.issuedAt))
-      .slice(0, 200);
+      .slice(0, 200)
+      .map((row) => structuredClone(row));
   }
 
   async create(_tx: unknown, alert: WeatherAlert): Promise<WeatherAlert> {
+    // 撞码（alert_code 已存在）时不写新行，与 SQL 的 ON CONFLICT DO NOTHING 同口径；
+    // 返回的仍是调用方那条，两套模式都不回读旧行，行为一致。
     const exists = this.rows.some((row) => row.alertCode === alert.alertCode);
-    if (!exists) this.rows.push(alert);
-    return alert;
+    if (!exists) this.rows.push(structuredClone(alert));
+    return structuredClone(alert);
   }
 
   async deactivate(alertCode: string): Promise<boolean> {
@@ -151,7 +156,7 @@ export class InMemoryAlertRepository {
   }
 
   all(): WeatherAlert[] {
-    return [...this.rows];
+    return this.rows.map((row) => structuredClone(row));
   }
 }
 

@@ -1,5 +1,5 @@
 import type { PrismaClientLike } from "@agri/db";
-import { toIsoTimestamp, ulid } from "@agri/shared";
+import { keywordHits, likePattern, toIsoTimestamp, ulid } from "@agri/shared";
 
 /**
  * 设备台账仓储。
@@ -102,8 +102,7 @@ function matchesFilter(device: Device, filter: DeviceFilter | undefined): boolea
   if (filter.status && device.status !== filter.status) return false;
   if (filter.plotCode && device.plotCode !== filter.plotCode) return false;
   if (filter.keyword) {
-    const keyword = filter.keyword.toLowerCase();
-    if (!`${device.name} ${device.deviceNo}`.toLowerCase().includes(keyword)) return false;
+    if (!keywordHits(filter.keyword, [device.name, device.deviceNo])) return false;
   }
   return true;
 }
@@ -161,21 +160,26 @@ export class InMemoryDeviceRepository implements DeviceRepository {
   private readonly devices: Device[];
 
   constructor(seed: Device[] = demoDevices()) {
-    this.devices = [...seed];
+    // 进出都拷贝：SQL 模式每次读的都是新对象，调用方改返回值改不动库；
+    // 内存模式若把演示种子的引用留在数组里，一个调用方就能把整套台账改掉。
+    this.devices = structuredClone(seed);
   }
 
   async list(tenantId: string, filter?: DeviceFilter): Promise<Device[]> {
     return this.devices
       .filter((device) => device.tenantId === tenantId && matchesFilter(device, filter))
-      .sort(byDeviceNo);
+      .sort(byDeviceNo)
+      .map((device) => structuredClone(device));
   }
 
   async find(tenantId: string, id: string): Promise<Device | null> {
-    return this.devices.find((device) => device.tenantId === tenantId && device.id === id) ?? null;
+    const device = this.devices.find((item) => item.tenantId === tenantId && item.id === id);
+    return device ? structuredClone(device) : null;
   }
 
   async findByDeviceNo(tenantId: string, deviceNo: string): Promise<Device | null> {
-    return this.devices.find((device) => device.tenantId === tenantId && device.deviceNo === deviceNo) ?? null;
+    const device = this.devices.find((item) => item.tenantId === tenantId && item.deviceNo === deviceNo);
+    return device ? structuredClone(device) : null;
   }
 
   async create(tenantId: string, input: CreateDeviceInput): Promise<Device> {
@@ -193,7 +197,7 @@ export class InMemoryDeviceRepository implements DeviceRepository {
       updatedAt: timestamp,
     };
     this.devices.push(device);
-    return device;
+    return structuredClone(device);
   }
 
   async update(tenantId: string, id: string, input: UpdateDeviceInput): Promise<Device | null> {
@@ -201,7 +205,7 @@ export class InMemoryDeviceRepository implements DeviceRepository {
     if (index < 0) return null;
     const updated = mergeDevice(this.devices[index]!, input, new Date().toISOString());
     this.devices.splice(index, 1, updated);
-    return updated;
+    return structuredClone(updated);
   }
 }
 
@@ -260,7 +264,8 @@ export class SqlDeviceRepository implements DeviceRepository {
       conditions.push(`plot_code = $${values.length}`);
     }
     if (filter?.keyword) {
-      values.push(`%${filter.keyword}%`);
+      // 转义 LIKE 通配符，否则关键词里的 % 和 _ 会当通配符用，和内存模式的字面包含对不上
+      values.push(likePattern(filter.keyword));
       conditions.push(`(name ILIKE $${values.length} OR device_no ILIKE $${values.length})`);
     }
     const where = `WHERE tenant_id = $1${conditions.length > 0 ? ` AND ${conditions.join(" AND ")}` : ""}`;
