@@ -421,7 +421,15 @@
 - **仓储**：`ControlCommand` 增 `tenantId`（第 2 个字段），`ControlCommandRepository` 的 `page/find/transition` 都以 `tenantId` 为首参（`create` 从记录本身取），跨租户的 id 一律当作不存在——`find` 回 `null`、`transition` 回 `null`（HTTP 层 404/409），SQL 的 `statusOf` 也带租户条件，陈旧记录越不过状态机。`toRecord` 直读 `tenant_id`，**不给回退默认值**：列没迁移就应当炸出来，而不是伪造归属。
 - **归属来源**：HTTP 侧 `tenantOf(req)` 只认网关透传的可信 `x-tenant-id`（网关丢弃客户端自报头，见 2026-11-08 权限一节），请求体里的 `tenantId` 一律忽略；无会话身份的设备回调落到进程 `TENANT_ID`，再退演示租户。事件侧 `buildCommand` 用 `event.tenantId`——哪个租户的事件触发就记在哪个租户名下，不读进程配置。
 - **用例**：`receipt.spec.ts` 全部仓储调用改带租户，新增「跨租户 id 当作不存在」（内存：查/跃迁/分页互不串）与 HTTP「指令归属只认可信租户头，请求体自报无效」（`tenant-a` 建的指令 `tenant-b` 列表为空、下发 404，同租户下发 200）；真实库分支补「换租户跃迁不生效」且 `find("tenant-other", id)` 为 `null`；`consumer.spec.ts` 断言自动指令 `tenantId` 等于事件信封租户。测试的 POST/GET 一律显式带 `x-tenant-id`，不依赖进程环境变量。**未跑验证**（按交付口径）。
-- **口径说明**：`014_iot_devices.sql` 那句「设备域与 control_commands 一致按全局台账」自此只对**设备台账**成立，指令台账已改为按租户隔离；已在 `032` 注释里写明，不回改历史迁移。
+- **口径说明**：~~`014_iot_devices.sql` 那句「设备域与 control_commands 一致按全局台账」自此只对**设备台账**成立，指令台账已改为按租户隔离；已在 `032` 注释里写明，不回改历史迁移。~~ 设备台账随后也补齐了租户归属（迁移 `035`，见下一节），`014` 那句说明自此两处都不再成立，已在 `035` 注释里逐字校正。
+
+### 2026-11-12：设备台账租户隔离（`devices.tenant_id`）
+
+- **问题**：`#97` 只把指令台账按租户切开，设备台账仍是全局的——乙农场能列出甲农场的设备编号、地块绑定与在线状态，还能照着别家的设备号下控制指令；`device_no UNIQUE` 停在全局口径，两个农场各自采购的同型号设备（出厂编号相同）根本登不进来。
+- **迁移 `035_devices_tenant.sql`**：`ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant-demo'`（与 `032` 同一理由：存量行含 `014` 的 12 台演示设备全部属演示租户，Postgres 11+ 常量默认值不重写表）；`DROP CONSTRAINT IF EXISTS devices_device_no_key` 后**沿用同名**重建为 `UNIQUE (tenant_id, device_no)`，重复执行不会撞约束名；`idx_devices_type`/`idx_devices_plot` 重建为租户前缀。注释里逐字校正 `014` 的「不加 tenant_id」约定——那一列现在是每个查询的第一个条件。**未应用到任何库**（按交付口径只在用户点名时迁移）。
+- **仓储**：`Device` 增 `tenantId`（第 2 个字段），`DeviceRepository` 的 `list/find/findByDeviceNo/create/update` 一律以 `tenantId` 为首参，跨租户的 id 与编号都当作不存在（`find` 回 `null` → HTTP 404，`update` 回 `null`，撞号校验只在租户内比对）。SQL 侧 `DEVICE_COLUMNS` 纳入 `tenant_id`，所有读语句 `WHERE tenant_id = $1`，`INSERT` 把租户写进 `VALUES` 参数；`toDevice` 直读 `tenant_id` **不给回退默认值**，列没迁移就应当炸出来而不是伪造归属。`mergeDevice` 不含 `tenantId`：台账不能靠改配置在租户之间搬家。
+- **归属来源**：`tenantOf(req)` 与指令侧同口径——只认网关透传的可信 `x-tenant-id`（网关丢弃客户端自报头），其次进程 `TENANT_ID`，再退 `DEFAULT_TENANT`；`DEFAULT_TENANT` 由 `device.repository.ts` 单点导出，HTTP 与种子共用。内存模式启动时用 `demoDevices(process.env.TENANT_ID?.trim() || DEFAULT_TENANT)` 落位，否则单现场配了租户后演示台账会是空列表。
+- **用例**：`sql-device-repository.spec.ts` 全部调用改带租户，新增「没有筛选条件也带租户条件，绝不退化成全表台账」「读、写与撞号校验都锁在租户内」（断言 5 条读/改语句都含 `tenant_id = $1` 且首参为请求租户，`INSERT` 的租户落在 `VALUES` 参数）；`http.spec.ts` 新增「台账按租户隔离」——`tenant-beta` 列表为空、演示设备详情/编辑/下发均 404，同型号编号 `DZ-W-001` 在 beta 可登记（201）而 beta 内部再登记才 409，两个租户各看各的。**未跑验证**（按交付口径）。
 
 ### 2026-11-12：超时未回执自动收口（`control_outbox` + `control.command.timeout`）
 
@@ -521,7 +529,7 @@
 11. **待决（需用户点头，未擅自处理）**：
    - ~~超时未回执只做了「可见」，没有自动置 `FAILED` 或推事件~~：`#95` 已做（迁移 `033` 建 `control_outbox` + `ControlReceiptSweeper` 同事务收口推事件 + 消息中心告警，见 2026-11-12 收口一节）。「会覆盖现场迟到的真实回执」这一顾虑按**先到先得**处理：收口与回执抢同一个 `version`，谁先到终态另一边拿 409，不做覆盖式改写；
    - ~~`EventTopic.ControlIrrigationFinished` 至今无生产者：`DONE` 回执已能落库，但把它转成事件回流感知/决策侧还没有消费闭环~~：`#96` 已做（灌溉指令 `DONE` 在同一事务写 `control_outbox`，`trace-service` 结档案、`message-service` 发通知，见 2026-11-12 结单回流一节）；~~**施肥作业的实际用量回流**没有对应载荷口径~~（已做，`control.fertilization.finished`，见 2026-11-12 施肥结单事件回流一节）；~~决策侧也尚未消费该事件做处方效果回流，仍待决~~（已做，见 2026-11-12「决策侧消费结单事件」一节：`decision_prescription_executions` 落库 + `GET /decision/executions`；`evaluateOutcome` 仍需人工在拿到复测墒情后触发，这不是缺口而是时机依赖外部读数）。
-   - ~~`control_commands` 无 `tenant_id`（多租户下指令台账互通）~~：`#97` 已做（迁移 `032` + 仓储首参 + 可信头归属，见 2026-11-12 租户隔离一节）；**设备台账 `iot_devices` 仍是全局台账**，是否一并隔离待决；
+   - ~~`control_commands` 无 `tenant_id`（多租户下指令台账互通）~~：`#97` 已做（迁移 `032` + 仓储首参 + 可信头归属，见 2026-11-12 租户隔离一节）；~~**设备台账 `iot_devices` 仍是全局台账**，是否一并隔离待决~~（已做，迁移 `035` + `DeviceRepository` 首参 + `tenantOf` 归属，编号唯一改为租户内唯一，见 2026-11-12 设备台账租户隔离一节）；
    - ~~`.qoder/repowiki/**` 每次收尾都会被自动重生成（本轮 40+ 文件 M/D/??），与功能改动分开单独征询是否提交，目前仍未入库~~：本轮已按「单独一笔」入库（`62a3fea`，53 文件），此后每轮收尾仍会重生成，继续按「与功能改动分开、单独提交」处理；**注意重生成分支落后于当日功能**，事件类文档以 README / 本节为准；
    - 内存模式与 SQL 模式的行为差异（如 016 CHECK 要求 `CANCELLED` 必留 `cancelled_at`，而内存种子留空）要不要抹平；
    - 合并的凸包口径：选中互不相邻地块会框进中间空地，是否改为要求相邻校验或允许手工改边界；

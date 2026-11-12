@@ -4,9 +4,16 @@ import { toIsoTimestamp, ulid } from "@agri/shared";
 /**
  * 设备台账仓储。
  *
- * 表结构由迁移 014 管理；内存实现装载与迁移同一批演示设备，供单测与未启用数据库的本地模式使用。
+ * 表结构由迁移 014 管理、迁移 035 补上租户归属；内存实现装载与迁移同一批演示设备，
+ * 供单测与未启用数据库的本地模式使用。
  * 设备 id 保持既有 `device-*` 形态，遥测读数、控制指令与摄像头配置都按这些 id 关联，不能改口径。
+ *
+ * 台账按租户隔离：读、写、撞号校验都要带 tenantId，跨租户的 id 与编号一律当作不存在，
+ * 否则乙农场能列出甲农场的设备绑定，还能照着别家的设备号下指令。
  */
+
+/** 未配置 TENANT_ID 且请求没有可信租户头时的归属租户，与全仓演示租户同字面量 */
+export const DEFAULT_TENANT = "tenant-demo";
 
 /** 台账类型白名单，与迁移 014 的 CHECK、前端 apps/web/src/utils/device.ts 的选项三处同口径 */
 export const DEVICE_TYPES = [
@@ -30,7 +37,9 @@ export type DeviceStatus = (typeof DEVICE_STATUSES)[number];
 
 export interface Device {
   id: string;
-  /** 设备出厂编号，台账内唯一 */
+  /** 台账归属租户（迁移 035），设备编号只在本租户内唯一 */
+  tenantId: string;
+  /** 设备出厂编号，同租户台账内唯一 */
   deviceNo: string;
   name: string;
   type: DeviceType;
@@ -76,13 +85,15 @@ export interface DeviceFilter {
 }
 
 export interface DeviceRepository {
-  /** 按筛选条件返回升序排列的完整命中集，分页由调用侧裁剪 */
-  list(filter?: DeviceFilter): Promise<Device[]>;
-  find(id: string): Promise<Device | null>;
-  findByDeviceNo(deviceNo: string): Promise<Device | null>;
-  create(input: CreateDeviceInput): Promise<Device>;
-  /** 更新台账配置；设备不存在返回 null */
-  update(id: string, input: UpdateDeviceInput): Promise<Device | null>;
+  /** 按筛选条件返回升序排列的完整命中集，分页由调用侧裁剪；只返回该租户的台账 */
+  list(tenantId: string, filter?: DeviceFilter): Promise<Device[]>;
+  /** 跨租户的 id 一律当作不存在 */
+  find(tenantId: string, id: string): Promise<Device | null>;
+  /** 撞号校验按租户查：别家农场同型号设备的编号不算重复 */
+  findByDeviceNo(tenantId: string, deviceNo: string): Promise<Device | null>;
+  create(tenantId: string, input: CreateDeviceInput): Promise<Device>;
+  /** 更新台账配置；设备不存在或不属于该租户返回 null */
+  update(tenantId: string, id: string, input: UpdateDeviceInput): Promise<Device | null>;
 }
 
 function matchesFilter(device: Device, filter: DeviceFilter | undefined): boolean {
@@ -107,8 +118,9 @@ const hoursAgo = (hours: number): string => new Date(Date.now() - hours * 360000
 /**
  * 演示台账：与迁移 014 注入的 12 台设备逐字段对齐，
  * 地块编码取自迁移 010 的示范田，气象站挂在首部而不落具体地块。
+ * 迁移 035 之后这批设备归演示租户，跨租户部署时按调用方给的租户落位。
  */
-export function demoDevices(): Device[] {
+export function demoDevices(tenantId: string = DEFAULT_TENANT): Device[] {
   const EAST_1 = "511723-000001-01-00001-0000-5";
   const EAST_2 = "511723-000001-01-00002-0000-Z";
   const EAST_3 = "511723-000001-01-00003-0000-T";
@@ -133,6 +145,7 @@ export function demoDevices(): Device[] {
   ];
   return rows.map(([id, deviceNo, name, type, status, plotCode, lastSeenAt]) => ({
     id,
+    tenantId,
     deviceNo,
     name,
     type,
@@ -151,22 +164,25 @@ export class InMemoryDeviceRepository implements DeviceRepository {
     this.devices = [...seed];
   }
 
-  async list(filter?: DeviceFilter): Promise<Device[]> {
-    return this.devices.filter((device) => matchesFilter(device, filter)).sort(byDeviceNo);
+  async list(tenantId: string, filter?: DeviceFilter): Promise<Device[]> {
+    return this.devices
+      .filter((device) => device.tenantId === tenantId && matchesFilter(device, filter))
+      .sort(byDeviceNo);
   }
 
-  async find(id: string): Promise<Device | null> {
-    return this.devices.find((device) => device.id === id) ?? null;
+  async find(tenantId: string, id: string): Promise<Device | null> {
+    return this.devices.find((device) => device.tenantId === tenantId && device.id === id) ?? null;
   }
 
-  async findByDeviceNo(deviceNo: string): Promise<Device | null> {
-    return this.devices.find((device) => device.deviceNo === deviceNo) ?? null;
+  async findByDeviceNo(tenantId: string, deviceNo: string): Promise<Device | null> {
+    return this.devices.find((device) => device.tenantId === tenantId && device.deviceNo === deviceNo) ?? null;
   }
 
-  async create(input: CreateDeviceInput): Promise<Device> {
+  async create(tenantId: string, input: CreateDeviceInput): Promise<Device> {
     const timestamp = new Date().toISOString();
     const device: Device = {
       id: `device-${ulid()}`,
+      tenantId,
       deviceNo: input.deviceNo,
       name: input.name,
       type: input.type,
@@ -180,8 +196,8 @@ export class InMemoryDeviceRepository implements DeviceRepository {
     return device;
   }
 
-  async update(id: string, input: UpdateDeviceInput): Promise<Device | null> {
-    const index = this.devices.findIndex((device) => device.id === id);
+  async update(tenantId: string, id: string, input: UpdateDeviceInput): Promise<Device | null> {
+    const index = this.devices.findIndex((device) => device.tenantId === tenantId && device.id === id);
     if (index < 0) return null;
     const updated = mergeDevice(this.devices[index]!, input, new Date().toISOString());
     this.devices.splice(index, 1, updated);
@@ -192,6 +208,7 @@ export class InMemoryDeviceRepository implements DeviceRepository {
 /**
  * 把编辑入参合入当前台账：省略的字段保持原值，plotCode 传空串表示解绑地块。
  * 内存与 SQL 两种实现共用，避免「不传就不改」的语义在两处各写一遍。
+ * tenantId 与 id 一样不可编辑——台账不能靠改配置在租户之间搬家。
  */
 function mergeDevice(current: Device, input: UpdateDeviceInput, updatedAt: string): Device {
   const merged: Device = {
@@ -206,7 +223,7 @@ function mergeDevice(current: Device, input: UpdateDeviceInput, updatedAt: strin
   return merged;
 }
 
-const DEVICE_COLUMNS = "id, device_no, name, type, status, plot_code, last_seen_at, created_at, updated_at";
+const DEVICE_COLUMNS = "id, tenant_id, device_no, name, type, status, plot_code, last_seen_at, created_at, updated_at";
 
 export class SqlDeviceRepository implements DeviceRepository {
   constructor(private readonly client: PrismaClientLike) {}
@@ -215,6 +232,7 @@ export class SqlDeviceRepository implements DeviceRepository {
     const plotCode = String(row.plot_code ?? "");
     return {
       id: String(row.id),
+      tenantId: String(row.tenant_id),
       deviceNo: String(row.device_no),
       name: String(row.name),
       type: String(row.type) as DeviceType,
@@ -226,9 +244,9 @@ export class SqlDeviceRepository implements DeviceRepository {
     };
   }
 
-  async list(filter?: DeviceFilter): Promise<Device[]> {
+  async list(tenantId: string, filter?: DeviceFilter): Promise<Device[]> {
     const conditions: string[] = [];
-    const values: unknown[] = [];
+    const values: unknown[] = [tenantId];
     if (filter?.type) {
       values.push(filter.type);
       conditions.push(`type = $${values.length}`);
@@ -245,7 +263,7 @@ export class SqlDeviceRepository implements DeviceRepository {
       values.push(`%${filter.keyword}%`);
       conditions.push(`(name ILIKE $${values.length} OR device_no ILIKE $${values.length})`);
     }
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const where = `WHERE tenant_id = $1${conditions.length > 0 ? ` AND ${conditions.join(" AND ")}` : ""}`;
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `SELECT ${DEVICE_COLUMNS} FROM devices ${where} ORDER BY device_no`,
       ...values,
@@ -253,28 +271,31 @@ export class SqlDeviceRepository implements DeviceRepository {
     return rows.map((row) => this.toDevice(row));
   }
 
-  async find(id: string): Promise<Device | null> {
+  async find(tenantId: string, id: string): Promise<Device | null> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT ${DEVICE_COLUMNS} FROM devices WHERE id = $1`,
+      `SELECT ${DEVICE_COLUMNS} FROM devices WHERE tenant_id = $1 AND id = $2`,
+      tenantId,
       id,
     );
     const row = rows[0];
     return row ? this.toDevice(row) : null;
   }
 
-  async findByDeviceNo(deviceNo: string): Promise<Device | null> {
+  async findByDeviceNo(tenantId: string, deviceNo: string): Promise<Device | null> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT ${DEVICE_COLUMNS} FROM devices WHERE device_no = $1`,
+      `SELECT ${DEVICE_COLUMNS} FROM devices WHERE tenant_id = $1 AND device_no = $2`,
+      tenantId,
       deviceNo,
     );
     const row = rows[0];
     return row ? this.toDevice(row) : null;
   }
 
-  async create(input: CreateDeviceInput): Promise<Device> {
+  async create(tenantId: string, input: CreateDeviceInput): Promise<Device> {
     const timestamp = new Date().toISOString();
     const device: Device = {
       id: `device-${ulid()}`,
+      tenantId,
       deviceNo: input.deviceNo,
       name: input.name,
       type: input.type,
@@ -285,9 +306,10 @@ export class SqlDeviceRepository implements DeviceRepository {
       updatedAt: timestamp,
     };
     await this.client.$executeRawUnsafe(
-      `INSERT INTO devices (id, device_no, name, type, status, plot_code, last_seen_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NULL, $7::timestamptz, $8::timestamptz)`,
+      `INSERT INTO devices (id, tenant_id, device_no, name, type, status, plot_code, last_seen_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8::timestamptz, $9::timestamptz)`,
       device.id,
+      device.tenantId,
       device.deviceNo,
       device.name,
       device.type,
@@ -299,19 +321,20 @@ export class SqlDeviceRepository implements DeviceRepository {
     return device;
   }
 
-  async update(id: string, input: UpdateDeviceInput): Promise<Device | null> {
-    const current = await this.find(id);
+  async update(tenantId: string, id: string, input: UpdateDeviceInput): Promise<Device | null> {
+    const current = await this.find(tenantId, id);
     if (!current) return null;
     const next = mergeDevice(current, input, new Date().toISOString());
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `UPDATE devices SET name = $1, type = $2, status = $3, plot_code = $4, updated_at = $5::timestamptz
-       WHERE id = $6
+       WHERE tenant_id = $6 AND id = $7
        RETURNING ${DEVICE_COLUMNS}`,
       next.name,
       next.type,
       next.status,
       next.plotCode ?? "",
       next.updatedAt,
+      tenantId,
       id,
     );
     const row = rows[0];

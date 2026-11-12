@@ -275,11 +275,13 @@ agri-platform-nodejs-scaffold/
   处方下发的指令会把 `prescriptionId` 一路带进结单事件，`decision-service` 据此把实际用量回流到
   `decision_prescription_executions`（`GET /api/v1/decision/executions?prescriptionId=` 可查，按指令 id 幂等）；
   人工指令没有处方标识，回流直接跳过，效果评估（`POST /prescriptions/:id/outcome`）仍由人工在拿到复测墒情后触发。
-- **指令台账按租户隔离**：迁移 `032` 给 `control_commands` 补 `tenant_id`（`DEFAULT 'tenant-demo'`，存量行含
-  `010` 种子全部属演示租户，常量默认值不重写表）。仓储的读、写、跃迁都以 `tenantId` 为首参，跨租户的 id
-  一律当作不存在——查不到 404、跃不动返回 `null` 翻成 409，与 `operation_tasks`/`video_ptz_commands` 同口径。
+- **台账按租户隔离**：迁移 `032` 给 `control_commands` 补 `tenant_id`、迁移 `035` 给 `devices` 补 `tenant_id`
+  （都取 `DEFAULT 'tenant-demo'`，存量行含 `010`/`014` 种子全部属演示租户，常量默认值不重写表）。仓储的读、写、
+  跃迁都以 `tenantId` 为首参，跨租户的 id 一律当作不存在——查不到 404、跃不动返回 `null` 翻成 409，与
+  `operation_tasks`/`video_ptz_commands` 同口径；`014` 那句「设备域按全局台账」由 `035` 注释逐字校正。
+  设备编号的唯一口径随之从全局改为 `(tenant_id, device_no)`，两个农场登记同型号设备（出厂编号相同）不再互相撞号。
   归属只认网关透传的可信身份头（客户端自报的同名头在网关已被丢弃，请求体里的 `tenantId` 不参与），自动指令
-  则跟着事件信封的 `tenantId`；设备回调没有会话身份，落到进程 `TENANT_ID`，再退演示租户。
+  则跟着事件信封的 `tenantId`；设备回调与台账接口没有会话身份时落到进程 `TENANT_ID`，再退演示租户。
 - **消息先过偏好再去重**：消息文案与去重键在 `@agri/contracts` 的 `MESSAGE_TEMPLATES` 登记，
   契约包只做纯函数渲染；`buildMessageDraft` 直接从该表取渲染函数，注册即生效，不再另写一份分支表
   （此前两套真相漏了超时主题，导致 `control.command.timeout` 告警实际发不出）。消费侧先查「租户 + 主题」偏好：关闭订阅直接跳过，低于最低级别也跳过；

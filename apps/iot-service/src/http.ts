@@ -4,8 +4,16 @@ import { randomUUID } from "node:crypto";
 import type { ApiResponse } from "@agri/contracts";
 import { authorizeRequest } from "@agri/shared";
 
-import { DEVICE_STATUSES, DEVICE_TYPES, InMemoryDeviceRepository } from "./device.repository.js";
+import { DEVICE_STATUSES, DEVICE_TYPES, DEFAULT_TENANT, InMemoryDeviceRepository } from "./device.repository.js";
 import type { Device, DeviceRepository, DeviceStatus, DeviceType, UpdateDeviceInput } from "./device.repository.js";
+
+/**
+ * 设备台账 HTTP 接口。
+ *
+ * 台账按租户隔离（迁移 035）：列表、详情、编辑、指令下发与新增的撞号校验都只在
+ * `tenantOf` 现取的租户内进行，租户只认网关透传的可信身份头，请求体自报的 tenantId 一律忽略。
+ * 没有会话身份的内部调用落到进程配置的 `TENANT_ID`——一套部署对一个现场。
+ */
 
 /** 台账一屏最多取多少条，导出与下拉都按这个上限取全量 */
 const MAX_PAGE_SIZE = 200;
@@ -28,6 +36,11 @@ function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+/** 台账归属租户：可信身份头 > 进程配置 > 演示租户 */
+function tenantOf(req: IncomingMessage): string {
+  return req.headers["x-tenant-id"]?.toString().trim() || process.env.TENANT_ID?.trim() || DEFAULT_TENANT;
+}
+
 async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -46,11 +59,13 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
       if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "iot" }, traceId); return; }
       const denied = authorizeRequest(req, { read: "device:read", write: "device:control" });
       if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
+      // 台账的读写都在这一租户内进行
+      const tenantId = tenantOf(req);
 
       if (req.method === "GET" && url.pathname === "/api/v1/devices") {
         const pageNo = Math.max(1, Number(url.searchParams.get("page") || 1));
         const size = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(url.searchParams.get("size") || 20) || 20));
-        const filtered = await devices.list({
+        const filtered = await devices.list(tenantId, {
           keyword: url.searchParams.get("keyword")?.trim() || undefined,
           type: url.searchParams.get("type")?.trim() || undefined,
           status: url.searchParams.get("status")?.trim() || undefined,
@@ -73,9 +88,9 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
         if (!name) { send(res, 400, null, traceId, "设备名称不能为空"); return; }
         if (!DEVICE_TYPES.includes(type as DeviceType)) { send(res, 400, null, traceId, `设备类型需为 ${DEVICE_TYPES.join("/")}`); return; }
         if (!DEVICE_STATUSES.includes(status as DeviceStatus)) { send(res, 400, null, traceId, `设备状态需为 ${DEVICE_STATUSES.join("/")}`); return; }
-        if (await devices.findByDeviceNo(deviceNo)) { send(res, 409, null, traceId, `设备编号 ${deviceNo} 已存在`); return; }
+        if (await devices.findByDeviceNo(tenantId, deviceNo)) { send(res, 409, null, traceId, `设备编号 ${deviceNo} 已存在`); return; }
 
-        const created = await devices.create({
+        const created = await devices.create(tenantId, {
           deviceNo,
           name,
           type: type as DeviceType,
@@ -89,19 +104,20 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
       const match = url.pathname.match(/^\/api\/v1\/devices\/([^/]+)(\/commands)?$/);
       const id = match?.[1];
       if (id && match?.[2] === "/commands" && req.method === "POST") {
-        if (!(await devices.find(id))) { send(res, 404, null, traceId, "设备不存在"); return; }
+        // 在册校验按租户查：别家农场的设备号在这里等同于不存在
+        if (!(await devices.find(tenantId, id))) { send(res, 404, null, traceId, "设备不存在"); return; }
         const command = await json(req);
         send(res, 202, { commandId: randomUUID(), deviceId: id, status: "QUEUED", command }, traceId);
         return;
       }
       if (id && !match?.[2] && req.method === "GET") {
-        const device = await devices.find(id);
+        const device = await devices.find(tenantId, id);
         send(res, 200, device ?? null, traceId, device ? "" : "设备不存在");
         return;
       }
-      // 台账配置编辑：只改台账字段，编号与最后上报时间不接受手工写入
+      // 台账配置编辑：只改台账字段，编号、归属租户与最后上报时间不接受手工写入
       if (id && !match?.[2] && req.method === "PUT") {
-        if (!(await devices.find(id))) { send(res, 404, null, traceId, "设备不存在"); return; }
+        if (!(await devices.find(tenantId, id))) { send(res, 404, null, traceId, "设备不存在"); return; }
         const body = await json(req);
         const input: UpdateDeviceInput = {};
         if (body.name !== undefined) {
@@ -124,7 +140,7 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
           input.plotCode = body.plotCode.trim();
         }
         if (Object.keys(input).length === 0) { send(res, 400, null, traceId, "没有需要修改的台账字段"); return; }
-        const updated = await devices.update(id, input);
+        const updated = await devices.update(tenantId, id, input);
         send(res, 200, updated, traceId, updated ? "" : "设备不存在");
         return;
       }

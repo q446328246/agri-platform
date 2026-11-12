@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Server } from "node:http";
 
 import { createIotHttpServer } from "../src/http.js";
-import { InMemoryDeviceRepository, demoDevices } from "../src/device.repository.js";
+import { DEFAULT_TENANT, InMemoryDeviceRepository, demoDevices } from "../src/device.repository.js";
 
 /**
- * 设备台账接口验证：列表筛选与分页、新增设备的校验与编号唯一、
- * 控制指令只接受在册设备。默认用内存仓储，落库口径见 sql-device-repository.spec.ts。
+ * 设备台账接口验证：列表筛选与分页、新增设备的校验与编号在租户内唯一、
+ * 租户之间互不可见、控制指令只接受本租户在册设备。
+ * 默认用内存仓储，落库口径见 sql-device-repository.spec.ts。
  */
 
 const servers: Server[] = [];
@@ -201,6 +202,35 @@ describe("iot HTTP API", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ deviceNo: "DZ-X-200", name: "仓储可见性校验", type: "IRRIGATION_PUMP" }),
     });
-    expect(await repository.findByDeviceNo("DZ-X-200")).toMatchObject({ name: "仓储可见性校验" });
+    expect(await repository.findByDeviceNo(DEFAULT_TENANT, "DZ-X-200")).toMatchObject({ name: "仓储可见性校验" });
+  });
+
+  it("台账按租户隔离：别家看不到设备，同型号编号也不撞", async () => {
+    const base = await start(createIotHttpServer());
+    const beta = { "x-tenant-id": "tenant-beta" };
+    const post = (body: unknown, headers: Record<string, string> = {}) =>
+      fetch(`${base}/api/v1/devices`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+
+    // 演示租户的 12 台设备对 tenant-beta 不可见
+    expect((await jsonOf(await fetch(`${base}/api/v1/devices`, { headers: beta }))).data).toMatchObject({ items: [], total: 0, pages: 0 });
+    expect((await fetch(`${base}/api/v1/devices/device-soil-003`, { headers: beta })).status).toBe(404);
+    expect((await fetch(`${base}/api/v1/devices/device-soil-003/commands`, { method: "POST", headers: { "content-type": "application/json", ...beta }, body: JSON.stringify({ type: "CONFIGURE", parameters: {} }) })).status).toBe(404);
+    expect((await fetch(`${base}/api/v1/devices/device-soil-003`, { method: "PUT", headers: { "content-type": "application/json", ...beta }, body: JSON.stringify({ name: "越租户改名" }) })).status).toBe(404);
+
+    // 出厂编号只在租户内唯一：beta 登记同型号设备不该撞演示租户的 DZ-W-001
+    const sameNo = await post({ deviceNo: "DZ-W-001", name: "beta 气象站", type: "WEATHER_STATION" }, beta);
+    expect(sameNo.status).toBe(201);
+    const created = await jsonOf(sameNo);
+    expect(created.data).toMatchObject({ deviceNo: "DZ-W-001", name: "beta 气象站" });
+    expect((await post({ deviceNo: "DZ-W-001", name: "beta 撞号", type: "WEATHER_STATION" }, beta)).status).toBe(409);
+
+    // 各看各的：演示租户仍是 12 台，beta 只有刚登记的一台
+    expect((await jsonOf(await fetch(`${base}/api/v1/devices?size=200`))).data.total).toBe(demoDevices().length);
+    const betaList = await jsonOf(await fetch(`${base}/api/v1/devices?size=200`, { headers: beta }));
+    expect(betaList.data.items.map((item: { id: string }) => item.id)).toEqual([created.data.id]);
+
+    const renamed = await fetch(`${base}/api/v1/devices/${created.data.id}`, { method: "PUT", headers: { "content-type": "application/json", ...beta }, body: JSON.stringify({ status: "ONLINE" }) });
+    expect((await jsonOf(renamed)).data).toMatchObject({ id: created.data.id, status: "ONLINE" });
+    expect((await jsonOf(await fetch(`${base}/api/v1/devices/${created.data.id}`))).data).toBeNull();
   });
 });

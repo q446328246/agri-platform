@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { PrismaClientLike, Tx } from "@agri/db";
 
-import { SqlDeviceRepository } from "../src/device.repository.js";
+import { DEFAULT_TENANT, SqlDeviceRepository } from "../src/device.repository.js";
 
 /**
  * SQL 设备仓储的语句与映射验证：部署走 sql 模式，
- * 列名、筛选片段和「空串/NULL 不当成真实取值」这些口径只有这里能守住。
+ * 列名、筛选片段、租户前缀和「空串/NULL 不当成真实取值」这些口径只有这里能守住。
  */
 
 interface Captured {
@@ -34,66 +34,88 @@ function makeClient(rows: Record<string, unknown>[] = []) {
 }
 
 const EAST_1 = "511723-000001-01-00001-0000-5";
+const OTHER_TENANT = "tenant-beta";
+
+/** 台账行样例：迁移 035 之后每行都带 tenant_id，映射出的归属全靠它 */
+function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "device-x",
+    tenant_id: DEFAULT_TENANT,
+    device_no: "DZ-X-1",
+    name: "东部墒情站",
+    type: "SOIL_SENSOR",
+    status: "ONLINE",
+    plot_code: EAST_1,
+    last_seen_at: "2026-11-09T01:02:03.000Z",
+    created_at: "2026-11-01",
+    updated_at: "2026-11-02",
+    ...overrides,
+  };
+}
 
 describe("SqlDeviceRepository", () => {
   it("把台账行映射成设备，未绑定地块与未上报都不编造取值", async () => {
     const { client } = makeClient([
-      { id: "device-x", device_no: "DZ-X-1", name: "东部墒情站", type: "SOIL_SENSOR", status: "ONLINE", plot_code: EAST_1, last_seen_at: "2026-11-09T01:02:03.000Z", created_at: "2026-11-01", updated_at: "2026-11-02" },
-      { id: "device-y", device_no: "DZ-Y-1", name: "首部气象站", type: "WEATHER_STATION", status: "OFFLINE", plot_code: "", last_seen_at: null, created_at: "2026-11-01", updated_at: "2026-11-01" },
+      row(),
+      row({ id: "device-y", device_no: "DZ-Y-1", name: "首部气象站", type: "WEATHER_STATION", status: "OFFLINE", plot_code: "", last_seen_at: null }),
     ]);
-    const list = await new SqlDeviceRepository(client).list();
-    expect(list[0]).toMatchObject({ id: "device-x", deviceNo: "DZ-X-1", type: "SOIL_SENSOR", status: "ONLINE", plotCode: EAST_1 });
+    const list = await new SqlDeviceRepository(client).list(DEFAULT_TENANT);
+    expect(list[0]).toMatchObject({ id: "device-x", tenantId: DEFAULT_TENANT, deviceNo: "DZ-X-1", type: "SOIL_SENSOR", status: "ONLINE", plotCode: EAST_1 });
     expect(list[0]!.lastSeenAt).toBe("2026-11-09T01:02:03.000Z");
     expect(list[1]!.plotCode).toBeUndefined();
     expect(list[1]!.lastSeenAt).toBeNull();
   });
 
-  it("筛选条件按出现顺序编号占位，值全部走参数绑定", async () => {
+  it("筛选条件按出现顺序编号占位，租户固定为第一个条件", async () => {
     const { client, calls } = makeClient();
-    await new SqlDeviceRepository(client).list({ type: "INSECT_LAMP", status: "OFFLINE", plotCode: EAST_1, keyword: "测报灯" });
+    await new SqlDeviceRepository(client).list(DEFAULT_TENANT, { type: "INSECT_LAMP", status: "OFFLINE", plotCode: EAST_1, keyword: "测报灯" });
     const { query, params } = calls[0]!;
-    expect(query).toContain("WHERE type = $1 AND status = $2 AND plot_code = $3 AND (name ILIKE $4 OR device_no ILIKE $4)");
+    expect(query).toContain("WHERE tenant_id = $1 AND type = $2 AND status = $3 AND plot_code = $4 AND (name ILIKE $5 OR device_no ILIKE $5)");
     expect(query).toContain("ORDER BY device_no");
-    expect(params).toEqual(["INSECT_LAMP", "OFFLINE", EAST_1, "%测报灯%"]);
+    expect(params).toEqual([DEFAULT_TENANT, "INSECT_LAMP", "OFFLINE", EAST_1, "%测报灯%"]);
   });
 
-  it("无筛选条件时不拼空 WHERE", async () => {
+  it("没有筛选条件也带租户条件，绝不退化成全表台账", async () => {
     const { client, calls } = makeClient();
-    await new SqlDeviceRepository(client).list({});
-    expect(calls[0]!.query).not.toContain("WHERE");
-    expect(calls[0]!.params).toEqual([]);
+    await new SqlDeviceRepository(client).list(OTHER_TENANT, {});
+    expect(calls[0]!.query).toContain("WHERE tenant_id = $1");
+    expect(calls[0]!.query).not.toContain(" AND ");
+    expect(calls[0]!.params).toEqual([OTHER_TENANT]);
   });
 
   it("新增写入台账表，未上报时间落 NULL 而不是当前时刻", async () => {
     const { client, calls } = makeClient();
-    const created = await new SqlDeviceRepository(client).create({ deviceNo: "DZ-N-001", name: "新墒情站", type: "SOIL_SENSOR", status: "OFFLINE", plotCode: EAST_1 });
+    const created = await new SqlDeviceRepository(client).create(OTHER_TENANT, { deviceNo: "DZ-N-001", name: "新墒情站", type: "SOIL_SENSOR", status: "OFFLINE", plotCode: EAST_1 });
     const insert = calls.find((call) => call.query.includes("INSERT INTO devices"));
     expect(insert).toBeDefined();
     expect(insert!.query).toContain("last_seen_at, created_at, updated_at");
-    expect(insert!.params.slice(0, 6)).toEqual([created.id, "DZ-N-001", "新墒情站", "SOIL_SENSOR", "OFFLINE", EAST_1]);
+    expect(insert!.params.slice(0, 7)).toEqual([created.id, OTHER_TENANT, "DZ-N-001", "新墒情站", "SOIL_SENSOR", "OFFLINE", EAST_1]);
     expect(created.id.startsWith("device-")).toBe(true);
+    expect(created.tenantId).toBe(OTHER_TENANT);
     expect(created.lastSeenAt).toBeNull();
   });
 
   it("未绑定地块时以空串入库，避免仓储到处判 NULL", async () => {
     const { client, calls } = makeClient();
-    await new SqlDeviceRepository(client).create({ deviceNo: "DZ-N-002", name: "无地块设备", type: "WEATHER_STATION", status: "ONLINE" });
+    await new SqlDeviceRepository(client).create(DEFAULT_TENANT, { deviceNo: "DZ-N-002", name: "无地块设备", type: "WEATHER_STATION", status: "ONLINE" });
     const insert = calls.find((call) => call.query.includes("INSERT INTO devices"));
-    expect(insert!.params[5]).toBe("");
+    expect(insert!.params[6]).toBe("");
   });
 
-  it("按编号与按 id 查询都限定单条，供撞号校验使用", async () => {
-    const { client, calls } = makeClient([{ id: "device-a", device_no: "DZ-A-1", name: "甲", type: "SOIL_SENSOR", status: "ONLINE", plot_code: "", last_seen_at: null, created_at: "2026-11-01", updated_at: "2026-11-01" }]);
+  it("按编号与按 id 查询都限定单条并锁在租户内，供撞号校验使用", async () => {
+    const { client, calls } = makeClient([row({ id: "device-a", device_no: "DZ-A-1", name: "甲", plot_code: "" })]);
     const repository = new SqlDeviceRepository(client);
-    expect(await repository.findByDeviceNo("DZ-A-1")).toMatchObject({ deviceNo: "DZ-A-1" });
-    expect(await repository.find("device-a")).toMatchObject({ id: "device-a" });
-    expect(calls[0]!.query).toContain("device_no = $1");
-    expect(calls[1]!.query).toContain("id = $1");
+    expect(await repository.findByDeviceNo(DEFAULT_TENANT, "DZ-A-1")).toMatchObject({ deviceNo: "DZ-A-1" });
+    expect(await repository.find(DEFAULT_TENANT, "device-a")).toMatchObject({ id: "device-a" });
+    expect(calls[0]!.query).toContain("WHERE tenant_id = $1 AND device_no = $2");
+    expect(calls[1]!.query).toContain("WHERE tenant_id = $1 AND id = $2");
+    expect(calls[0]!.params).toEqual([DEFAULT_TENANT, "DZ-A-1"]);
+    expect(calls[1]!.params).toEqual([DEFAULT_TENANT, "device-a"]);
   });
 
   it("编辑台账按合并后的全量字段更新，未传字段沿用当前行", async () => {
     const calls: Captured[] = [];
-    const current: Record<string, unknown> = { id: "device-a", device_no: "DZ-A-1", name: "甲", type: "SOIL_SENSOR", status: "ONLINE", plot_code: EAST_1, last_seen_at: null, created_at: "2026-11-01", updated_at: "2026-11-01" };
+    const current = row({ id: "device-a", device_no: "DZ-A-1", name: "甲", last_seen_at: null });
     // 假客户端按语句区分：SELECT 给当前行，UPDATE...RETURNING 给写回后的行，这样能同时校验合并入参与返回映射
     const client: PrismaClientLike = {
       async $connect() {},
@@ -112,29 +134,45 @@ describe("SqlDeviceRepository", () => {
       },
     };
 
-    const updated = await new SqlDeviceRepository(client).update("device-a", { status: "OFFLINE", plotCode: "" });
+    const updated = await new SqlDeviceRepository(client).update(DEFAULT_TENANT, "device-a", { status: "OFFLINE", plotCode: "" });
     const statement = calls.find((call) => call.query.includes("UPDATE devices"));
     expect(statement).toBeDefined();
     expect(statement!.query).toContain("RETURNING");
     expect(statement!.query).toContain("updated_at = $5::timestamptz");
+    expect(statement!.query).toContain("WHERE tenant_id = $6 AND id = $7");
     // 名称与类型没传，参数里仍是当前行的取值；解绑地块写成空串而不是 NULL
     expect(statement!.params.slice(0, 4)).toEqual(["甲", "SOIL_SENSOR", "OFFLINE", ""]);
-    expect(statement!.params[5]).toBe("device-a");
-    expect(updated).toMatchObject({ id: "device-a", deviceNo: "DZ-A-1", name: "甲", type: "SOIL_SENSOR", status: "OFFLINE" });
+    expect(statement!.params.slice(5)).toEqual([DEFAULT_TENANT, "device-a"]);
+    expect(updated).toMatchObject({ id: "device-a", tenantId: DEFAULT_TENANT, deviceNo: "DZ-A-1", name: "甲", type: "SOIL_SENSOR", status: "OFFLINE" });
     expect(updated!.plotCode).toBeUndefined();
     expect(updated!.updatedAt).toBe(String(statement!.params[4]));
   });
 
   it("设备不存在时更新返回 null，不发写语句", async () => {
     const { client, calls } = makeClient([]);
-    expect(await new SqlDeviceRepository(client).update("device-missing", { name: "乙" })).toBeNull();
+    expect(await new SqlDeviceRepository(client).update(DEFAULT_TENANT, "device-missing", { name: "乙" })).toBeNull();
     expect(calls.some((call) => call.query.includes("UPDATE devices"))).toBe(false);
+  });
+
+  it("读、写与撞号校验都锁在租户内，没有一条语句能跨租户", async () => {
+    const { client, calls } = makeClient([row({ tenant_id: OTHER_TENANT })]);
+    const repository = new SqlDeviceRepository(client);
+    await repository.list(DEFAULT_TENANT, { type: "SOIL_SENSOR" });
+    await repository.find(DEFAULT_TENANT, "device-x");
+    await repository.findByDeviceNo(DEFAULT_TENANT, "DZ-X-1");
+    await repository.create(DEFAULT_TENANT, { deviceNo: "DZ-N-009", name: "校验租户归属", type: "SOIL_SENSOR", status: "OFFLINE" });
+    await repository.update(DEFAULT_TENANT, "device-x", { name: "改名" });
+    // create 走 INSERT，租户写在 VALUES 的参数里而不是 WHERE
+    const scoped = calls.filter((call) => !call.query.includes("INSERT INTO devices"));
+    expect(scoped).toHaveLength(5);
+    expect(scoped.every((call) => call.query.includes("tenant_id = $1") && call.params[0] === DEFAULT_TENANT)).toBe(true);
+    expect(calls.find((call) => call.query.includes("INSERT INTO devices"))!.params[1]).toBe(DEFAULT_TENANT);
   });
 
   it("查不到时返回 null 而不是空对象", async () => {
     const { client } = makeClient();
     const repository = new SqlDeviceRepository(client);
-    expect(await repository.find("device-missing")).toBeNull();
-    expect(await repository.findByDeviceNo("DZ-MISSING")).toBeNull();
+    expect(await repository.find(DEFAULT_TENANT, "device-missing")).toBeNull();
+    expect(await repository.findByDeviceNo(DEFAULT_TENANT, "DZ-MISSING")).toBeNull();
   });
 });
