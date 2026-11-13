@@ -14,6 +14,6 @@ export type { CropSeason, CropSeasonInput, CropSeasonPatch, CropSeasonRepository
 export { PLOT_CHANGE_ACTIONS, InMemoryPlotChangeLogRepository, SqlPlotChangeLogRepository } from "./plot-change-log.repository.js";
 export type { PlotChangeAction, PlotChangeLog, PlotChangeLogRepository } from "./plot-change-log.repository.js";
 export { PlotService } from "./plot.service.js";
-export type { MergePlotsInput, MergePlotsResult, RegisterPlotInput, SplitPlotInput, SplitPlotPiece, SplitPlotResult } from "./plot.service.js";
+export type { MergePlotsInput, MergePlotsResult, MergePreviewResult, RegisterPlotInput, SplitPlotInput, SplitPlotPiece, SplitPlotResult } from "./plot.service.js";
 export { createExamplePrismaFactory, exampleId } from "./prisma.factory.js";
 export { createPlotHttpServer } from "./http.js";

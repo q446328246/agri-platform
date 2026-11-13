@@ -33,6 +33,18 @@ function createRainProbabilityFetcher(weatherUrl: string): NonNullable<DecisionD
   };
 }
 
+/** 从地块台账取面积（亩）；取不到就返回缺测，控制侧据此拒绝自动执行而不是猜一个面积。 */
+function createPlotAreaFetcher(plotUrl: string): NonNullable<DecisionDependencies["fetchPlotArea"]> {
+  return async (plotCode, identity) => {
+    try {
+      const res = await fetch(`${plotUrl}/api/v1/plots/${encodeURIComponent(plotCode)}`, { headers: identity, signal: AbortSignal.timeout(2000) });
+      if (!res.ok) return undefined;
+      const json = (await res.json()) as { data?: { areaMu?: unknown } };
+      return optionalFiniteNumber(json.data?.areaMu);
+    } catch { return undefined; }
+  };
+}
+
 async function bootstrap(): Promise<void> {
   const port = Number(process.env.PORT ?? 3006);
   const logger = new LoggerService({ serviceName: "decision-service", level: parseLogLevel(process.env.LOG_LEVEL) });
@@ -55,13 +67,14 @@ async function bootstrap(): Promise<void> {
     const tenantId = process.env.TENANT_ID ?? "tenant-demo";
     const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
     const fetchRainProbability = createRainProbabilityFetcher(weatherUrl);
+    const fetchPlotArea = createPlotAreaFetcher(process.env.PLOT_SERVICE_URL ?? "http://127.0.0.1:3002");
     // 中继把本地消息表投递到共享事件日志，其他服务据此消费处方事件
     const store: EventLogStore = new PgEventLogStore(client);
     const publisher = new EventLogPublisher(store, { tenantId, traceId: "decision-relay", producer: "decision" });
     const relay = new OutboxService(outbox, publisher, { tenantId, traceId: "decision-relay", producer: "decision" });
     relay.start();
     setDefaultPublisher(publisher);
-    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, outbox, publisher, tenantId, fetchRainProbability, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
+    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, outbox, publisher, tenantId, fetchRainProbability, fetchPlotArea, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
     // 消费控制服务的结单事件，把处方实际执行的水肥用量回流到 decision_prescription_executions
     const { consumer } = createDecisionEventConsumer(executions, prescriptions, store, {
@@ -86,7 +99,8 @@ async function bootstrap(): Promise<void> {
   if (process.env.SERVICE_MODE === "http") {
     const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
     const fetchRainProbability = createRainProbabilityFetcher(weatherUrl);
-    const server = createDecisionHttpServer({ fetchRainProbability });
+    const fetchPlotArea = createPlotAreaFetcher(process.env.PLOT_SERVICE_URL ?? "http://127.0.0.1:3002");
+    const server = createDecisionHttpServer({ fetchRainProbability, fetchPlotArea });
     server.listen(port, "127.0.0.1", () => logger.warn("decision-service HTTP 已启动（仅供内存测试，无事务保证）", { port }));
     return;
   }

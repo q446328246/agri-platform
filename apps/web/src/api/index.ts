@@ -109,6 +109,23 @@ export const plotApi = {
     return { succeededCodes, failedCodes }
   },
   /**
+   * 合并预演：与真实合并同一套相邻判定与凸包面积，只算不写。
+   * deltaMu 是凸包比源地块台账面积之和多出的亩数，即被圈进来的中间空地。
+   */
+  mergePreview(parcelCodes: string[]): Promise<{
+    parcelCodes: string[]
+    sources: Array<{ parcelCode: string; parcelName: string; areaMu: number }>
+    sourceAreaMu: number
+    hullAreaMu: number
+    deltaMu: number
+    adjacent: boolean
+    groups: string[][]
+    toleranceM: number
+    geom: GeoPolygon | null
+  }> {
+    return post('/plots/merge-preview', { parcelCodes })
+  },
+  /**
    * 合并地块：服务端要求所选地块边界相邻，不相邻时返回 409 并列出分成几组。
    * 通过后边界取源地块顶点凸包，面积由后端按合并边界现算；源地块整批归档。
    */
@@ -681,15 +698,16 @@ export const weatherApi = {
 }
 
 export const operationApi = {
-  getTasks(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; status?: string | undefined; type?: string | undefined; plotCode?: string | undefined; from?: string | undefined; to?: string | undefined }): Promise<PageResult<any>> {
+  getTasks(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; status?: string | undefined; type?: string | undefined; plotCode?: string | undefined; from?: string | undefined; to?: string | undefined; archived?: 'NONE' | 'ONLY' | 'ALL' | undefined }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/farm-tasks', cleanParams(params))
   },
   createTask(data: { plotCode: string; type: string; name: string; scheduledAt?: string; scheduledEndAt?: string; assigneeName?: string }): Promise<any> {
     return post<any>('/farm-tasks', data)
   },
-  /** 单条任务详情：含 startedAt/completedAt 实际作业时间，不存在时服务端返回 404 */
-  getTask(id: string): Promise<any> {
-    return get<any>(`/farm-tasks/${encodeURIComponent(id)}`)
+  /** 单条任务详情：含 startedAt/completedAt 实际作业时间，不存在时服务端返回 404；
+   *  includeArchived 只放行归档行的回查，状态流转与删除仍按在册口径 */
+  getTask(id: string, includeArchived = false): Promise<any> {
+    return get<any>(`/farm-tasks/${encodeURIComponent(id)}`, includeArchived ? { includeArchived: 'true' } : undefined)
   },
   /** 状态流转必须带当前 version 防并发覆盖；完成时必须附实际作业结果 */
   updateStatus(id: string, status: string, options?: { version?: number; result?: { outcome: 'success' | 'partial' | 'failed'; finishedAreaMu: number; notes?: string } }): Promise<any> {

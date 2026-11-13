@@ -8,8 +8,8 @@ import type { NavPlan } from "./navigation.js";
 import { CoverageError, parseCoverageRequest, planCoverage } from "./coverage.js";
 import type { CoveragePlan } from "./coverage.js";
 
-import { canTransition, InMemoryTaskRepository, TASK_STATUSES, TASK_TYPES } from "./task.repository.js";
-import type { Task, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType } from "./task.repository.js";
+import { canTransition, InMemoryTaskRepository, TASK_ARCHIVE_FILTERS, TASK_STATUSES, TASK_TYPES } from "./task.repository.js";
+import type { Task, TaskArchiveFilter, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType } from "./task.repository.js";
 const hoursFromNow = (hours: number): string => new Date(Date.now() + hours * 3600000).toISOString();
 /** 演示农事任务：覆盖六种作业类型与四种状态，任务调度页一进就能看到排程
  * startedAt/completedAt 与状态对齐（进行中的任务按计划时间开工，已完成的补一个作业时长），
@@ -70,6 +70,11 @@ function queryOf(query: URLSearchParams): TaskQuery {
   if (type) { if (!TASK_TYPES.includes(type as TaskType)) throw new InputError("任务类型非法"); result.type = type as TaskType; }
   if (query.get("keyword")) result.keyword = text(query.get("keyword"), "关键词", 200);
   if (query.get("plotCode")) result.plotCode = text(query.get("plotCode"), "地块编码", 100);
+  const archived = query.get("archived");
+  if (archived) {
+    if (!TASK_ARCHIVE_FILTERS.includes(archived as TaskArchiveFilter)) throw new InputError("归档筛选非法");
+    result.archived = archived as TaskArchiveFilter;
+  }
   const from = time(query.get("from") || undefined, "开始日期", true);
   const to = time(query.get("to") || undefined, "结束日期", true, true);
   if (from) result.from = from;
@@ -125,7 +130,9 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
         send(res, 200, updated, traceId); return;
       }
       if (detailMatch?.[1] && req.method === "GET") {
-        const task = await tasks.find(tenantId, decodeURIComponent(detailMatch[1]));
+        // 归档行默认仍读不到；带 includeArchived=true 才放行回查，跃迁与删除不受这个开关影响
+        const includeArchived = url.searchParams.get("includeArchived") === "true";
+        const task = await tasks.find(tenantId, decodeURIComponent(detailMatch[1]), includeArchived);
         send(res, task ? 200 : 404, task, traceId, task ? "" : "任务不存在"); return;
       }
       if (detailMatch?.[1] && req.method === "DELETE") {

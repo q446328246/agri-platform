@@ -14,6 +14,13 @@
               <el-option label="已取消" value="CANCELLED" />
             </el-select>
           </el-form-item>
+          <el-form-item label="归档状态">
+            <el-select v-model="queryForm.archived" style="width: 120px">
+              <el-option label="在册" value="NONE" />
+              <el-option label="已归档" value="ONLY" />
+              <el-option label="全部" value="ALL" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="任务类型">
             <el-select v-model="queryForm.taskType" placeholder="请选择" clearable style="width: 130px">
               <el-option
@@ -60,11 +67,12 @@
             <el-tag size="small">{{ getTaskTypeText(row.taskType) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="100" align="center">
+        <el-table-column prop="status" label="状态" width="150" align="center">
           <template #default="{ row }">
             <el-tag :type="getTaskStatusType(row.status)" size="small">
               {{ getTaskStatusText(row.status) }}
             </el-tag>
+            <el-tag v-if="row.deletedAt" type="info" size="small" style="margin-left: 4px">已归档</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="assigneeName" label="负责人" width="120" />
@@ -74,13 +82,19 @@
         <el-table-column prop="planEndDate" label="计划结束时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.planEndDate) }}</template>
         </el-table-column>
+        <el-table-column v-if="queryForm.archived !== 'NONE'" prop="deletedAt" label="归档时间" width="170">
+          <template #default="{ row }">{{ formatDateTime(row.deletedAt) }}</template>
+        </el-table-column>
         <el-table-column label="操作" width="280" align="center" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="showDetail(row)">详情</el-button>
-            <el-button v-if="row.status === 'PENDING'" link type="success" size="small" @click="handleStatus(row, 'RUNNING')">开始</el-button>
-            <el-button v-if="row.status === 'IN_PROGRESS'" link type="success" size="small" @click="openComplete(row)">完成</el-button>
-            <el-button v-if="row.status === 'PENDING' || row.status === 'IN_PROGRESS'" link type="danger" size="small" @click="handleCancel(row)">取消</el-button>
-            <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
+            <!-- 归档行只读：状态跃迁与删除在服务端都带 deleted_at IS NULL，这里不给按了会 404 的按钮 -->
+            <template v-if="!row.deletedAt">
+              <el-button v-if="row.status === 'PENDING'" link type="success" size="small" @click="handleStatus(row, 'RUNNING')">开始</el-button>
+              <el-button v-if="row.status === 'IN_PROGRESS'" link type="success" size="small" @click="openComplete(row)">完成</el-button>
+              <el-button v-if="row.status === 'PENDING' || row.status === 'IN_PROGRESS'" link type="danger" size="small" @click="handleCancel(row)">取消</el-button>
+              <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
+            </template>
           </template>
         </el-table-column>
       </el-table>
@@ -148,6 +162,7 @@
           <el-descriptions-item label="取消时间">{{ formatDateTime(taskDetail.cancelledAt) }}</el-descriptions-item>
           <el-descriptions-item label="作业结果">{{ taskDetail.result ? `${getOutcomeText(taskDetail.result.outcome)} · 实际 ${taskDetail.result.finishedAreaMu.toFixed(2)} 亩` : '-' }}</el-descriptions-item>
           <el-descriptions-item label="创建时间">{{ formatDateTime(taskDetail.createdAt) }}</el-descriptions-item>
+          <el-descriptions-item v-if="taskDetail.deletedAt" label="归档时间">{{ formatDateTime(taskDetail.deletedAt) }}</el-descriptions-item>
           <el-descriptions-item label="任务编号">{{ taskDetail.id }}</el-descriptions-item>
           <el-descriptions-item v-if="taskDetail.result?.notes" label="作业说明" :span="2">{{ taskDetail.result.notes }}</el-descriptions-item>
         </el-descriptions>
@@ -221,7 +236,8 @@ const queryForm = reactive<FarmTaskQuery>({
   keyword: '',
   status: undefined,
   taskType: undefined,
-  parcelCode: ''
+  parcelCode: '',
+  archived: 'NONE'
 })
 
 // 计划时间区间（operation-service 按 scheduledAt/createdAt 命中）
@@ -246,6 +262,7 @@ async function fetchList() {
       status: queryForm.status,
       type: queryForm.taskType,
       plotCode: queryForm.parcelCode,
+      archived: queryForm.archived,
       from: planRange.value?.[0],
       to: planRange.value?.[1]
     })
@@ -276,6 +293,7 @@ function handleReset() {
   queryForm.status = undefined
   queryForm.taskType = undefined
   queryForm.parcelCode = ''
+  queryForm.archived = 'NONE'
   planRange.value = null
   queryForm.page = 1
   fetchList()
@@ -307,14 +325,14 @@ function displayStatus(status: string): FarmTaskStatus {
   return (status === 'RUNNING' ? 'IN_PROGRESS' : status) as FarmTaskStatus
 }
 
-async function showDetail(row: { id: string }) {
+async function showDetail(row: { id: string; deletedAt?: string }) {
   detailVisible.value = true
   detailLoading.value = true
   taskDetail.value = null
   taskPlot.value = null
   taskCommands.value = []
   try {
-    const task = await operationApi.getTask(row.id)
+    const task = await operationApi.getTask(row.id, Boolean(row.deletedAt))
     taskDetail.value = task
     // 地块档案与指令分属地块、控制两个服务，任一侧取不到只让对应区块显示空态，不影响任务本身
     const [plots, commands] = await Promise.all([
@@ -361,7 +379,7 @@ async function handleCancel(row: { id: string; name: string; version: number }) 
 
 async function handleDelete(row: { id: string; name: string }) {
   try {
-    await ElMessageBox.confirm(`确定删除任务「${row.name}」吗？删除是归档：任务从列表与详情消失，作业记录仍留在台账里可回查`, '删除任务', { type: 'warning' })
+    await ElMessageBox.confirm(`确定删除任务「${row.name}」吗？删除是归档：任务从在册列表消失，作业记录仍留在台账里，可用「归档状态=已归档」回查`, '删除任务', { type: 'warning' })
   } catch { return }
   try {
     await operationApi.deleteTask(row.id)

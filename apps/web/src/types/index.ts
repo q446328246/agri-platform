@@ -298,6 +298,8 @@ export interface FarmTask {
   result?: string;
   createdAt: string;
   updatedAt: string;
+  /** 归档时刻。在册任务没有这一列，与地块/片区软删同一口径 */
+  deletedAt?: string;
   /** 地块边界几何，CGCS2000 GeoJSON Polygon */
   geom?: unknown;
 }
@@ -312,6 +314,8 @@ export interface FarmTaskQuery {
   taskType?: string | undefined;
   startDate?: string;
   endDate?: string;
+  /** 归档筛选：NONE 只看在册（缺省）、ONLY 只看已归档、ALL 两者都看 */
+  archived?: 'NONE' | 'ONLY' | 'ALL';
 }
 
 // 看板统计数据

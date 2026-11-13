@@ -158,6 +158,35 @@
           <span class="merge-source__area">{{ Number(row.areaMu ?? 0).toFixed(2) }} 亩</span>
         </div>
       </div>
+      <div v-loading="previewLoading" class="merge-preview">
+        <template v-if="mergePreview">
+          <el-alert v-if="!mergePreview.adjacent" type="error" :closable="false" show-icon class="merge-alert">
+            <template #title>
+              所选地块不相邻（容差 {{ mergePreview.toleranceM }} 米），服务端会拒掉本次合并。分成 {{ mergePreview.groups.length }} 组：{{ mergePreview.groups.map((group) => group.join('、')).join(' ｜ ') }}
+            </template>
+          </el-alert>
+          <el-alert v-else-if="!mergePreview.geom" type="error" :closable="false" show-icon class="merge-alert">
+            <template #title>源地块边界顶点不足，无法生成合并边界</template>
+          </el-alert>
+          <template v-else>
+            <div class="merge-preview__row">
+              <span>源面积合计</span><span class="merge-source__area">{{ mergePreview.sourceAreaMu.toFixed(2) }} 亩</span>
+            </div>
+            <div class="merge-preview__row">
+              <span>合并后边界面积（凸包现算）</span><span class="merge-source__area">{{ mergePreview.hullAreaMu.toFixed(2) }} 亩</span>
+            </div>
+            <div class="merge-preview__row merge-preview__delta">
+              <span>凸包比源面积和多出</span>
+              <span class="merge-source__area">{{ mergePreview.deltaMu > 0 ? '+' : '' }}{{ mergePreview.deltaMu.toFixed(2) }} 亩</span>
+            </div>
+            <p v-if="mergePreview.deltaMu > 0" class="merge-preview__hint">
+              地块虽连成一片，但整体呈凹形，凸包会把中间 {{ mergePreview.deltaMu.toFixed(2) }} 亩空地一并圈进新台账。合并后面积以此为准，不接受手填；若不想计入这块空地，请改选地块或先调整边界。
+            </p>
+            <p v-else class="merge-preview__hint">凸包与源面积和一致，没有把额外空地圈进来。</p>
+          </template>
+        </template>
+        <p v-else-if="!previewLoading" class="merge-preview__hint">预演未取到，合并仍会由服务端按同一口径校验。</p>
+      </div>
       <el-form label-width="90px">
         <el-form-item label="合并后名称">
           <el-input v-model="mergeForm.name" maxlength="40" :placeholder="mergeRows[0] ? `默认沿用「${mergeRows[0].name}」` : '请输入合并后名称'" />
@@ -168,7 +197,7 @@
       </el-form>
       <template #footer>
         <el-button @click="mergeVisible = false">取消</el-button>
-        <el-button type="warning" :loading="merging" @click="submitMerge">
+        <el-button type="warning" :loading="merging" :disabled="mergeBlocked" @click="submitMerge">
           确认合并 {{ mergeRows.length }} 块
         </el-button>
       </template>
@@ -177,7 +206,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { plotApi } from '@/api'
@@ -350,6 +379,22 @@ const mergeVisible = ref(false)
 const merging = ref(false)
 const mergeRows = ref<any[]>([])
 const mergeForm = reactive({ name: '', remark: '' })
+const mergePreview = ref<any | null>(null)
+const previewLoading = ref(false)
+/** 预演已经判出会被服务端拒掉的条件时，不给一个点了必吃 409 的按钮 */
+const mergeBlocked = computed(() => Boolean(mergePreview.value && (!mergePreview.value.adjacent || !mergePreview.value.geom)))
+
+async function loadMergePreview() {
+  previewLoading.value = true
+  mergePreview.value = null
+  try {
+    mergePreview.value = await plotApi.mergePreview(mergeRows.value.map((row) => row.parcelCode))
+  } catch (error) {
+    console.error('合并预演失败', error)
+  } finally {
+    previewLoading.value = false
+  }
+}
 
 function openMerge() {
   if (selectedRows.value.length < 2) {
@@ -360,6 +405,7 @@ function openMerge() {
   mergeForm.name = ''
   mergeForm.remark = ''
   mergeVisible.value = true
+  void loadMergePreview()
 }
 
 async function submitMerge() {
@@ -375,6 +421,7 @@ async function submitMerge() {
     })
     ElMessage.success(`已合并为「${result.plot.name}」· ${result.plot.areaMu.toFixed(2)} 亩，源地块已归档`)
     mergeVisible.value = false
+    mergePreview.value = null
     selectedCodes.value = []
     selectedRows.value = []
     await fetchList()
@@ -441,4 +488,8 @@ onMounted(() => {
 .merge-sources { max-height: 160px; overflow-y: auto; margin-bottom: 12px; border: 1px solid var(--el-border-color); border-radius: 4px; padding: 4px 10px; }
 .merge-source { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 13px; color: var(--el-text-color-regular); }
 .merge-source__area { font-variant-numeric: tabular-nums; }
+.merge-preview { margin-bottom: 12px; border: 1px solid var(--el-border-color); border-radius: 4px; padding: 8px 10px; }
+.merge-preview__row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: 13px; color: var(--el-text-color-regular); }
+.merge-preview__delta { font-weight: 600; color: var(--el-color-warning); }
+.merge-preview__hint { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: var(--el-text-color-secondary); }
 </style>

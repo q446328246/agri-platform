@@ -13,6 +13,8 @@ import {
 import type { EventLogStore } from "@agri/mq";
 
 import type { ControlCommand, ControlCommandRepository, ControlCommandType } from "./control.repository.js";
+import { executionPlanOf } from "./command-spec.js";
+import type { IrrigationZone } from "./command-spec.js";
 
 /**
  * 控制指令的事件消费。
@@ -66,6 +68,9 @@ function buildCommand(
 ): ControlCommand {
   const plotCode = requireParcelId((event.payload as { parcelId?: unknown }).parcelId);
   if (typeof event.eventId !== "string" || !event.eventId.trim()) throw new Error("自动控制事件 eventId 不能为空");
+  // 事件消费不走 HTTP 入队，包络必须在这里用同一个 executionPlanOf 现算，
+  // 否则现场网关取不到 plan，自动指令一律被判「不知道开多久」而拒执行
+  const plan = executionPlanOf(type, parameters);
   return {
     id: `CTL-${event.eventId}`,
     // 归属跟着事件信封走：自动指令由哪个租户的事件触发就记在哪个租户名下
@@ -74,7 +79,7 @@ function buildCommand(
     plotCode,
     operatorId: AUTO_OPERATOR,
     type,
-    parameters,
+    parameters: plan === undefined ? parameters : { ...parameters, plan },
     status: "QUEUED",
     origin: "EVENT",
     sourceEventId: event.eventId,
@@ -82,6 +87,39 @@ function buildCommand(
     version: 1,
     createdAt: event.occurredAt,
   };
+}
+
+/**
+ * 处方明细 → 现场执行分区。
+ *
+ * 只有「单条灌溉明细 + 地块台账面积」能无歧义地推出包络：面积取事件带出的台账值，
+ * 灌水定额就是明细用量（毫米），上限沿用 `validateIrrigationParameters` 的 0~100。
+ * 其余情况一律不猜，显式标成待人工确认，让台账与网关回执都说得清为什么没执行：
+ * - 多条明细各自给同一地块的定额，分区面积怎么分摊平台没有权威口径；
+ * - 施肥明细用量是千克/亩而不是水深，推不出阀门该开多久；
+ * - 台账面积缺测时宁可不执行，也不拿一个估计面积去开阀。
+ */
+function prescriptionExecution(
+  payload: PrescriptionIssuedPayload,
+  items: PrescriptionIssuedPayload["items"],
+  plotCode: string,
+): { areaMu?: number; zones?: IrrigationZone[]; envelopeBlocked?: string } {
+  const areaMu = isNonNegativeNumber(payload.areaMu) && payload.areaMu > 0 ? payload.areaMu : undefined;
+  const area = areaMu === undefined ? {} : { areaMu };
+  const first = items[0]!;
+  if (payload.planType === "fertilization") {
+    return { ...area, envelopeBlocked: "施肥处方用量单位为千克/亩，平台没有灌水定额与料液密度的权威值，推不出阀门开启时长，需人工确认作业量后下发" };
+  }
+  if (items.length > 1) {
+    return { ...area, envelopeBlocked: `处方含 ${items.length} 条明细，各明细的分区面积没有权威分摊口径，需人工确认分区与作业量后下发` };
+  }
+  if (areaMu === undefined) {
+    return { envelopeBlocked: "事件未带出地块台账面积，无法现算计划水量与阀门开启时长，需人工确认后下发" };
+  }
+  if (!(first.dosage > 0 && first.dosage <= 100)) {
+    return { ...area, envelopeBlocked: `处方灌水定额 ${first.dosage} 毫米不在可执行范围（0 到 100），需人工确认后下发` };
+  }
+  return { ...area, zones: [{ zoneCode: first.gridCode?.trim() || plotCode, areaMu, targetMm: first.dosage }] };
 }
 
 /** 事件消费处理器：一个方法对应一个主题 */
@@ -106,6 +144,8 @@ export class ControlCommandConsumer {
         value: payload.value,
         threshold: payload.threshold,
         gridCode: payload.gridCode ?? "",
+        // 越限事件只给出含水率与阈值，没有「该补多少水」的权威值，不猜定额
+        envelopeBlocked: "越限自动补灌只带含水率与阈值，没有灌水定额的权威值，需人工确认作业量后下发",
       }),
     );
   }
@@ -116,7 +156,7 @@ export class ControlCommandConsumer {
     const payload = event.payload;
     if (payload.planType === "pesticide") return;
     if (payload.planType !== "irrigation" && payload.planType !== "fertilization") throw new Error("未知处方动作类型");
-    requireParcelId(payload.parcelId);
+    const plotCode = requireParcelId(payload.parcelId);
     if (!Array.isArray(payload.items)) throw new Error("处方 items 必须为数组");
     if (payload.items.length === 0) return;
     // 必须先校验全部明细，再创建一条完整指令；不可过滤非法项后部分执行。
@@ -131,6 +171,7 @@ export class ControlCommandConsumer {
     });
     const type = COMMAND_BY_PLAN[payload.planType]!;
     const first = items[0]!;
+    const execution = prescriptionExecution(payload, items, plotCode);
     await this.commands.create(
       buildCommand(event, type, `${PLAN_LABELS[payload.planType]}处方下发：共 ${items.length} 项明细`, {
         source: "prescription",
@@ -139,6 +180,9 @@ export class ControlCommandConsumer {
         planType: payload.planType,
         itemCount: items.length,
         items,
+        ...(execution.areaMu === undefined ? {} : { areaMu: execution.areaMu }),
+        ...(execution.zones === undefined ? {} : { zones: execution.zones }),
+        ...(execution.envelopeBlocked === undefined ? {} : { envelopeBlocked: execution.envelopeBlocked }),
         // 兼容旧的单项参数读取方式，多项必须使用完整 items。
         ...(items.length === 1 ? { materialCode: first.materialCode, dosage: first.dosage } : {}),
       }),

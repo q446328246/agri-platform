@@ -84,6 +84,12 @@ export interface PrescriptionIssuedPayload {
   seasonId: string;
   /** 处方类型：irrigation 灌溉、fertilization 施肥、pesticide 植保 */
   planType: "irrigation" | "fertilization" | "pesticide";
+  /**
+   * 地块台账面积（亩），生成处方时从地块服务取到的权威值。
+   * 控制侧据此把单条灌溉明细翻译成执行分区，现算阀门该开多久；
+   * 取不到就不带这个字段，下游宁可不执行也不猜面积。
+   */
+  areaMu?: number;
   /** 处方明细，按网格或按地块整体给出 */
   items: PrescriptionItem[];
 }

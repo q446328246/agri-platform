@@ -613,6 +613,16 @@ export function createPlotHttpServer(
         return;
       }
       // 合并/拆分：静态前缀路由，必须先于 /plots/:code 匹配，否则 merge/split 会被当成地块编码
+      if (url.pathname === `${API_PREFIX}/plots/merge-preview` && request.method === "POST") {
+        const input = await readJson(request);
+        const parcelCodes = Array.isArray(input.parcelCodes) ? input.parcelCodes.map(String) : [];
+        if (parcelCodes.length < 2) {
+          send(response, 400, null, requestTraceId, "parcelCodes 至少需要两个地块编码");
+          return;
+        }
+        send(response, 200, await service.previewMerge({ parcelCodes }), requestTraceId);
+        return;
+      }
       if (url.pathname === `${API_PREFIX}/plots/merge` && request.method === "POST") {
         const input = await readJson(request);
         const parcelCodes = Array.isArray(input.parcelCodes) ? input.parcelCodes.map(String) : [];

@@ -5,6 +5,9 @@ import { keywordHits, likePattern, toIsoTimestamp } from "@agri/shared";
 
 export const TASK_TYPES = ["TILLAGE", "SEEDING", "IRRIGATION", "WEEDING", "SPRAYING", "FERTILIZATION"] as const;
 export const TASK_STATUSES = ["PENDING", "RUNNING", "COMPLETED", "CANCELLED"] as const;
+/** 归档筛选：NONE 只看在册（缺省）、ONLY 只看已归档、ALL 两者都看 */
+export const TASK_ARCHIVE_FILTERS = ["NONE", "ONLY", "ALL"] as const;
+export type TaskArchiveFilter = typeof TASK_ARCHIVE_FILTERS[number];
 export type TaskType = typeof TASK_TYPES[number];
 export type TaskStatus = typeof TASK_STATUSES[number];
 export interface TaskResult {
@@ -40,10 +43,12 @@ export interface TaskQuery {
   plotCode?: string;
   from?: string;
   to?: string;
+  archived?: TaskArchiveFilter;
 }
 export interface TaskRepository {
   page(tenantId: string, query: TaskQuery): Promise<PageResult<Task>>;
-  find(tenantId: string, id: string): Promise<Task | null>;
+  /** 缺省读不到归档行；includeArchived 只给回查用，跃迁与删除仍按在册口径 */
+  find(tenantId: string, id: string, includeArchived?: boolean): Promise<Task | null>;
   create(task: Task): Promise<Task>;
   transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult): Promise<Task | null>;
   /** 软删归档：只置 deleted_at，不改 status/version；已归档或不存在的任务返回 null */
@@ -66,9 +71,12 @@ export class InMemoryTaskRepository implements TaskRepository {
   readonly completedEvents: Array<{ tenantId: string; traceId: string; payload: TaskCompletedPayload }> = [];
   constructor(tasks: Task[] = []) { this.tasks = structuredClone(tasks); }
   async page(tenantId: string, query: TaskQuery): Promise<PageResult<Task>> {
+    const archived = query.archived ?? "NONE";
     const filtered = this.tasks.filter((task) => {
       const at = Date.parse(task.scheduledAt ?? task.createdAt);
-      return task.tenantId === tenantId && task.deletedAt === undefined
+      const isArchived = task.deletedAt !== undefined;
+      return task.tenantId === tenantId
+        && (archived === "ALL" || (archived === "ONLY" ? isArchived : !isArchived))
         && (!query.status || task.status === query.status) && (!query.type || task.type === query.type)
         && (!query.plotCode || task.plotCode === query.plotCode)
         && (!query.keyword || keywordHits(query.keyword, [task.name, task.plotCode]))
@@ -76,8 +84,8 @@ export class InMemoryTaskRepository implements TaskRepository {
     }).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
     return { items: structuredClone(filtered.slice((query.page - 1) * query.size, query.page * query.size)), total: filtered.length, page: query.page, size: query.size, pages: Math.ceil(filtered.length / query.size) };
   }
-  async find(tenantId: string, id: string): Promise<Task | null> {
-    const task = this.tasks.find((row) => row.id === id && row.tenantId === tenantId && row.deletedAt === undefined);
+  async find(tenantId: string, id: string, includeArchived = false): Promise<Task | null> {
+    const task = this.tasks.find((row) => row.id === id && row.tenantId === tenantId && (includeArchived || row.deletedAt === undefined));
     return task ? structuredClone(task) : null;
   }
   async create(task: Task): Promise<Task> {
@@ -143,7 +151,10 @@ export class SqlTaskRepository implements TaskRepository {
   constructor(private readonly client: PrismaClientLike) {}
   async page(tenantId: string, query: TaskQuery): Promise<PageResult<Task>> {
     const values: unknown[] = [tenantId];
-    const where = ["tenant_id = $1", "deleted_at IS NULL"];
+    const where = ["tenant_id = $1"];
+    // 归档条件同时进 count 与分页查询，总数与页内行数才不会各算一套
+    if (query.archived === "ONLY") where.push("deleted_at IS NOT NULL");
+    else if (query.archived !== "ALL") where.push("deleted_at IS NULL");
     for (const [column, value] of [["status", query.status], ["type", query.type], ["plot_code", query.plotCode]] as const) {
       if (value) { values.push(value); where.push(`${column} = $${values.length}`); }
     }
@@ -158,9 +169,9 @@ export class SqlTaskRepository implements TaskRepository {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(`SELECT * FROM operation_tasks WHERE ${filter} ORDER BY created_at DESC, id DESC LIMIT $${values.length - 1} OFFSET $${values.length}`, ...values);
     return { items: rows.map(fromRow), total, page: query.page, size: query.size, pages: Math.ceil(total / query.size) };
   }
-  async find(tenantId: string, id: string): Promise<Task | null> {
+  async find(tenantId: string, id: string, includeArchived = false): Promise<Task | null> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      "SELECT * FROM operation_tasks WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL",
+      `SELECT * FROM operation_tasks WHERE tenant_id = $1 AND id = $2${includeArchived ? "" : " AND deleted_at IS NULL"}`,
       tenantId, id,
     );
     return rows[0] ? fromRow(rows[0]) : null;

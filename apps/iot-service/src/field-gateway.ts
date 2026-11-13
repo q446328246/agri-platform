@@ -261,7 +261,13 @@ export class FieldGateway {
     // 判不出收口条件就不领取、不碰硬件：QUEUED 可以直接收口成 FAILED，
     // 先把指令领成 SENT 再失败，等于把「没人规定开多久」的责任推给超时收口
     if (!spec) {
-      await this.channel.receipt(command.id, "FAILED", "指令未给出作业时长或计划作业量，现场网关不猜该开多久");
+      // 上游算不出包络时会写明原因（处方缺面积、施肥缺定额、越限只带阈值），照实回给台账
+      const blocked = command.parameters?.envelopeBlocked;
+      await this.channel.receipt(
+        command.id,
+        "FAILED",
+        typeof blocked === "string" && blocked.trim() !== "" ? blocked : "指令未给出作业时长或计划作业量，现场网关不猜该开多久",
+      );
       return;
     }
     const client = this.client(device, binding);

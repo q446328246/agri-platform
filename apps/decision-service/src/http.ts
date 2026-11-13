@@ -39,6 +39,11 @@ export interface DecisionDependencies {
   fetchSoilMoisture?: (plotCode: string, identity: Record<string, string>) => Promise<number | undefined>;
   /** 处方生成时从天气预报取未来降雨概率，缺测时依赖降雨的规则不命中。 */
   fetchRainProbability?: (plotCode: string | undefined, identity: Record<string, string>) => Promise<number | undefined>;
+  /**
+   * 处方生成时从地块台账取面积（亩），供控制侧现算执行包络。
+   * 只认地块服务的权威值，不接受请求体自报——面积直接决定阀门开多久，不能让调用方填。
+   */
+  fetchPlotArea?: (plotCode: string, identity: Record<string, string>) => Promise<number | undefined>;
   tenantId?: string;
 }
 
@@ -98,6 +103,7 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
   const engine = new RuleEngine(rules);
   const fetchSoilMoisture = dependencies?.fetchSoilMoisture;
   const fetchRainProbability = dependencies?.fetchRainProbability;
+  const fetchPlotArea = dependencies?.fetchPlotArea;
   const publisher = dependencies?.publisher ?? new InMemoryEventPublisher();
   const outbox = dependencies?.outbox;
   const withTransaction = dependencies?.withTransaction;
@@ -196,6 +202,10 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
           ? optionalFiniteNumber(await fetchRainProbability(plotCode || undefined, identity).catch(() => undefined)) : undefined;
         const soilMoisture = reportedSoil ?? liveSoil;
         const rainProbability = reportedRain ?? liveRain;
+        // 面积只从地块台账取，不接受请求体自报：它会被控制侧换算成阀门开启时长与计划水量
+        const liveArea = plotCode && fetchPlotArea
+          ? optionalFiniteNumber(await fetchPlotArea(plotCode, identity).catch(() => undefined)) : undefined;
+        const areaMu = liveArea !== undefined && liveArea > 0 ? liveArea : undefined;
         const measurements = {
           ...(soilMoisture !== undefined ? { soilMoisture } : {}),
           ...(rainProbability !== undefined ? { rainProbability } : {}),
@@ -210,7 +220,7 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
           status: items.length > 0 ? "RECOMMENDED" : "NO_ACTION",
           ...measurements,
           growthStage,
-          inputs: { plotCode, plotName, growthStage, ...measurements, soilMoistureSource: reportedSoil !== undefined ? "request" : liveSoil !== undefined ? "telemetry" : "missing", rainProbabilitySource: reportedRain !== undefined ? "request" : liveRain !== undefined ? "weather" : "missing", requestedAt: now },
+          inputs: { plotCode, plotName, growthStage, ...measurements, soilMoistureSource: reportedSoil !== undefined ? "request" : liveSoil !== undefined ? "telemetry" : "missing", rainProbabilitySource: reportedRain !== undefined ? "request" : liveRain !== undefined ? "weather" : "missing", areaMuSource: areaMu !== undefined ? "plot" : "missing", ...(areaMu !== undefined ? { areaMu } : {}), requestedAt: now },
           matchedRules,
           actions: items,
           generatedAt: now,
@@ -221,7 +231,7 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
           const item = items[index];
           if (!item || !isRuleType(rule.action.type)) throw new Error("处方动作与规则不一致");
           const planType = PLAN_TYPE_BY_RULE[rule.action.type];
-          const payload: PrescriptionIssuedPayload = groups.get(planType) ?? { prescriptionId: input.id, parcelId: plotCode, seasonId: "", planType, items: [] };
+          const payload: PrescriptionIssuedPayload = groups.get(planType) ?? { prescriptionId: input.id, parcelId: plotCode, seasonId: "", planType, ...(areaMu !== undefined ? { areaMu } : {}), items: [] };
           payload.items.push(item);
           groups.set(planType, payload);
         });

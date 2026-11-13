@@ -75,8 +75,8 @@ export function resolveWaterVolume(
 
 /**
  * 施肥量（千克，氮磷钾合计）：设备实测优先，其次按分区面积 × 配比现算配方总量。
- * 处方自动指令的参数里没有分区与配比，算不出来就留空——
- * 配方项的 dosage 是「亩均用量」，不知道作业面积就乘不出总投肥量。
+ * 处方自动指令带的是亩均用量与台账面积，没有氮磷钾配比，施肥处方还推不出分区，
+ * 算不出来就留空——缺配比或缺作业面积都乘不出总投肥量。
  */
 export function resolveFertilizerKg(
   command: ControlCommand,

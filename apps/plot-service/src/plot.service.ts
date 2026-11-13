@@ -88,6 +88,25 @@ export interface MergePlotsResult {
   sourceCodes: string[];
 }
 
+/** 合并预演：只算不写，给操作人在提交前看清凸包会圈进多少空地 */
+export interface MergePreviewResult {
+  parcelCodes: string[];
+  sources: Array<{ parcelCode: string; parcelName: string; areaMu: number }>;
+  /** 源地块台账面积合计 */
+  sourceAreaMu: number;
+  /** 合并后凸包面积，与 mergePlots 落库的 areaMu 同一算法 */
+  hullAreaMu: number;
+  /** 凸包比源面积和多出的亩数：地块连成一片但整体凹形时为正，即被圈进来的中间空地 */
+  deltaMu: number;
+  /** 所选地块是否连成一片；为 false 时合并会被 409 拒掉 */
+  adjacent: boolean;
+  /** 按相邻关系切出的连通分组，adjacent 为 false 时说明哪几块各自成团 */
+  groups: string[][];
+  toleranceM: number;
+  /** 预演边界；源地块顶点不足时为 null，此时无法合并 */
+  geom: GeoPolygon | null;
+}
+
 /** 拆分提交的单个子地块：边界必填，档案字段可选覆盖 */
 export interface SplitPlotPiece {
   parcelName: string;
@@ -291,24 +310,14 @@ export class PlotService {
   async mergePlots(input: MergePlotsInput): Promise<MergePlotsResult> {
     const codes = [...new Set((input.parcelCodes ?? []).map((code) => String(code ?? "").trim()).filter((code) => code !== ""))];
     if (codes.length < 2) throw new ValidationError("至少选择两个地块才能合并");
-    const sources: PlotRecord[] = [];
-    for (const code of codes) {
-      const source = await this.repository.findByCode(undefined, code);
-      if (!source) throw new NotFoundError(`地块不存在：${code}`, "PLOT-404-001");
-      sources.push(source);
-    }
-    const toleranceM = mergeAdjacencyToleranceM();
-    const groups = adjacencyGroups(sources.map((source) => ({ key: source.parcelCode, ring: ringPoints(source.geom) })), toleranceM);
+    const { sources, groups, toleranceM, geom, hullAreaMu: areaMu } = await this.mergeGeometry(codes);
     if (groups.length > 1) {
       throw new ConflictError(
         `所选地块不相邻，合并要求边界首尾相接（间隙不超过 ${toleranceM} 米）：${groups.map((group) => group.join("、")).join(" ｜ ")}`,
         "PLOT-409-003",
       );
     }
-    const geom = hullPolygon(sources.flatMap((source) => ringPoints(source.geom)));
     if (!geom) throw new ValidationError("源地块边界顶点不足，无法生成合并边界");
-    const ring = geom.coordinates[0] ?? [];
-    const areaMu = roundAreaMu(polygonAreaMu(ring));
     if (areaMu <= 0) throw new ValidationError("合并边界面积为 0，请检查源地块边界");
 
     const first = sources[0]!;
@@ -355,6 +364,52 @@ export class PlotService {
       for (const code of codes) await this.repository.remove(tx, code, deletedAt);
     });
     return { plot: merged, sourceCodes: codes };
+  }
+
+  /**
+   * 合并预演：与 mergePlots 走同一套相邻判定与凸包面积，只算不写。
+   * 相邻不成立时不抛错，如实回显分组——操作人需要在提交前就看到「哪几块各自成团」，
+   * 而不是点了合并才吃一个 409。
+   */
+  async previewMerge(input: { parcelCodes?: string[] }): Promise<MergePreviewResult> {
+    const codes = [...new Set((input.parcelCodes ?? []).map((code) => String(code ?? "").trim()).filter((code) => code !== ""))];
+    if (codes.length < 2) throw new ValidationError("至少选择两个地块才能预演合并");
+    const { sources, groups, toleranceM, geom, hullAreaMu } = await this.mergeGeometry(codes);
+    // 源面积和取台账值：要回答的是「合并后在账面积比原来各块之和多了多少」，
+    // 凸包面积则与落库口径逐位一致，两者相减才是真正被圈进来的空地
+    const sourceAreaMu = roundAreaMu(sources.reduce((sum, source) => sum + source.areaMu, 0));
+    return {
+      parcelCodes: codes,
+      sources: sources.map((source) => ({ parcelCode: source.parcelCode, parcelName: source.parcelName, areaMu: source.areaMu })),
+      sourceAreaMu,
+      hullAreaMu,
+      deltaMu: geom ? roundAreaMu(hullAreaMu - sourceAreaMu) : 0,
+      adjacent: groups.length <= 1,
+      groups,
+      toleranceM,
+      geom,
+    };
+  }
+
+  /** 合并的几何与面积：预演与真实合并共用，避免两处各算一套凸包后口径漂移 */
+  private async mergeGeometry(codes: string[]): Promise<{
+    sources: PlotRecord[];
+    groups: string[][];
+    toleranceM: number;
+    geom: GeoPolygon | null;
+    hullAreaMu: number;
+  }> {
+    const sources: PlotRecord[] = [];
+    for (const code of codes) {
+      const source = await this.repository.findByCode(undefined, code);
+      if (!source) throw new NotFoundError(`地块不存在：${code}`, "PLOT-404-001");
+      sources.push(source);
+    }
+    const toleranceM = mergeAdjacencyToleranceM();
+    const groups = adjacencyGroups(sources.map((source) => ({ key: source.parcelCode, ring: ringPoints(source.geom) })), toleranceM);
+    const geom = hullPolygon(sources.flatMap((source) => ringPoints(source.geom)));
+    const hullAreaMu = geom ? roundAreaMu(polygonAreaMu(geom.coordinates[0] ?? [])) : 0;
+    return { sources, groups, toleranceM, geom, hullAreaMu };
   }
 
   /**
