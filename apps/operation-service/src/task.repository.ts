@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { PrismaClientLike } from "@agri/db";
 import type { PageResult, TaskCompletedPayload } from "@agri/contracts";
 import { keywordHits, likePattern, toIsoTimestamp } from "@agri/shared";
+import { InMemoryTaskChangeLogRepository } from "./task-change-log.repository.js";
+import type { TaskChangeLog, TaskChangeLogRepository } from "./task-change-log.repository.js";
 
 export const TASK_TYPES = ["TILLAGE", "SEEDING", "IRRIGATION", "WEEDING", "SPRAYING", "FERTILIZATION"] as const;
 export const TASK_STATUSES = ["PENDING", "RUNNING", "COMPLETED", "CANCELLED"] as const;
@@ -49,10 +51,13 @@ export interface TaskRepository {
   page(tenantId: string, query: TaskQuery): Promise<PageResult<Task>>;
   /** 缺省读不到归档行；includeArchived 只给回查用，跃迁与删除仍按在册口径 */
   find(tenantId: string, id: string, includeArchived?: boolean): Promise<Task | null>;
-  create(task: Task): Promise<Task>;
-  transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult): Promise<Task | null>;
+  /** actor 取网关注入的 x-user-id，缺省记为 system；traceId 随留痕落库便于对账 */
+  create(task: Task, actor?: string, traceId?: string): Promise<Task>;
+  transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult, actor?: string): Promise<Task | null>;
   /** 软删归档：只置 deleted_at，不改 status/version；已归档或不存在的任务返回 null */
-  remove(tenantId: string, id: string, deletedAt: string): Promise<Task | null>;
+  remove(tenantId: string, id: string, deletedAt: string, actor?: string, traceId?: string): Promise<Task | null>;
+  /** 任务变更历史（追加式留痕），归档任务也可回查 */
+  history(tenantId: string, taskId: string): Promise<TaskChangeLog[]>;
 }
 const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   PENDING: ["RUNNING", "CANCELLED"], RUNNING: ["COMPLETED", "CANCELLED"], COMPLETED: [], CANCELLED: [],
@@ -68,8 +73,12 @@ function completionPayload(task: Task, at: string, result: TaskResult): TaskComp
 }
 export class InMemoryTaskRepository implements TaskRepository {
   private readonly tasks: Task[];
+  private readonly changeLog: TaskChangeLogRepository;
   readonly completedEvents: Array<{ tenantId: string; traceId: string; payload: TaskCompletedPayload }> = [];
-  constructor(tasks: Task[] = []) { this.tasks = structuredClone(tasks); }
+  constructor(tasks: Task[] = [], changeLog: TaskChangeLogRepository = new InMemoryTaskChangeLogRepository()) {
+    this.tasks = structuredClone(tasks);
+    this.changeLog = changeLog;
+  }
   async page(tenantId: string, query: TaskQuery): Promise<PageResult<Task>> {
     const archived = query.archived ?? "NONE";
     const filtered = this.tasks.filter((task) => {
@@ -88,7 +97,7 @@ export class InMemoryTaskRepository implements TaskRepository {
     const task = this.tasks.find((row) => row.id === id && row.tenantId === tenantId && (includeArchived || row.deletedAt === undefined));
     return task ? structuredClone(task) : null;
   }
-  async create(task: Task): Promise<Task> {
+  async create(task: Task, actor = "system", traceId?: string): Promise<Task> {
     // 建档只写 SQL 侧 INSERT 的那几列：状态恒为 PENDING、版本从 1 起算，
     // 开工/完工/取消时刻与作业结果都由跃迁写入。照抄调用方塞进来的状态会让内存模式
     // 凭空出现「已完成」任务，而 SQL 模式压根不认这些列。
@@ -106,14 +115,15 @@ export class InMemoryTaskRepository implements TaskRepository {
       version: 1,
     };
     this.tasks.push(record);
+    await this.changeLog.append({ id: randomUUID(), taskId: record.id, tenantId: record.tenantId, action: "CREATE", summary: `新建任务：${record.name}`, actor, traceId, createdAt: record.createdAt });
     return structuredClone(record);
   }
-  async transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult): Promise<Task | null> {
+  async transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult, actor = "system"): Promise<Task | null> {
     const stored = this.tasks.find((row) => row.id === task.id && row.tenantId === task.tenantId);
     // 跃迁合法性按调用方拿到的快照判定，与 SQL 侧 `canTransition(task.status, status)` 一致；
     // 已归档的行不在册，SQL 侧无论是幂等回读还是 UPDATE 都带 deleted_at IS NULL，这里同一口径拦掉
     if (!stored || stored.deletedAt !== undefined || !canTransition(task.status, status)) return null;
-    // 重复提交同一状态是幂等重放，不看版本：SQL 侧在这里直接回读当前行
+    // 重复提交同一状态是幂等重放，不看版本：SQL 侧在这里直接回读当前行，也不写留痕
     if (task.status === status) return structuredClone(stored);
     if (status === "COMPLETED" && !result) return null;
     // 真正的写入仍受乐观锁与快照状态约束（SQL 的 UPDATE 带 version 和 status 条件）
@@ -127,15 +137,20 @@ export class InMemoryTaskRepository implements TaskRepository {
       stored.result = structuredClone(result);
       this.completedEvents.push({ tenantId: stored.tenantId, traceId, payload: completionPayload(stored, at, result) });
     }
+    await this.changeLog.append({ id: randomUUID(), taskId: stored.id, tenantId: stored.tenantId, action: "TRANSITION", summary: `状态流转：${task.status} → ${status}`, actor, traceId, createdAt: at });
     return structuredClone(stored);
   }
-  async remove(tenantId: string, id: string, deletedAt: string): Promise<Task | null> {
+  async remove(tenantId: string, id: string, deletedAt: string, actor = "system", traceId?: string): Promise<Task | null> {
     const stored = this.tasks.find((row) => row.id === id && row.tenantId === tenantId && row.deletedAt === undefined);
     if (!stored) return null;
     // 归档只盖一个时间戳：status 记的是作业走到哪一步，version 记的是状态跃迁次数，
     // 都不该被删除动作改写，否则历史行读出来的状态与乐观锁基线就失真了。
     stored.deletedAt = deletedAt;
+    await this.changeLog.append({ id: randomUUID(), taskId: stored.id, tenantId: stored.tenantId, action: "ARCHIVE", summary: "任务归档", actor, traceId, createdAt: deletedAt });
     return structuredClone(stored);
+  }
+  async history(tenantId: string, taskId: string): Promise<TaskChangeLog[]> {
+    return this.changeLog.listByTask(tenantId, taskId);
   }
 }
 function fromRow(row: Record<string, unknown>): Task {
@@ -148,7 +163,10 @@ function fromRow(row: Record<string, unknown>): Task {
   return task;
 }
 export class SqlTaskRepository implements TaskRepository {
-  constructor(private readonly client: PrismaClientLike) {}
+  private readonly changeLog: TaskChangeLogRepository;
+  constructor(private readonly client: PrismaClientLike, changeLog: TaskChangeLogRepository = new InMemoryTaskChangeLogRepository()) {
+    this.changeLog = changeLog;
+  }
   async page(tenantId: string, query: TaskQuery): Promise<PageResult<Task>> {
     const values: unknown[] = [tenantId];
     const where = ["tenant_id = $1"];
@@ -176,24 +194,33 @@ export class SqlTaskRepository implements TaskRepository {
     );
     return rows[0] ? fromRow(rows[0]) : null;
   }
-  async remove(tenantId: string, id: string, deletedAt: string): Promise<Task | null> {
+  async remove(tenantId: string, id: string, deletedAt: string, actor = "system", traceId?: string): Promise<Task | null> {
     // 不 bump version、不改 status：归档只回答「还在不在册」，作业进度与并发基线仍按最后一次跃迁读。
-    const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      "UPDATE operation_tasks SET deleted_at = $3 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL RETURNING *",
-      tenantId, id, deletedAt,
-    );
+    // 留痕与状态更新在同一条语句里完成：归档动作与「谁归档的」要么同时成立，要么都不发生。
+    const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(`WITH changed AS (
+      UPDATE operation_tasks SET deleted_at = $3 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL RETURNING *
+    ), logged AS (
+      INSERT INTO operation_task_change_logs (id, task_id, tenant_id, action, summary, actor, trace_id, created_at)
+        SELECT $4, id, tenant_id, 'ARCHIVE', '任务归档', $5, $6, $3::timestamptz FROM changed RETURNING id
+    ) SELECT * FROM changed`, tenantId, id, deletedAt, randomUUID(), actor, traceId ?? null);
     return rows[0] ? fromRow(rows[0]) : null;
   }
-  async create(task: Task): Promise<Task> {
-    const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(`INSERT INTO operation_tasks (id, tenant_id, plot_code, type, name, status, scheduled_at, scheduled_end_at, assignee_name, created_at, version)
-      VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8, $9, 1) RETURNING *`, task.id, task.tenantId, task.plotCode, task.type, task.name, task.scheduledAt ?? null, task.scheduledEndAt ?? null, task.assigneeName ?? null, task.createdAt);
+  async create(task: Task, actor = "system", traceId?: string): Promise<Task> {
+    // 建档与建档留痕一条语句写完，避免出现「任务建了、历史没记」的审计缺口
+    const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(`WITH ins AS (
+      INSERT INTO operation_tasks (id, tenant_id, plot_code, type, name, status, scheduled_at, scheduled_end_at, assignee_name, created_at, version)
+        VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8, $9, 1) RETURNING *
+    ), logged AS (
+      INSERT INTO operation_task_change_logs (id, task_id, tenant_id, action, summary, actor, trace_id, created_at)
+        SELECT $10, id, tenant_id, 'CREATE', '新建任务：' || name, $11, $12, $9::timestamptz FROM ins RETURNING id
+    ) SELECT * FROM ins`, task.id, task.tenantId, task.plotCode, task.type, task.name, task.scheduledAt ?? null, task.scheduledEndAt ?? null, task.assigneeName ?? null, task.createdAt, randomUUID(), actor, traceId ?? null);
     return fromRow(rows[0]!);
   }
-  async transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult): Promise<Task | null> {
+  async transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult, actor = "system"): Promise<Task | null> {
     if (!canTransition(task.status, status)) return null;
     if (task.status === status) return this.find(task.tenantId, task.id);
     if (status === "COMPLETED" && !result) return null;
-    // One statement keeps the status update and outbox atomic even on a shared pg connection.
+    // One statement keeps the status update, outbox 与留痕 atomic even on a shared pg connection.
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(`WITH changed AS (
       UPDATE operation_tasks SET status = $3,
         started_at = CASE WHEN $3 = 'RUNNING' THEN $4::timestamptz ELSE started_at END,
@@ -204,8 +231,14 @@ export class SqlTaskRepository implements TaskRepository {
     ), queued AS (
       INSERT INTO operation_outbox (id, task_id, tenant_id, trace_id, payload_json, created_at)
       SELECT $7, id, tenant_id, $8, $9::jsonb, $4::timestamptz FROM changed WHERE status = 'COMPLETED' RETURNING id
+    ), logged AS (
+      INSERT INTO operation_task_change_logs (id, task_id, tenant_id, action, summary, actor, trace_id, created_at)
+        SELECT $11, id, tenant_id, 'TRANSITION', '状态流转：' || $10 || ' → ' || $3, $12, $8, $4::timestamptz FROM changed RETURNING id
     ) SELECT * FROM changed`, task.tenantId, task.id, status, at, task.version, result ? JSON.stringify(result) : null, randomUUID(), traceId,
-    result ? JSON.stringify(completionPayload(task, at, result)) : null, task.status);
+    result ? JSON.stringify(completionPayload(task, at, result)) : null, task.status, randomUUID(), actor);
     return rows[0] ? fromRow(rows[0]) : null;
+  }
+  async history(tenantId: string, taskId: string): Promise<TaskChangeLog[]> {
+    return this.changeLog.listByTask(tenantId, taskId);
   }
 }

@@ -3,6 +3,7 @@ import { PgClientAdapter, resolveDatabaseUrl } from "@agri/db";
 import { EventLogPublisher, OutboxService, PgEventLogStore } from "@agri/mq";
 import { createOperationHttpServer } from "./http.js";
 import { SqlTaskRepository } from "./task.repository.js";
+import { SqlTaskChangeLogRepository } from "./task-change-log.repository.js";
 import { SqlOperationOutbox } from "./outbox.repository.js";
 
 async function bootstrap(): Promise<void> {
@@ -10,7 +11,7 @@ async function bootstrap(): Promise<void> {
   const sql = Boolean(process.env.DB_URL) && process.env.OPERATION_REPOSITORY_MODE !== "memory";
   const client = sql ? PgClientAdapter.fromUrl(resolveDatabaseUrl()) : undefined;
   await client?.$connect();
-  const server = createOperationHttpServer(client ? { tasks: new SqlTaskRepository(client) } : {});
+  const server = createOperationHttpServer(client ? { tasks: new SqlTaskRepository(client, new SqlTaskChangeLogRepository(client)) } : {});
   const relayDefaults = { tenantId: process.env.TENANT_ID ?? "tenant-demo", traceId: "operation-relay", producer: "operation" };
   const relay = client ? new OutboxService(new SqlOperationOutbox(client), new EventLogPublisher(new PgEventLogStore(client), relayDefaults), relayDefaults) : undefined;
   relay?.start();

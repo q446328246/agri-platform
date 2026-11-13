@@ -269,6 +269,24 @@ describe("任务租户隔离与持久化", () => {
     const other = await (await fetch(`${base}/api/v1/operations/path-plans`, { headers: { "x-tenant-id": "tenant-b" } })).json();
     expect(other.data).toHaveLength(0);
   });
+
+  it("任务变更历史回看：建档、流转、归档各留痕并带操作人", async () => {
+    const base = await start();
+    const headers = { "content-type": "application/json", "x-user-id": "u-audit", "x-tenant-id": "tenant-a" };
+    const created = await fetch(`${base}/api/v1/farm-tasks`, {
+      method: "POST", headers,
+      body: JSON.stringify({ name: "留痕校验任务", plotCode: "P-AUDIT", type: "IRRIGATION" }),
+    });
+    const task = (await created.json()).data;
+    await fetch(`${base}/api/v1/farm-tasks/${task.id}/status`, { method: "POST", headers, body: JSON.stringify({ status: "RUNNING" }) });
+    // 归档后历史仍要能回查：留痕是审计对象，不随 deleted_at 一起被过滤
+    const removed = await fetch(`${base}/api/v1/farm-tasks/${task.id}`, { method: "DELETE", headers });
+    expect(removed.status).toBe(200);
+
+    const history = await (await fetch(`${base}/api/v1/farm-tasks/${task.id}/history`, { headers })).json();
+    expect(history.data.map((log: { action: string }) => log.action)).toEqual(expect.arrayContaining(["CREATE", "TRANSITION", "ARCHIVE"]));
+    expect(history.data.every((log: { actor: string }) => log.actor === "u-audit")).toBe(true);
+  });
 });
 
 describe("任务软删除归档", () => {

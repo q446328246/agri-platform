@@ -717,6 +717,10 @@ export const operationApi = {
   deleteTask(id: string): Promise<any> {
     return del<any>(`/farm-tasks/${encodeURIComponent(id)}`)
   },
+  /** 任务变更历史：建档/状态跃迁/归档的追加式留痕，归档任务也可回查 */
+  getTaskHistory(id: string): Promise<any[]> {
+    return get<any[]>(`/farm-tasks/${encodeURIComponent(id)}/history`)
+  },
   /** 田间导航规划：最近邻排站 + 2-opt 优化，提供机耕道时按沿路里程计算 */
   planNavigation(data: NavigationRequest): Promise<NavPlan> {
     return post<NavPlan>('/operations/path-plan', data)

@@ -11,6 +11,8 @@ import type { CoveragePlan } from "./coverage.js";
 import { canTransition, InMemoryTaskRepository, TASK_ARCHIVE_FILTERS, TASK_STATUSES, TASK_TYPES } from "./task.repository.js";
 import type { Task, TaskArchiveFilter, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType } from "./task.repository.js";
 const hoursFromNow = (hours: number): string => new Date(Date.now() + hours * 3600000).toISOString();
+/** 操作人取网关注入的 x-user-id，与地块变更历史同一口径；缺省记为 system */
+const actorOf = (req: IncomingMessage): string => req.headers["x-user-id"]?.toString() || "system";
 /** 演示农事任务：覆盖六种作业类型与四种状态，任务调度页一进就能看到排程
  * startedAt/completedAt 与状态对齐（进行中的任务按计划时间开工，已完成的补一个作业时长），
  * 已取消的留一个取消时刻——迁移 016 的 CHECK 要求 CANCELLED 必有 cancelled_at，
@@ -112,10 +114,16 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
         if (end) task.scheduledEndAt = end;
         const assigneeName = text(body.assigneeName, "负责人", 100);
         if (assigneeName) task.assigneeName = assigneeName;
-        send(res, 201, await tasks.create(task), traceId); return;
+        send(res, 201, await tasks.create(task, actorOf(req), traceId), traceId); return;
       }
       const statusMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/status$/);
       const detailMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)$/);
+      const historyMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/history$/);
+      if (historyMatch?.[1] && req.method === "GET") {
+        // 变更历史是审计对象，归档任务也要能回查（留痕表不随 deleted_at 过滤）
+        const logs = await tasks.history(tenantId, decodeURIComponent(historyMatch[1]));
+        send(res, 200, logs, traceId); return;
+      }
       if (statusMatch?.[1] && req.method === "POST") {
         const body = await json(req);
         const task = await tasks.find(tenantId, decodeURIComponent(statusMatch[1]));
@@ -125,7 +133,7 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
         if (task.status === status) { send(res, 200, task, traceId); return; }
         if (!canTransition(task.status, status) || (body.version !== undefined && body.version !== task.version)) { send(res, 409, null, traceId, "任务状态已变化或不允许该操作，请刷新后重试"); return; }
         const result = status === "COMPLETED" ? resultOf(body.result) : undefined;
-        const updated = await tasks.transition(task, status, new Date().toISOString(), traceId, result);
+        const updated = await tasks.transition(task, status, new Date().toISOString(), traceId, result, actorOf(req));
         if (!updated) { send(res, 409, null, traceId, "任务已被其他操作更新，请刷新后重试"); return; }
         send(res, 200, updated, traceId); return;
       }
@@ -138,7 +146,7 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
       if (detailMatch?.[1] && req.method === "DELETE") {
         // 与地块/片区同一口径：删除是归档，行留在表里，列表与详情此后都读不到。
         // 不挡 RUNNING——地块软删同样不校验名下有没有在途作业，平台里「删除」只表示不再在册。
-        const removed = await tasks.remove(tenantId, decodeURIComponent(detailMatch[1]), new Date().toISOString());
+        const removed = await tasks.remove(tenantId, decodeURIComponent(detailMatch[1]), new Date().toISOString(), actorOf(req), traceId);
         send(res, removed ? 200 : 404, removed, traceId, removed ? "" : "任务不存在"); return;
       }
       if (req.method === "POST" && url.pathname === "/api/v1/operations/path-plan") {

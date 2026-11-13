@@ -247,6 +247,9 @@ agri-platform-nodejs-scaffold/
   归档行**可回查但只读**：农事任务列表用三态 `archived=NONE|ONLY|ALL`（缺省 `NONE` 只看在册）筛选，
   同一条件同时进 count 与分页查询，总数与页内行数不会各算一套；详情要显式带 `includeArchived=true` 才放行，
   状态跃迁与再次删除仍带 `deleted_at IS NULL`，前端对归档行也不给这些按钮（按了必 404）。
+   任务变更另走追加式留痕（迁移 `039`）：建档 / 状态跃迁 / 归档各写一行 `operation_task_change_logs`，
+   `actor` 取网关注入的 `x-user-id`（缺省 `system`），与状态更新同语句落库；`GET /api/v1/farm-tasks/:id/history`
+   回看操作轨迹，归档任务同样可查，详情页以「操作历史」区块展示。
 - **事件不丢也不重**：决策 / 遥测 / 农事 / 地块 / 控制服务把业务数据与待投递事件写入同一事务（各自 `*_outbox` 表），
   事务提交后由中继投递；消费侧用 `eventId` 幂等去重，重试按指数退避，超出次数转死信。
   地块建档走 `plot_outbox`（迁移 028），SQL 模式 HTTP 启动后周期性中继把 `PlotCreated` 写入共享 `event_log`，

@@ -318,6 +318,19 @@ export interface FarmTaskQuery {
   archived?: 'NONE' | 'ONLY' | 'ALL';
 }
 
+// 农事任务变更历史（追加式留痕）：建档、状态跃迁、归档各一行
+export interface FarmTaskChangeLog {
+  id: string;
+  taskId: string;
+  tenantId: string;
+  action: 'CREATE' | 'TRANSITION' | 'ARCHIVE';
+  summary: string;
+  /** 操作人：网关注入的 x-user-id，系统内部触发时为 system */
+  actor: string;
+  traceId?: string;
+  createdAt: string;
+}
+
 // 看板统计数据
 export interface DashboardStats {
   totalPlots: number;

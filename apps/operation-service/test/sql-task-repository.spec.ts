@@ -38,6 +38,8 @@ describe.runIf(databaseUrl)("SqlTaskRepository + SqlOperationOutbox（真实库�
       expect(created.version).toBe(1);
       expect(created.scheduledAt).toBe(scheduledAt);
       expect(created.scheduledEndAt).toBe(scheduledEndAt);
+      // 建档与建档留痕一条语句写完：建档这个动作本身要能被回看
+      expect((await repository.history(tenantId, taskId)).map((log) => log.action)).toContain("CREATE");
 
       const byKeyword = await repository.page(tenantId, { page: 1, size: 10, keyword: "sql冒烟施肥" });
       expect(byKeyword.items.map((task) => task.id)).toContain(taskId);
@@ -55,6 +57,7 @@ describe.runIf(databaseUrl)("SqlTaskRepository + SqlOperationOutbox（真实库�
       expect(running?.status).toBe("RUNNING");
       expect(running?.startedAt).toBe(startedAt);
       expect(running?.version).toBe(2);
+      expect((await repository.history(tenantId, taskId)).map((log) => log.action)).toContain("TRANSITION");
       const runningOutbox = await client.$queryRawUnsafe<Array<{ total: string }>>("SELECT count(*) AS total FROM operation_outbox WHERE task_id = $1", taskId);
       expect(Number(runningOutbox[0]?.total)).toBe(0);
 
@@ -104,6 +107,7 @@ describe.runIf(databaseUrl)("SqlTaskRepository + SqlOperationOutbox（真实库�
     } finally {
       for (const id of [taskId, cancelId]) {
         await client.$executeRawUnsafe("DELETE FROM operation_outbox WHERE task_id = $1", id);
+        await client.$executeRawUnsafe("DELETE FROM operation_task_change_logs WHERE task_id = $1", id);
         await client.$executeRawUnsafe("DELETE FROM operation_tasks WHERE id = $1", id);
       }
       await client.$disconnect();
@@ -131,6 +135,8 @@ describe.runIf(databaseUrl)("SqlTaskRepository + SqlOperationOutbox（真实库�
       // 状态与版本按归档前最后一次跃迁读，只有 deletedAt 是新增的
       expect(removed).toMatchObject({ id: archivedId, status: "COMPLETED", version: 3 });
       expect(removed?.deletedAt).toBe(now);
+      // 归档与「谁归档的」同语句落库：留痕不因归档而消失，归档任务也要能回查
+      expect((await repository.history(tenantId, archivedId)).map((log) => log.action)).toContain("ARCHIVE");
 
       expect(await repository.find(tenantId, archivedId)).toBeNull();
       expect(await repository.remove(tenantId, archivedId, now)).toBeNull();
@@ -160,6 +166,7 @@ describe.runIf(databaseUrl)("SqlTaskRepository + SqlOperationOutbox（真实库�
     } finally {
       for (const id of [archivedId, liveId]) {
         await client.$executeRawUnsafe("DELETE FROM operation_outbox WHERE task_id = $1", id);
+        await client.$executeRawUnsafe("DELETE FROM operation_task_change_logs WHERE task_id = $1", id);
         await client.$executeRawUnsafe("DELETE FROM operation_tasks WHERE id = $1", id);
       }
       await client.$disconnect();

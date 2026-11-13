@@ -189,6 +189,17 @@
           </el-table-column>
         </el-table>
         <el-empty v-else :description="taskDetail?.plotCode ? '该地块暂无控制指令' : '任务未绑定地块，无从关联指令'" :image-size="60" />
+
+        <div class="detail-subtitle">操作历史</div>
+        <div v-if="taskHistory.length" class="history-list">
+          <div v-for="log in taskHistory" :key="log.id" class="history-item">
+            <el-tag size="small" :type="getTaskChangeActionType(log.action)">{{ getTaskChangeActionText(log.action) }}</el-tag>
+            <span class="history-summary">{{ log.summary }}</span>
+            <span class="history-actor">操作人：{{ log.actor }}</span>
+            <span class="history-time">{{ formatDateTime(log.createdAt) }}</span>
+          </div>
+        </div>
+        <el-empty v-else description="该任务暂无变更记录" :image-size="60" />
       </div>
       <template #footer>
         <el-button v-if="taskDetail && taskDetail.plotCode" @click="goCommands">查看全部指令</el-button>
@@ -221,6 +232,16 @@ const getTaskTypeText = (type: string) => {
 const getOutcomeText = (outcome: string) => {
   const map: Record<string, string> = { success: '成功', partial: '部分完成', failed: '失败' }
   return map[outcome] || outcome
+}
+
+const getTaskChangeActionText = (action: string) => {
+  const map: Record<string, string> = { CREATE: '新建', TRANSITION: '状态流转', ARCHIVE: '归档' }
+  return map[action] || action
+}
+
+const getTaskChangeActionType = (action: string) => {
+  const map: Record<string, '' | 'success' | 'info' | 'warning' | 'danger'> = { CREATE: '', TRANSITION: 'success', ARCHIVE: 'info' }
+  return map[action] || ''
 }
 
 const loading = ref(false)
@@ -319,6 +340,7 @@ const detailLoading = ref(false)
 const taskDetail = ref<any | null>(null)
 const taskPlot = ref<{ parcelCode: string; parcelName: string; areaMu: number } | null>(null)
 const taskCommands = ref<any[]>([])
+const taskHistory = ref<any[]>([])
 
 /** 服务端用 RUNNING，页面与筛选统一显示「进行中」，与列表同口径 */
 function displayStatus(status: string): FarmTaskStatus {
@@ -331,6 +353,7 @@ async function showDetail(row: { id: string; deletedAt?: string }) {
   taskDetail.value = null
   taskPlot.value = null
   taskCommands.value = []
+  taskHistory.value = []
   try {
     const task = await operationApi.getTask(row.id, Boolean(row.deletedAt))
     taskDetail.value = task
@@ -341,6 +364,8 @@ async function showDetail(row: { id: string; deletedAt?: string }) {
     ])
     taskPlot.value = plots.find((plot) => plot.parcelCode === task.plotCode) ?? null
     taskCommands.value = commands.items
+    // 操作历史是审计对象，归档任务也要能回查；取不到只让历史区块显示空态
+    taskHistory.value = await operationApi.getTaskHistory(row.id).catch(() => [])
   } catch (error) {
     console.error('任务详情加载失败', error)
   } finally {
@@ -436,5 +461,31 @@ onMounted(() => {
   color: #303133;
   font-size: 14px;
   font-weight: 600;
+}
+.history-list {
+  max-height: 240px;
+  overflow-y: auto;
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 13px;
+}
+.history-item:last-child {
+  border-bottom: none;
+}
+.history-summary {
+  color: #303133;
+}
+.history-actor {
+  color: #909399;
+}
+.history-time {
+  margin-left: auto;
+  color: #909399;
+  white-space: nowrap;
 }
 </style>
