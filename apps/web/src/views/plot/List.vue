@@ -180,7 +180,7 @@
               <span class="merge-source__area">{{ mergePreview.deltaMu > 0 ? '+' : '' }}{{ mergePreview.deltaMu.toFixed(2) }} 亩</span>
             </div>
             <p v-if="mergePreview.deltaMu > 0" class="merge-preview__hint">
-              地块虽连成一片，但整体呈凹形，凸包会把中间 {{ mergePreview.deltaMu.toFixed(2) }} 亩空地一并圈进新台账。合并后面积以此为准，不接受手填；若不想计入这块空地，请改选地块或先调整边界。
+              地块虽连成一片，但整体呈凹形，凸包会把中间 {{ mergePreview.deltaMu.toFixed(2) }} 亩空地一并圈进新台账。合并后面积以此为准，不接受手填；若不想计入这块空地，合并成功后可手工修改合并后边界（成功时会直接给出编辑入口）。
             </p>
             <p v-else class="merge-preview__hint">凸包与源面积和一致，没有把额外空地圈进来。</p>
           </template>
@@ -419,12 +419,30 @@ async function submitMerge() {
       ...(mergeForm.name.trim() ? { parcelName: mergeForm.name.trim() } : {}),
       ...(mergeForm.remark.trim() ? { remark: mergeForm.remark.trim() } : {}),
     })
-    ElMessage.success(`已合并为「${result.plot.name}」· ${result.plot.areaMu.toFixed(2)} 亩，源地块已归档`)
+    const merged = result.plot
+    // 凹形合并会把中间空地计入新台账。这里把「手工改合并后边界」的入口直接送到新地块的
+    // 编辑页：否则操作人得自己回列表找新编码、进详情、再点编辑，那一步正是缺失的入口。
+    // 编辑页已支持重画边界并按边界现算面积，跳到那一步即可去掉被圈进来的空地。
+    const deltaMu = Number(mergePreview.value?.deltaMu ?? 0)
     mergeVisible.value = false
     mergePreview.value = null
     selectedCodes.value = []
     selectedRows.value = []
-    await fetchList()
+    if (deltaMu > 0) {
+      await ElMessageBox.confirm(
+        `已合并为「${merged.name}」· ${Number(merged.areaMu).toFixed(2)} 亩，源地块已归档。凸包把中间 ${deltaMu.toFixed(2)} 亩空地计入了新台账，可手工修改合并后边界去掉它。`,
+        '合并完成',
+        {
+          confirmButtonText: '编辑合并后边界',
+          cancelButtonText: '留在列表',
+          confirmButtonPosition: 'right',
+          type: 'warning'
+        }
+      ).then(() => router.push(`/plot/edit/${merged.parcelCode}`)).catch(() => fetchList())
+    } else {
+      ElMessage.success(`已合并为「${merged.name}」· ${Number(merged.areaMu).toFixed(2)} 亩，源地块已归档`)
+      await fetchList()
+    }
   } catch (error) {
     console.error('合并地块失败', error)
   } finally {
