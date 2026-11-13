@@ -9,14 +9,16 @@
 - [main.ts](file://apps/iot-service/src/main.ts)
 - [app.module.ts](file://apps/iot-service/src/app.module.ts)
 - [modbus-tcp.spec.ts](file://apps/iot-service/test/modbus-tcp.spec.ts)
+- [smoke-device-protocol.mjs](file://scripts/smoke-device-protocol.mjs)
 - [038_device_field_binding.sql](file://infra/postgres/migrations/038_device_field_binding.sql)
 </cite>
 
 ## 更新摘要
 **变更内容**   
-- 新增设备绑定系统，支持HTTP和MODBUS_TCP两种协议类型
-- 增强Modbus TCP协议支持，实现完整的TCP客户端功能
-- 添加三种预定义配置文件：SWITCH_ONLY、WATER_M3、FERTILIZER_L
+- 新增字段访问目录系统，提供统一的协议、剖面和默认值配置
+- 添加协议标签和词序标签，支持用户友好的界面显示
+- 实现端到端Modbus冒烟测试框架，覆盖完整业务流程
+- 增强设备绑定系统，支持HTTP和MODBUS_TCP两种协议类型
 - 扩展设备台账模型，增加protocol和binding字段
 - 完善数据库迁移，支持协议切换和绑定约束
 
@@ -34,17 +36,18 @@
 ## 引言
 本文件聚焦 iot-service 中的 Modbus TCP 主站通信能力。平台侧作为网关（主站），主动连接现场设备（从站），按设备台账中的接入地址与协议剖面，轮询或写入线圈/寄存器，完成泵阀控制、水肥机动作以及状态与计量值回读。该模块实现了完整的 Modbus TCP 帧编解码、长连接事务管理、异常响应处理与超时重连策略，并与设备台账仓储和 HTTP 接口解耦，便于在真实现场部署中替换为数据库实现。
 
-**更新** 新增了设备绑定系统和多协议支持，现在支持HTTP回调式和MODBUS_TCP主动式两种接入模式，并提供标准化的设备配置模板。
+**更新** 新增了字段访问目录系统和多协议支持，现在支持HTTP回调式和MODBUS_TCP主动式两种接入模式，并提供标准化的设备配置模板和用户友好的协议标签。
 
 ## 项目结构
 iot-service 当前以轻量 Node.js HTTP 服务形式提供设备台账管理能力；Modbus TCP 客户端以独立模块暴露，供上层网关逻辑复用。关键文件职责如下：
 - modbus-tcp.ts：Modbus TCP 协议实现与长连接客户端。
-- device-binding.ts：设备接入绑定与协议配置管理。
+- device-binding.ts：设备接入绑定与协议配置管理，包含字段访问目录。
 - device.repository.ts：设备台账内存与 SQL 两种仓储实现。
 - http.ts：设备台账 HTTP API，负责鉴权、租户隔离与参数校验。
 - main.ts：服务启动入口，根据环境变量选择内存或 SQL 模式并监听端口。
 - app.module.ts：占位模块，用于 Nest 风格装配（当前未使用）。
 - modbus-tcp.spec.ts：对 Modbus TCP 帧与客户端行为的单元测试。
+- smoke-device-protocol.mjs：端到端Modbus冒烟测试脚本。
 
 ```mermaid
 graph TB
@@ -84,13 +87,16 @@ Modbus -. "被上层网关调用" .->|"TCP 502"| Device["现场Modbus设备"]
 - 已实现功能码：读线圈、读离散输入、读保持寄存器、读输入寄存器、写单线圈、写单寄存器、写多寄存器。
 - 异常码映射，便于日志与告警定位。
 
-### 设备绑定系统
+### 字段访问目录系统
 - **协议类型**：支持 HTTP（设备回调）和 MODBUS_TCP（主动轮询）两种接入方式。
+- **协议标签**：DEVICE_PROTOCOL_LABELS 提供用户友好的协议名称显示。
+- **词序标签**：MODBUS_WORD_ORDER_LABELS 提供高字在前和低字在前的友好描述。
 - **设备剖面**：预定义三种标准配置模板：
   - `SWITCH_ONLY`：仅开关控制，无计量功能
   - `WATER_M3`：灌溉控制 + 累计流量计量（m³）
   - `FERTILIZER_L`：水肥控制 + 累计出液计量（L）
 - **绑定验证**：严格的参数校验，确保设备配置的正确性。
+- **默认值管理**：fieldAccessCatalogue() 提供统一的协议、剖面和默认值配置。
 
 ### 帧编解码
 - encodeModbusTcpFrame：组装 MBAP 头与 PDU，长度字段按实际 PDU 计算。
@@ -120,6 +126,7 @@ Modbus -. "被上层网关调用" .->|"TCP 502"| Device["现场Modbus设备"]
 - /api/v1/devices：列表、新增、分页与筛选。
 - /api/v1/devices/:id：详情、编辑。
 - /api/v1/devices/:id/commands：命令入队（占位，后续由控制服务消费）。
+- /api/v1/devices/field-access：字段访问目录接口，提供协议、剖面和默认值配置。
 - 鉴权与租户隔离：基于可信身份头与进程配置，拒绝自报 tenantId。
 
 **章节来源**
@@ -144,6 +151,8 @@ participant Binding as "设备绑定系统"
 participant Gateway as "上层网关逻辑"
 participant Client as "ModbusTcpClient"
 participant Slave as "现场Modbus从站"
+Admin->>IotHttp : "GET /api/v1/devices/field-access"
+IotHttp-->>Admin : "协议/剖面/默认值目录"
 Admin->>IotHttp : "GET /api/v1/devices"
 IotHttp->>Repo : "list(tenantId, filter)"
 Repo-->>IotHttp : "设备列表(含协议/绑定)"
@@ -198,14 +207,21 @@ Slice --> End(["返回{frame, rest}"])
 **章节来源**
 - [modbus-tcp.ts:115-258](file://apps/iot-service/src/modbus-tcp.ts#L115-L258)
 
-### 设备绑定系统与协议配置
+### 字段访问目录系统与协议配置
 - **协议类型管理**：DEVICE_PROTOCOLS 枚举支持 HTTP 和 MODBUS_TCP 两种接入方式。
+- **协议标签**：DEVICE_PROTOCOL_LABELS 提供用户友好的协议名称：
+  - HTTP："设备回调（设备自己上报）"
+  - MODBUS_TCP："现场总线 Modbus TCP（平台主动轮询）"
+- **词序标签**：MODBUS_WORD_ORDER_LABELS 提供字序友好描述：
+  - HIGH_FIRST："高字在前（ABCD）"
+  - LOW_FIRST："低字在前（CDAB）"
 - **设备剖面模板**：MODBUS_PROFILES 提供三种标准化配置：
   - SWITCH_ONLY：基础开关控制，适用于泵阀、无人机等设备
   - WATER_M3：灌溉计量，支持 m³ 单位的高字优先拼接
   - FERTILIZER_L：水肥计量，支持 L 单位的低字优先拼接
 - **绑定验证流程**：parseModbusBinding 严格校验 host、port、unitId、profile 等参数。
 - **协议适配**：normalizeBinding 根据协议类型自动处理绑定数据的格式转换。
+- **目录生成**：fieldAccessCatalogue() 提供统一的协议、剖面和默认值配置。
 
 ```mermaid
 classDiagram
@@ -235,13 +251,21 @@ number unitId
 string profile
 number timeoutMs
 }
+class FieldAccessCatalogue {
+protocols[] protocols
+DeviceProtocol defaultProtocol
+profiles[] profiles
+Object defaults
+}
 DeviceProtocol <.. ModbusBinding : "协议驱动"
 ModbusProfile <.. ModbusBinding : "配置引用"
 ModbusMeter <.. ModbusProfile : "计量配置"
+FieldAccessCatalogue <.. ModbusProfile : "目录聚合"
 ```
 
 **图表来源**
 - [device-binding.ts:16-108](file://apps/iot-service/src/device-binding.ts#L16-L108)
+- [device-binding.ts:148-153](file://apps/iot-service/src/device-binding.ts#L148-L153)
 
 **章节来源**
 - [device-binding.ts:16-159](file://apps/iot-service/src/device-binding.ts#L16-L159)
@@ -346,6 +370,7 @@ DeviceRepository <|.. SqlDeviceRepository
   - GET /api/v1/devices/:id：设备详情。
   - PUT /api/v1/devices/:id：编辑设备名称、类型、状态、地块绑定、协议和绑定。
   - POST /api/v1/devices/:id/commands：命令入队（返回 QUEUED）。
+  - GET /api/v1/devices/field-access：字段访问目录接口，提供协议、剖面和默认值配置。
 
 ```mermaid
 flowchart TD
@@ -356,6 +381,7 @@ Auth --> Denied{"鉴权失败?"}
 Denied --> |是| Deny["返回401/403"]
 Denied --> |否| Tenant["提取租户tenantOf"]
 Tenant --> Routes{"路由匹配"}
+Routes --> |GET /devices/field-access| Catalogue["返回字段访问目录"]
 Routes --> |GET /devices| List["list+分页+筛选"]
 Routes --> |POST /devices| Create["校验+create+绑定验证"]
 Routes --> |GET /devices/:id| Detail["find"]
@@ -369,6 +395,22 @@ Routes --> |其他| NotFound["404"]
 
 **章节来源**
 - [http.ts:52-154](file://apps/iot-service/src/http.ts#L52-L154)
+
+### 端到端Modbus冒烟测试框架
+- **测试目标**：覆盖字段访问目录 → Modbus TCP 建档校验 → 现场网关指令执行 → 回执落库与事件中继的完整流程。
+- **假从站实现**：独立实现的最小Modbus从站，支持FC05写线圈、FC02读离散输入、FC03读保持寄存器。
+- **测试场景**：
+  - 字段访问目录验证
+  - 设备建档校验（缺绑定、空地址、剖面不匹配）
+  - 默认值补齐验证
+  - 协议与绑定同生同灭验证
+  - 现场设备建档与灌溉指令执行
+  - 急停与故障输入处理
+  - 回调式设备隔离验证
+- **数据验证**：核对指令状态流转、线圈写入顺序、用水量计算、回执时间列与事件主题。
+
+**章节来源**
+- [smoke-device-protocol.mjs:1-545](file://scripts/smoke-device-protocol.mjs#L1-L545)
 
 ## 依赖关系分析
 - 模块内依赖
@@ -385,6 +427,7 @@ Routes --> |其他| NotFound["404"]
   - DeviceRepository 通过接口解耦内存与 SQL 实现，提升可测试性与可替换性。
   - HTTP 层仅关注接口契约与租户隔离，不直接操作网络协议。
   - 设备绑定系统独立于协议实现，提供统一的配置管理接口。
+  - 字段访问目录系统集中管理协议、剖面和默认值，避免前端重复定义。
 
 ```mermaid
 graph LR
@@ -393,6 +436,8 @@ Http --> Repo["device.repository.ts"]
 Http --> Binding["device-binding.ts"]
 Binding --> Modbus["modbus-tcp.ts"]
 Modbus -. "被上层网关调用" .-> Device["现场设备"]
+SmokeTest["smoke-device-protocol.mjs"] --> Http
+SmokeTest --> Modbus
 ```
 
 **图表来源**
@@ -401,6 +446,7 @@ Modbus -. "被上层网关调用" .-> Device["现场设备"]
 - [device-binding.ts:1-159](file://apps/iot-service/src/device-binding.ts#L1-L159)
 - [device.repository.ts:101-111](file://apps/iot-service/src/device.repository.ts#L101-L111)
 - [modbus-tcp.ts:273-432](file://apps/iot-service/src/modbus-tcp.ts#L273-L432)
+- [smoke-device-protocol.mjs:1-545](file://scripts/smoke-device-protocol.mjs#L1-L545)
 
 **章节来源**
 - [main.ts:1-48](file://apps/iot-service/src/main.ts#L1-L48)
@@ -408,6 +454,7 @@ Modbus -. "被上层网关调用" .-> Device["现场设备"]
 - [device-binding.ts:1-159](file://apps/iot-service/src/device-binding.ts#L1-L159)
 - [device.repository.ts:1-398](file://apps/iot-service/src/device.repository.ts#L1-L398)
 - [modbus-tcp.ts:1-433](file://apps/iot-service/src/modbus-tcp.ts#L1-L433)
+- [smoke-device-protocol.mjs:1-545](file://scripts/smoke-device-protocol.mjs#L1-L545)
 
 ## 性能与可靠性考虑
 - 长连接复用：减少频繁握手开销，降低现场设备连接压力。
@@ -418,8 +465,7 @@ Modbus -. "被上层网关调用" .-> Device["现场设备"]
 - 32 位量拼接：combineUint32 明确字序由接入剖面决定，避免猜测导致的数值错误。
 - **协议适配**：HTTP 与 MODBUS_TCP 协议分离，避免不必要的连接开销。
 - **配置验证**：设备绑定参数在入库前严格校验，减少运行时错误。
-
-[本节为通用指导，不直接分析具体文件]
+- **目录一致性**：字段访问目录确保前端与后端配置同步，避免界面选项与后端校验不一致。
 
 ## 故障排查指南
 - 连接失败或超时
@@ -457,6 +503,11 @@ Modbus -. "被上层网关调用" .-> Device["现场设备"]
   - 排查：确认协议类型与绑定配置的对应关系；HTTP 设备不应有 binding 字段，MODBUS_TCP 设备必须有 binding。
   - 相关实现：http.ts 的协议校验逻辑和 device-binding.ts 的 normalizeBinding 函数。
 
+- **字段访问目录问题**
+  - 现象：/api/v1/devices/field-access 接口返回异常或缺少必要字段。
+  - 排查：检查 fieldAccessCatalogue() 函数实现；确认协议标签、词序标签和设备剖面配置正确。
+  - 相关实现：device-binding.ts 的 fieldAccessCatalogue 函数和相关常量定义。
+
 **章节来源**
 - [modbus-tcp.ts:45-72](file://apps/iot-service/src/modbus-tcp.ts#L45-L72)
 - [modbus-tcp.ts:134-143](file://apps/iot-service/src/modbus-tcp.ts#L134-L143)
@@ -468,6 +519,4 @@ Modbus -. "被上层网关调用" .-> Device["现场设备"]
 ## 结论
 本实现以清晰的协议分层与接口抽象，提供了稳健的 Modbus TCP 主站通信能力。通过长连接、超时重连、粘包处理与回显校验，有效应对现场设备的常见不稳定状态；同时，设备台账仓储与 HTTP 接口解耦，便于在不同部署环境下切换内存与 SQL 实现。
 
-**更新** 新增的设备绑定系统和多协议支持进一步增强了系统的灵活性和可扩展性。通过标准化的设备配置模板和严格的参数验证，确保了设备接入的可靠性和一致性。建议在网关层结合设备接入剖面，合理设置超时与重试策略，并对异常码进行监控与告警，以提升整体系统的可观测性与可用性。
-
-[本节为总结性内容，不直接分析具体文件]
+**更新** 新增的字段访问目录系统和多协议支持进一步增强了系统的灵活性和可扩展性。通过标准化的设备配置模板、用户友好的协议标签和严格的参数验证，确保了设备接入的可靠性和一致性。端到端冒烟测试框架覆盖了从配置到执行的完整业务流程，提升了系统的可测试性和可维护性。建议在网关层结合设备接入剖面，合理设置超时与重试策略，并对异常码进行监控与告警，以提升整体系统的可观测性与可用性。

@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: scripts/smoke_device_protocol
+title: 设备协议端到端冒烟测试
+scope:
+    - scripts/smoke-device-protocol.mjs
+source_files: []
+depends_on: []
+related_to: []

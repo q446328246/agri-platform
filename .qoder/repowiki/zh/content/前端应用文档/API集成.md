@@ -1,4 +1,4 @@
-基于我的分析，我现在了解了更新的内容。让我更新API集成文档以反映smoke testing脚本的undefined字段处理和TypeScript编译修复：
+基于我的分析，我现在了解了更新的内容。让我更新API集成文档以反映新增的getFieldAccess() API和增强的设备更新API：
 
 # API集成
 
@@ -18,6 +18,7 @@
 - [apps/operation-service/src/http.ts](file://apps/operation-service/src/http.ts)
 - [apps/iot-service/src/http.ts](file://apps/iot-service/src/http.ts)
 - [apps/iot-service/src/device.repository.ts](file://apps/iot-service/src/device.repository.ts)
+- [apps/iot-service/src/device-binding.ts](file://apps/iot-service/src/device-binding.ts)
 - [packages/shared/src/authz.ts](file://packages/shared/src/authz.ts)
 - [packages/shared/src/utils.ts](file://packages/shared/src/utils.ts)
 - [packages/contracts/src/dto/geo.dto.ts](file://packages/contracts/src/dto/geo.dto.ts)
@@ -32,11 +33,11 @@
 
 ## 更新摘要
 **变更内容**   
-- 增强了smoke测试脚本对undefined字段的处理，改进了控制指令回执链路的健壮性
-- 优化了TypeScript编译配置，启用更严格的类型检查选项（noUncheckedIndexedAccess、exactOptionalPropertyTypes）
-- 完善了服务间的undefined字段安全访问机制，避免运行时错误
-- 改进了命令回执状态机的时间字段处理，确保pendingMin和overdue字段的正确性
-- 增强了数据验证逻辑，对可选字段进行更安全的前端和后端处理
+- 新增了getFieldAccess() API用于获取现场协议目录，支持动态协议配置和设备绑定管理
+- 增强了设备更新API，支持结构化绑定数据（ModbusBinding）的完整生命周期管理
+- 完善了设备接入协议体系，支持HTTP回调和MODBUS_TCP两种接入方式
+- 实现了设备绑定数据的校验、归一化和持久化机制
+- 优化了前端类型定义，提供完整的TypeScript类型安全支持
 
 ## 目录
 1. [简介](#简介)
@@ -61,7 +62,7 @@
 
 本项目采用前后端分离架构：前端基于Vue3 + Element Plus，通过Axios统一发起HTTP请求；网关服务负责路由转发；认证服务提供登录、鉴权与会话管理；业务服务（如地块服务、IoT设备服务、操作服务）实现领域接口。公共契约包集中定义跨端共享的类型与响应信封。
 
-**更新** 新增了smoke测试脚本的undefined字段处理增强和TypeScript编译配置优化，提升了系统的类型安全性和运行稳定性。
+**更新** 新增了现场协议目录API和设备绑定管理功能，支持动态协议配置和结构化设备连接信息。
 
 ## 项目结构
 从API集成视角，关键目录与职责如下：
@@ -69,7 +70,7 @@
 - apps/gateway-service：网关服务，统一入口、路由转发与透传上下文
 - apps/auth-service：认证服务，提供登录、用户信息与登出
 - apps/plot-service：地块服务，演示REST接口、分页、错误码、片区管理和基础设施管线
-- apps/iot-service：IoT设备服务，提供设备台账管理、控制指令和状态监控
+- apps/iot-service：IoT设备服务，提供设备台账管理、控制指令、状态监控和现场协议接入
 - apps/operation-service：操作服务，提供导航规划和农事任务管理，新增覆盖规划功能
 - packages/contracts：公共契约包，定义跨端共享的响应信封、枚举、Geo DTOs和消息模板
 - packages/shared：共享工具包，提供权限验证、身份透传等通用功能
@@ -89,6 +90,7 @@ SERVICES --> CONTRACTS["公共契约包<br/>packages/contracts/src/index.ts"]
 IOT --> SHARED["共享工具包<br/>packages/shared/src/authz.ts"]
 TESTING --> SMOKE["冒烟测试脚本<br/>scripts/*.mjs"]
 TS_CONFIG["TypeScript配置<br/>packages/tsconfig/base.json"]
+IOT --> BINDING["设备绑定模块<br/>device-binding.ts"]
 ```
 
 **图示来源**
@@ -108,7 +110,7 @@ TS_CONFIG["TypeScript配置<br/>packages/tsconfig/base.json"]
 - 前端请求封装：Axios实例、请求/响应拦截器、通用方法get/post/put/del
 - 网关服务：默认路由表、最长前缀匹配、下游转发、错误包装
 - 认证服务：登录、获取用户信息、登出、会话存储与过期控制
-- IoT设备服务：设备台账CRUD、控制指令下发、状态监控、权限验证
+- IoT设备服务：设备台账CRUD、控制指令下发、状态监控、权限验证、现场协议接入
 - 业务服务（以地块为例）：统计、边界、CRUD、分页、错误码与traceId透传
 - 片区管理服务：片区CRUD、地块归属管理、地图视图聚合
 - 基础设施管线管理：管线CRUD、类型分类、几何数据处理、长度自动计算
@@ -117,16 +119,18 @@ TS_CONFIG["TypeScript配置<br/>packages/tsconfig/base.json"]
 - 消息模板系统：多主题模板、去重键生成、级别过滤
 - 类型契约：ApiResponse/PageResult等通用类型，以及领域模型与枚举
 - 权限验证：服务侧权限守卫、身份头透传、路径级权限覆盖
+- **设备绑定模块**：现场协议目录、Modbus绑定校验、协议适配层
 - **TypeScript编译配置**：严格模式、空值检查、模块解析等编译选项
 - **冒烟测试脚本**：端到端功能验证，包含undefined字段处理增强
 
-**更新** 新增了TypeScript编译配置和冒烟测试脚本相关组件。
+**更新** 新增了设备绑定模块相关组件，支持现场协议目录和结构化绑定数据管理。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:5-109](file://apps/web/src/utils/request.ts#L5-L109)
 - [apps/gateway-service/src/http.ts:4-40](file://apps/gateway-service/src/http.ts#L4-L40)
 - [apps/auth-service/src/http.ts:6-20](file://apps/auth-service/src/http.ts#L6-L20)
 - [apps/iot-service/src/http.ts:39-136](file://apps/iot-service/src/http.ts#L39-L136)
+- [apps/iot-service/src/device-binding.ts:1-213](file://apps/iot-service/src/device-binding.ts#L1-L213)
 - [apps/plot-service/src/http.ts:9-104](file://apps/plot-service/src/http.ts#L9-L104)
 - [apps/plot-service/src/plot.service.ts:276-411](file://apps/plot-service/src/plot.service.ts#L276-L411)
 - [apps/plot-service/src/zone.repository.ts:14-55](file://apps/plot-service/src/zone.repository.ts#L14-L55)
@@ -264,6 +268,7 @@ GW-->>FE : "透传响应"
 - 更新设备：/api/v1/devices/{id} PUT，支持部分更新，不允许修改设备编号
 - 删除设备：/api/v1/devices/{id} DELETE
 - 控制指令：/api/v1/devices/{id}/commands POST，异步下发控制命令
+- **现场接入目录**：/api/v1/devices/field-access GET，返回协议、剖面与缺省值
 - 权限验证：需要device:read和device:control权限
 
 ```mermaid
@@ -288,6 +293,8 @@ class Device {
 +type
 +status
 +plotCode
++protocol
++binding
 +lastSeenAt
 +createdAt
 +updatedAt
@@ -304,87 +311,70 @@ DeviceRepository --> Device : "操作"
 - [apps/iot-service/src/http.ts:39-136](file://apps/iot-service/src/http.ts#L39-L136)
 - [apps/iot-service/src/device.repository.ts:1-321](file://apps/iot-service/src/device.repository.ts#L1-L321)
 
-### 业务服务接口（以地块为例）
-- 健康检查：/health
-- 统计接口：/api/v1/plots/stats
-- 边界接口：/api/v1/plots/bounds
-- 列表接口：/api/v1/plots GET，支持分页与关键词过滤
-- 详情接口：/api/v1/plots/{parcelCode}
-- 创建接口：/api/v1/plots POST
-- 更新接口：/api/v1/plots/{parcelCode} PUT
-- 删除接口：/api/v1/plots/{parcelCode} DELETE
-- 统一响应：ApiResponse，含code/message/data/traceId/timestamp
-- 分页：PageResult，限制每页最大200
-
-```mermaid
-classDiagram
-class PlotHttpServer {
-+createPlotHttpServer(service)
--traceId(request) string
--send(response, status, data, traceId, message) void
--readJson(request) Record
--page(items, query) PageResult
-}
-class ApiResponse {
-+code
-+message
-+data
-+traceId
-+timestamp
-}
-class PageResult {
-+items
-+total
-+page
-+size
-+pages
-}
-PlotHttpServer --> ApiResponse : "使用"
-PlotHttpServer --> PageResult : "返回"
-```
-
-**图示来源**
-- [apps/plot-service/src/http.ts:9-38](file://apps/plot-service/src/http.ts#L9-L38)
-- [apps/plot-service/src/http.ts:40-104](file://apps/plot-service/src/http.ts#L40-L104)
-
-**章节来源**
-- [apps/plot-service/src/http.ts:9-104](file://apps/plot-service/src/http.ts#L9-L104)
-
-### 覆盖规划API
-- **覆盖规划接口**：/api/v1/operations/coverage-plan POST，支持全地块覆盖式作业规划
-  - 请求体：{ plotCode, boundary, implementWidthM, overlapM?, headingDeg?, speedKmh?, turnSpeedKmh?, start?, areaMu? }
-  - 响应：{ planId, plotCode, headingDeg, headingAuto, implementWidthM, overlapM, laneSpacingM, laneCount, turnCount, lanes[], workDistanceM, transferDistanceM, totalDistanceM, durationMin, areaMu, coverageRatio, path, warnings }
-  - 业务逻辑：等距布带、蛇形往返、内环跳洞、方向自动挑选、入场里程计算
-- **覆盖规划历史接口**：/api/v1/operations/coverage-plans GET，返回最近20条覆盖方案
-  - 响应：CoveragePlan[]，按租户隔离存储
+### 现场协议目录API
+- **获取现场接入目录**：/api/v1/devices/field-access GET
+  - 响应：FieldAccessCatalogue，包含协议列表、默认协议、剖面配置和缺省值
+  - 协议列表：DEVICE_PROTOCOLS数组，每个协议包含value、label和requiresBinding标识
+  - 剖面配置：MODBUS_PROFILE_KEYS数组，每个剖面包含key、label、适用设备类型和计量配置
+  - 缺省值：MODBUS_TCP_DEFAULT_PORT、MODBUS_DEFAULT_UNIT_ID、MODBUS_TCP_DEFAULT_TIMEOUT_MS
+- **协议适配逻辑**：
+  - HTTP协议：回调式接入，不需要绑定信息
+  - MODBUS_TCP协议：主动轮询接入，必须提供完整的绑定信息
+  - 协议切换时自动校验绑定信息的完整性
 
 ```mermaid
 flowchart TD
-CoverageRequest["覆盖规划请求"] --> Validate["参数验证"]
-Validate --> PlaneCalc["平面坐标转换"]
-PlaneCalc --> DirectionCheck{"指定方向?"}
-DirectionCheck --> |否| AutoSelect["自动选择最优方向"]
-DirectionCheck --> |是| UseSpecified["使用指定方向"]
-AutoSelect --> ScanLines["扫描线生成"]
-UseSpecified --> ScanLines
-ScanLines --> SnakePattern["蛇形往返模式"]
-SnakePattern --> LaneGeneration["作业带生成"]
-LaneGeneration --> PathConstruction["路径构建"]
-PathConstruction --> Statistics["统计计算"]
-Statistics --> Result["返回规划结果"]
+FieldAccessRequest["获取现场接入目录"] --> GetProtocols["获取协议列表"]
+GetProtocols --> GetProfiles["获取剖面配置"]
+GetProfiles --> GetDefaults["获取缺省值"]
+GetDefaults --> Combine["组合返回数据"]
+Combine --> Response["返回FieldAccessCatalogue"]
 ```
 
 **图示来源**
-- [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
-- [apps/operation-service/src/http.ts:134-141](file://apps/operation-service/src/http.ts#L134-L141)
+- [apps/iot-service/src/http.ts:114-117](file://apps/iot-service/src/http.ts#L114-L117)
+- [apps/iot-service/src/device-binding.ts:130-145](file://apps/iot-service/src/device-binding.ts#L130-L145)
 
 **章节来源**
-- [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
-- [apps/operation-service/src/http.ts:134-141](file://apps/operation-service/src/http.ts#L134-L141)
+- [apps/iot-service/src/http.ts:114-117](file://apps/iot-service/src/http.ts#L114-L117)
+- [apps/iot-service/src/device-binding.ts:130-145](file://apps/iot-service/src/device-binding.ts#L130-L145)
+
+### 设备绑定管理API
+- **结构化绑定数据**：ModbusBinding接口，包含host、port、unitId、profile、timeoutMs字段
+- **绑定校验与归一化**：
+  - normalizeBinding函数：根据协议类型决定是否需要绑定信息
+  - parseModbusBinding函数：校验绑定参数的完整性和合法性
+  - readModbusBinding函数：从数据库读取的绑定数据归一化处理
+- **设备更新时的绑定处理**：
+  - 协议不变时：保留原有绑定信息
+  - 协议改变时：清空旧绑定，要求提供新绑定
+  - 绑定为空时：转换为null表示解绑
+  - 绑定对象深拷贝：避免引用污染
+
+```mermaid
+flowchart TD
+UpdateDevice["设备更新请求"] --> CheckProtocol{"协议是否改变?"}
+CheckProtocol --> |否| KeepBinding["保留原绑定"]
+CheckProtocol --> |是| ClearBinding["清空旧绑定"]
+KeepBinding --> ValidateBinding["校验新绑定"]
+ClearBinding --> ValidateBinding
+ValidateBinding --> NormalizeBinding["归一化绑定数据"]
+NormalizeBinding --> SaveBinding["保存绑定信息"]
+SaveBinding --> UpdateComplete["更新完成"]
+```
+
+**图示来源**
+- [apps/iot-service/src/http.ts:162-169](file://apps/iot-service/src/http.ts#L162-L169)
+- [apps/iot-service/src/device-binding.ts:199-206](file://apps/iot-service/src/device-binding.ts#L199-L206)
+
+**章节来源**
+- [apps/iot-service/src/http.ts:162-169](file://apps/iot-service/src/http.ts#L162-L169)
+- [apps/iot-service/src/device-binding.ts:199-206](file://apps/iot-service/src/device-binding.ts#L199-L206)
 
 ### Web API客户端扩展
 - **覆盖规划方法**：operationApi.planCoverage(data)，调用POST /operations/coverage-plan，返回覆盖规划方案
 - **覆盖规划历史方法**：operationApi.getCoveragePlans()，调用GET /operations/coverage-plans，返回最近20条记录
+- **现场接入目录方法**：iotApi.getFieldAccess()，调用GET /devices/field-access，返回协议目录配置
 - **类型安全**：使用TypeScript接口确保参数和返回值类型正确
 - **数据格式**：支持完整的覆盖规划数据结构，包括作业带、路径、统计信息等
 
@@ -395,6 +385,11 @@ class OperationApiClient {
 +getPathPlans() : Promise~NavPlan[]~
 +planCoverage(data) : Promise~CoveragePlan~
 +getCoveragePlans() : Promise~CoveragePlan[]~
+}
+class IotApiClient {
++getFieldAccess() : Promise~DeviceFieldAccess~
++createDevice(data) : Promise~Device~
++updateDevice(id, data) : Promise~Device~
 }
 class CoverageRequest {
 +plotCode
@@ -429,15 +424,18 @@ class CoveragePlan {
 }
 OperationApiClient --> CoverageRequest : "接收"
 OperationApiClient --> CoveragePlan : "返回"
+IotApiClient --> DeviceFieldAccess : "返回"
 ```
 
 **图示来源**
 - [apps/web/src/api/index.ts:702-707](file://apps/web/src/api/index.ts#L702-L707)
 - [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
+- [apps/web/src/api/index.ts:372-374](file://apps/web/src/api/index.ts#L372-L374)
 
 **章节来源**
 - [apps/web/src/api/index.ts:702-707](file://apps/web/src/api/index.ts#L702-L707)
 - [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
+- [apps/web/src/api/index.ts:372-374](file://apps/web/src/api/index.ts#L372-L374)
 
 ### 地块合并与拆分API
 - **合并接口**：/api/v1/plots/merge POST，支持多个地块合并为单个地块
@@ -716,6 +714,8 @@ string name
 string type
 string status
 string plotCode
+string protocol
+object binding
 string lastSeenAt
 string createdAt
 string updatedAt
@@ -766,6 +766,12 @@ number coverageRatio
 object path
 array warnings
 }
+FIELD_ACCESS {
+array protocols
+string defaultProtocol
+array profiles
+object defaults
+}
 ```
 
 **图示来源**
@@ -773,6 +779,7 @@ array warnings
 - [apps/web/src/api/index.ts:125-146](file://apps/web/src/api/index.ts#L125-L146)
 - [apps/iot-service/src/device.repository.ts:31-44](file://apps/iot-service/src/device.repository.ts#L31-L44)
 - [apps/web/src/api/index.ts:771-791](file://apps/web/src/api/index.ts#L771-L791)
+- [apps/web/src/types/index.ts:246-258](file://apps/web/src/types/index.ts#L246-L258)
 
 **章节来源**
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
@@ -786,10 +793,11 @@ array warnings
 - **覆盖规划服务依赖几何计算库和数学算法**，用于牛耕式作业带计算
 - 公共契约包仅导出类型与枚举，不依赖能力包，便于前后端共享
 - 权限验证依赖合约包的权限解析函数
+- **设备绑定模块依赖协议常量配置**，提供统一的协议适配逻辑
 - **TypeScript编译配置**：所有服务继承统一的tsconfig基座，确保编译一致性
 - **冒烟测试脚本**：依赖PostgreSQL数据库和服务间HTTP通信
 
-**更新** 新增了TypeScript编译配置和冒烟测试脚本的依赖关系。
+**更新** 新增了设备绑定模块的依赖关系，支持协议目录和绑定数据管理。
 
 ```mermaid
 graph LR
@@ -799,12 +807,14 @@ GATEWAY["网关服务"] --> NODE_HTTP["node:http"]
 AUTH["认证服务"] --> MAP["内存会话Map"]
 IOT["IoT设备服务"] --> DEVICE_REPO["设备仓储"]
 IOT --> AUTHZ["权限验证"]
+IOT --> BINDING["设备绑定模块"]
 PLOT["地块服务"] --> CONTRACTS["公共契约包"]
 OPERATION["操作服务"] --> COVERAGE["覆盖规划算法"]
 OPERATION --> NAVIGATION["导航算法"]
 CONTRACTS --> MESSAGES["消息模板"]
 TYPES --> CONTRACTS
 AUTHZ --> CONTRACTS
+BINDING --> PROTOCOLS["协议常量"]
 COVERAGE --> GEOMETRY["几何计算库"]
 SMOKE["冒烟测试"] --> DB["PostgreSQL"]
 SMOKE --> SERVICES["微服务HTTP"]
@@ -816,6 +826,7 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - [apps/gateway-service/src/http.ts:1-4](file://apps/gateway-service/src/http.ts#L1-L4)
 - [apps/auth-service/src/http.ts:6-8](file://apps/auth-service/src/http.ts#L6-L8)
 - [apps/iot-service/src/http.ts:1-8](file://apps/iot-service/src/http.ts#L1-L8)
+- [apps/iot-service/src/device-binding.ts:1-3](file://apps/iot-service/src/device-binding.ts#L1-L3)
 - [apps/plot-service/src/http.ts:4-7](file://apps/plot-service/src/http.ts#L4-L7)
 - [apps/operation-service/src/navigation.ts:1-3](file://apps/operation-service/src/navigation.ts#L1-L3)
 - [apps/operation-service/src/coverage.ts:1-3](file://apps/operation-service/src/coverage.ts#L1-L3)
@@ -829,6 +840,7 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - [apps/gateway-service/src/http.ts:1-4](file://apps/gateway-service/src/http.ts#L1-L4)
 - [apps/auth-service/src/http.ts:6-8](file://apps/auth-service/src/http.ts#L6-L8)
 - [apps/iot-service/src/http.ts:1-8](file://apps/iot-service/src/http.ts#L1-L8)
+- [apps/iot-service/src/device-binding.ts:1-3](file://apps/iot-service/src/device-binding.ts#L1-L3)
 - [apps/plot-service/src/http.ts:4-7](file://apps/plot-service/src/http.ts#L4-L7)
 - [apps/operation-service/src/navigation.ts:1-3](file://apps/operation-service/src/navigation.ts#L1-L3)
 - [apps/operation-service/src/coverage.ts:1-3](file://apps/operation-service/src/coverage.ts#L1-L3)
@@ -848,10 +860,12 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - 设备查询优化：设备列表支持多维度筛选，减少前端过滤开销
 - 几何计算优化：管线长度自动计算，避免前端重复计算
 - **覆盖规划优化**：等距圆柱平面坐标转换，避免经纬度直接计算的精度损失；自动方向选择算法优化总里程；作业带间距自适应调整
+- **协议目录缓存**：现场接入目录可前端缓存，减少重复请求；协议配置变更时主动刷新
+- **绑定数据优化**：结构化绑定数据深拷贝避免引用污染；协议切换时批量处理绑定变更
 - **TypeScript编译优化**：skipLibCheck提升编译速度，isolatedModules支持并行编译
 - **测试优化**：冒烟测试使用独立端口和数据隔离，支持并发执行
 
-**更新** 新增了TypeScript编译优化和测试优化相关的考虑。
+**更新** 新增了协议目录缓存和绑定数据优化的考虑。
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -869,11 +883,13 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - **覆盖规划参数错误**：plotCode不能为空，boundary需为有效的Polygon几何，implementWidthM需在0~50米之间
 - **覆盖规划几何错误**：地块边界顶点不足3个，无法铺作业带；作业带间距不为正；按给定幅宽铺不出任何作业带
 - **覆盖规划算法错误**：作业带超过2000条上限；地块边界退化导致无法计算
+- **协议目录错误**：检查field-access接口是否正常返回；确认协议配置是否完整
+- **绑定数据错误**：检查ModbusBinding字段完整性；确认协议与绑定匹配关系
 - **TypeScript编译错误**：检查strictNullChecks和noUncheckedIndexedAccess相关的类型安全问题
 - **undefined字段错误**：使用assertDefined函数进行字段验证，避免运行时undefined访问
 - **冒烟测试失败**：检查数据库连接、服务端口配置和依赖服务可用性
 
-**更新** 新增了TypeScript编译错误、undefined字段错误和冒烟测试失败的故障排查指导。
+**更新** 新增了协议目录错误和绑定数据错误的故障排查指导。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:37-86](file://apps/web/src/utils/request.ts#L37-L86)
@@ -886,9 +902,9 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - [packages/tsconfig/base.json:4-21](file://packages/tsconfig/base.json#L4-L21)
 
 ## 结论
-本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、设备管理、片区管理、基础设施管线、导航规划、覆盖规划和消息模板等基本功能；**新增的TypeScript编译配置优化和冒烟测试脚本增强进一步提升了系统的类型安全性和测试可靠性**。后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
+本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、设备管理、片区管理、基础设施管线、导航规划、覆盖规划和消息模板等基本功能；**新增的现场协议目录API和设备绑定管理功能进一步增强了设备的灵活接入能力，支持动态协议配置和结构化连接信息管理**。后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
 
-**更新** 新增了TypeScript编译配置优化和冒烟测试脚本的undefined字段处理增强，进一步完善了智慧农业平台的质量保障体系。
+**更新** 新增了现场协议目录API和设备绑定管理功能，进一步完善了智慧农业平台的设备接入能力。
 
 [本节为总结性内容，不直接分析具体文件]
 
@@ -922,21 +938,58 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - GET /api/v1/devices/{id}
   - 响应：Device
 - POST /api/v1/devices
-  - 请求体：{ deviceNo, name, type, status, plotCode? }
+  - 请求体：{ deviceNo, name, type, status, plotCode?, protocol?, binding? }
   - 响应：Device
 - PUT /api/v1/devices/{id}
-  - 请求体：{ name?, type?, status?, plotCode? }
+  - 请求体：{ name?, type?, status?, plotCode?, protocol?, binding? }
   - 响应：Device
 - DELETE /api/v1/devices/{id}
   - 响应：空数据
 - POST /api/v1/devices/{id}/commands
   - 请求体：{ type, parameters? }
   - 响应：{ commandId, deviceId, status: "QUEUED", command }
+- **GET /api/v1/devices/field-access**
+  - 响应：FieldAccessCatalogue
+  - 说明：返回现场接入协议目录，包含协议列表、剖面配置和缺省值
 
-**更新** 新增设备管理相关接口。
+**更新** 新增了现场接入目录接口。
 
 **章节来源**
 - [apps/iot-service/src/http.ts:50-130](file://apps/iot-service/src/http.ts#L50-L130)
+- [apps/iot-service/src/http.ts:114-117](file://apps/iot-service/src/http.ts#L114-L117)
+
+### 现场协议目录接口
+- **GET /api/v1/devices/field-access**
+  - 响应：FieldAccessCatalogue
+  - 协议列表：Array<{ value: DeviceProtocol, label: string, requiresBinding: boolean }>
+  - 默认协议：DEFAULT_DEVICE_PROTOCOL
+  - 剖面配置：Array<{ key: string, label: string, applicableTypes: DeviceType[], meter: ModbusMeter | null }>
+  - 缺省值：{ port: MODBUS_TCP_DEFAULT_PORT, unitId: MODBUS_DEFAULT_UNIT_ID, timeoutMs: MODBUS_TCP_DEFAULT_TIMEOUT_MS }
+
+**更新** 新增现场协议目录接口定义。
+
+**章节来源**
+- [apps/iot-service/src/http.ts:114-117](file://apps/iot-service/src/http.ts#L114-L117)
+- [apps/iot-service/src/device-binding.ts:130-145](file://apps/iot-service/src/device-binding.ts#L130-L145)
+
+### 设备绑定数据类型
+- **ModbusBinding**：结构化绑定数据接口
+  - host: string - 设备或现场网关的IPv4/IPv6地址或域名
+  - port: number - 端口号，默认502（Modbus TCP标准端口）
+  - unitId: number - 单元标识，范围0-255，默认1
+  - profile: string - 寄存器剖面key，如SWITCH_ONLY、WATER_M3、FERTILIZER_L
+  - timeoutMs: number - 单次事务超时，范围100-60000ms，默认30000ms
+- **DeviceFieldAccess**：现场接入目录接口
+  - protocols: Array<{ value: string, label: string, requiresBinding: boolean }>
+  - defaultProtocol: string
+  - profiles: Array<{ key: string, label: string, applicableTypes: string[], meter: object | null }>
+  - defaults: { port: number, unitId: number, timeoutMs: number }
+
+**更新** 新增设备绑定数据类型定义。
+
+**章节来源**
+- [apps/iot-service/src/device-binding.ts:155-162](file://apps/iot-service/src/device-binding.ts#L155-L162)
+- [apps/web/src/types/index.ts:246-258](file://apps/web/src/types/index.ts#L246-L258)
 
 ### 覆盖规划接口
 - **POST /api/v1/operations/coverage-plan**
@@ -1125,3 +1178,4 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 
 **章节来源**
 - [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)
+</docs>

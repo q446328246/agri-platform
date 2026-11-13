@@ -1,9 +1,8 @@
 schema_version: 1
 module_path: scripts
-title: Agri Platform 运维与冒烟测试脚本集
+title: agri-platform 运维与冒烟脚本集
 scope:
     - scripts/
 source_files: []
 depends_on: []
-related_to:
-    - path: infrastructure
+related_to: []
