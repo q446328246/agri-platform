@@ -162,7 +162,7 @@
         <template v-if="mergePreview">
           <el-alert v-if="!mergePreview.adjacent" type="error" :closable="false" show-icon class="merge-alert">
             <template #title>
-              所选地块不相邻（容差 {{ mergePreview.toleranceM }} 米），服务端会拒掉本次合并。分成 {{ mergePreview.groups.length }} 组：{{ mergePreview.groups.map((group) => group.join('、')).join(' ｜ ') }}
+              所选地块不相邻（容差 {{ mergePreview.toleranceM }} 米），服务端会拒掉本次合并。分成 {{ mergePreview.groups.length }} 组：{{ mergePreview.groups.map((group: string[]) => group.join('、')).join(' ｜ ') }}
             </template>
           </el-alert>
           <el-alert v-else-if="!mergePreview.geom" type="error" :closable="false" show-icon class="merge-alert">
@@ -435,7 +435,6 @@ async function submitMerge() {
         {
           confirmButtonText: '编辑合并后边界',
           cancelButtonText: '留在列表',
-          confirmButtonPosition: 'right',
           type: 'warning'
         }
       ).then(() => router.push(`/plot/edit/${merged.parcelCode}`)).catch(() => fetchList())

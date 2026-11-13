@@ -115,7 +115,7 @@ export class InMemoryTaskRepository implements TaskRepository {
       version: 1,
     };
     this.tasks.push(record);
-    await this.changeLog.append({ id: randomUUID(), taskId: record.id, tenantId: record.tenantId, action: "CREATE", summary: `新建任务：${record.name}`, actor, traceId, createdAt: record.createdAt });
+    await this.changeLog.append({ id: randomUUID(), taskId: record.id, tenantId: record.tenantId, action: "CREATE", summary: `新建任务：${record.name}`, actor, ...(traceId === undefined ? {} : { traceId }), createdAt: record.createdAt });
     return structuredClone(record);
   }
   async transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult, actor = "system"): Promise<Task | null> {
@@ -146,7 +146,7 @@ export class InMemoryTaskRepository implements TaskRepository {
     // 归档只盖一个时间戳：status 记的是作业走到哪一步，version 记的是状态跃迁次数，
     // 都不该被删除动作改写，否则历史行读出来的状态与乐观锁基线就失真了。
     stored.deletedAt = deletedAt;
-    await this.changeLog.append({ id: randomUUID(), taskId: stored.id, tenantId: stored.tenantId, action: "ARCHIVE", summary: "任务归档", actor, traceId, createdAt: deletedAt });
+    await this.changeLog.append({ id: randomUUID(), taskId: stored.id, tenantId: stored.tenantId, action: "ARCHIVE", summary: "任务归档", actor, ...(traceId === undefined ? {} : { traceId }), createdAt: deletedAt });
     return structuredClone(stored);
   }
   async history(tenantId: string, taskId: string): Promise<TaskChangeLog[]> {

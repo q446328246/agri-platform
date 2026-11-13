@@ -608,6 +608,17 @@
 - **口径不变**：合并边界仍默认取源地块凸包、面积按合并几何现算；手工改边界只在合并完成后经通用编辑页进行，仍按「面积由边界唯一确定」落库。不新增后端接口、不改合并语义。
 - **测试**：`plot-split-view.spec.ts` 既有的 `plotApi.merge` 线格式断言不受影响；本轮未新增前端用例。**按长期口径本轮未跑验证。**
 
+### 2026-11-13（续）：重建并部署镜像（用户点名，含构建暴露的类型修复）
+
+- **触发**：用户点名「重建，部署镜像」，覆盖长期口径中「不再重建/部署 `app`、`edge` 镜像」的约束。
+- **构建暴露两处类型错误**（长期口径不跑类型检查，此前未暴露）：
+  - `operation-service/src/task.repository.ts`：`TaskChangeLog.traceId` 在 `exactOptionalPropertyTypes` 下是「可选但类型为 `string`」，`create`/`remove` 里显式传 `traceId: string | undefined` 直接报错。改为条件展开 `...(traceId === undefined ? {} : { traceId })`，与同文件其它可选字段一致；`transition` 的 `traceId` 本就必传，未改。
+  - `web/src/views/plot/List.vue`：合并分组提示的 `map((group) => …)` 中 `group` 隐式 `any`（vue-tsc 报 TS7006，属合并预演那轮积压）；标注为 `string[]`。另本轮新增的 `ElMessageBox.confirm` 误用了 Element Plus 不存在的 `confirmButtonPosition` 属性（TS2769），已移除。
+- **构建**：`docker-compose -f infra/docker-compose.yml --profile app build`，后端 `tsc -b`、前端 `vue-tsc -b && vite build`（2334 模块）全部通过，产出 `agri-platform:local` 与 `agri-platform-edge:local`。中途运行镜像 `pnpm install --prod` 因网络 `ECONNRESET` 失败一次，重试后通过，属网络抖动，非代码问题。
+- **部署**：`docker-compose -f infra/docker-compose.yml --profile app up -d`，`app`/`edge`/`postgres`/`minio` 四容器全部 Up，`app` healthy。app 容器启动按既定 CMD 执行幂等迁移，**迁移 039（`operation_task_change_logs`）随本次部署应用**。
+- **验证（产物级）**：edge `http://localhost/healthz` 与 `https://localhost/healthz` 均 200；前端首页 200 且引用最新构建产物；app 容器内 `:8080/health` 返回 `gateway status: ok`；经 edge 访问 `/api/v1/plots` 返回 401 `GATEWAY-401`（鉴权链路生效）；postgres 中 `operation_task_change_logs` 表存在。
+- **说明**：两处类型错误是部署流程暴露的真实缺陷，属必要修复，已与本次改动一并提交。
+
 ## 下一步（中断后从这里继续）
 
 
