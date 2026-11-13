@@ -1,5 +1,3 @@
-基于我的分析，我现在了解了更新的内容。让我更新API集成文档以反映新增的getFieldAccess() API和增强的设备更新API：
-
 # API集成
 
 <cite>
@@ -7,17 +5,14 @@
 - [apps/web/src/api/index.ts](file://apps/web/src/api/index.ts)
 - [apps/web/src/utils/request.ts](file://apps/web/src/utils/request.ts)
 - [apps/web/src/types/index.ts](file://apps/web/src/types/index.ts)
+- [apps/web/src/views/plot/List.vue](file://apps/web/src/views/plot/List.vue)
 - [apps/gateway-service/src/http.ts](file://apps/gateway-service/src/http.ts)
 - [apps/auth-service/src/http.ts](file://apps/auth-service/src/http.ts)
 - [apps/plot-service/src/http.ts](file://apps/plot-service/src/http.ts)
-- [apps/plot-service/src/zone.repository.ts](file://apps/plot-service/src/zone.repository.ts)
-- [apps/plot-service/src/infra-line.repository.ts](file://apps/plot-service/src/infra-line.repository.ts)
 - [apps/plot-service/src/plot.service.ts](file://apps/plot-service/src/plot.service.ts)
-- [apps/operation-service/src/navigation.ts](file://apps/operation-service/src/navigation.ts)
-- [apps/operation-service/src/coverage.ts](file://apps/operation-service/src/coverage.ts)
 - [apps/operation-service/src/http.ts](file://apps/operation-service/src/http.ts)
+- [apps/operation-service/src/task.repository.ts](file://apps/operation-service/src/task.repository.ts)
 - [apps/iot-service/src/http.ts](file://apps/iot-service/src/http.ts)
-- [apps/iot-service/src/device.repository.ts](file://apps/iot-service/src/device.repository.ts)
 - [apps/iot-service/src/device-binding.ts](file://apps/iot-service/src/device-binding.ts)
 - [packages/shared/src/authz.ts](file://packages/shared/src/authz.ts)
 - [packages/shared/src/utils.ts](file://packages/shared/src/utils.ts)
@@ -33,11 +28,10 @@
 
 ## 更新摘要
 **变更内容**   
-- 新增了getFieldAccess() API用于获取现场协议目录，支持动态协议配置和设备绑定管理
-- 增强了设备更新API，支持结构化绑定数据（ModbusBinding）的完整生命周期管理
-- 完善了设备接入协议体系，支持HTTP回调和MODBUS_TCP两种接入方式
-- 实现了设备绑定数据的校验、归一化和持久化机制
-- 优化了前端类型定义，提供完整的TypeScript类型安全支持
+- 新增了合并预览API方法，支持在提交前预演地块合并的相邻判定、凸包面积计算和连通分组
+- 完善了归档过滤功能，支持农事任务的NONE/ONLY/ALL三种归档状态筛选
+- 更新了TypeScript类型定义以支持新的归档过滤类型和合并预览数据结构
+- 增强了前端合并预览界面，提供源面积合计、凸包面积、差额显示和相邻性提示
 
 ## 目录
 1. [简介](#简介)
@@ -62,7 +56,7 @@
 
 本项目采用前后端分离架构：前端基于Vue3 + Element Plus，通过Axios统一发起HTTP请求；网关服务负责路由转发；认证服务提供登录、鉴权与会话管理；业务服务（如地块服务、IoT设备服务、操作服务）实现领域接口。公共契约包集中定义跨端共享的类型与响应信封。
 
-**更新** 新增了现场协议目录API和设备绑定管理功能，支持动态协议配置和结构化设备连接信息。
+**更新** 新增了合并预览API和增强的归档过滤功能，支持更精确的地块合并预演和任务归档状态筛选。
 
 ## 项目结构
 从API集成视角，关键目录与职责如下：
@@ -112,6 +106,7 @@ IOT --> BINDING["设备绑定模块<br/>device-binding.ts"]
 - 认证服务：登录、获取用户信息、登出、会话存储与过期控制
 - IoT设备服务：设备台账CRUD、控制指令下发、状态监控、权限验证、现场协议接入
 - 业务服务（以地块为例）：统计、边界、CRUD、分页、错误码与traceId透传
+- **合并预览服务**：预演地块合并的相邻判定、凸包面积计算和连通分组
 - 片区管理服务：片区CRUD、地块归属管理、地图视图聚合
 - 基础设施管线管理：管线CRUD、类型分类、几何数据处理、长度自动计算
 - **覆盖规划服务**：全地块覆盖式作业规划，自动计算牛耕式作业带路径
@@ -119,11 +114,11 @@ IOT --> BINDING["设备绑定模块<br/>device-binding.ts"]
 - 消息模板系统：多主题模板、去重键生成、级别过滤
 - 类型契约：ApiResponse/PageResult等通用类型，以及领域模型与枚举
 - 权限验证：服务侧权限守卫、身份头透传、路径级权限覆盖
-- **设备绑定模块**：现场协议目录、Modbus绑定校验、协议适配层
+- **归档过滤系统**：支持农事任务的NONE/ONLY/ALL归档状态筛选
 - **TypeScript编译配置**：严格模式、空值检查、模块解析等编译选项
 - **冒烟测试脚本**：端到端功能验证，包含undefined字段处理增强
 
-**更新** 新增了设备绑定模块相关组件，支持现场协议目录和结构化绑定数据管理。
+**更新** 新增了合并预览服务和归档过滤系统相关组件。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:5-109](file://apps/web/src/utils/request.ts#L5-L109)
@@ -133,10 +128,9 @@ IOT --> BINDING["设备绑定模块<br/>device-binding.ts"]
 - [apps/iot-service/src/device-binding.ts:1-213](file://apps/iot-service/src/device-binding.ts#L1-L213)
 - [apps/plot-service/src/http.ts:9-104](file://apps/plot-service/src/http.ts#L9-L104)
 - [apps/plot-service/src/plot.service.ts:276-411](file://apps/plot-service/src/plot.service.ts#L276-L411)
-- [apps/plot-service/src/zone.repository.ts:14-55](file://apps/plot-service/src/zone.repository.ts#L14-L55)
-- [apps/plot-service/src/infra-line.repository.ts:18-46](file://apps/plot-service/src/infra-line.repository.ts#L18-L46)
-- [apps/operation-service/src/navigation.ts:16-56](file://apps/operation-service/src/navigation.ts#L16-L56)
-- [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
+- [apps/plot-service/src/plot.service.ts:91-108](file://apps/plot-service/src/plot.service.ts#L91-L108)
+- [apps/operation-service/src/http.ts:77-78](file://apps/operation-service/src/http.ts#L77-L78)
+- [apps/operation-service/src/task.repository.ts:12](file://apps/operation-service/src/task.repository.ts#L12)
 - [packages/shared/src/authz.ts:66-80](file://packages/shared/src/authz.ts#L66-L80)
 - [packages/shared/src/utils.ts:29-34](file://packages/shared/src/utils.ts#L29-L34)
 - [packages/contracts/src/messages/message-template.ts:62-81](file://packages/contracts/src/messages/message-template.ts#L62-L81)
@@ -375,6 +369,7 @@ SaveBinding --> UpdateComplete["更新完成"]
 - **覆盖规划方法**：operationApi.planCoverage(data)，调用POST /operations/coverage-plan，返回覆盖规划方案
 - **覆盖规划历史方法**：operationApi.getCoveragePlans()，调用GET /operations/coverage-plans，返回最近20条记录
 - **现场接入目录方法**：iotApi.getFieldAccess()，调用GET /devices/field-access，返回协议目录配置
+- **合并预览方法**：plotApi.mergePreview(parcelCodes)，调用POST /plots/merge-preview，返回合并预演结果
 - **类型安全**：使用TypeScript接口确保参数和返回值类型正确
 - **数据格式**：支持完整的覆盖规划数据结构，包括作业带、路径、统计信息等
 
@@ -390,6 +385,10 @@ class IotApiClient {
 +getFieldAccess() : Promise~DeviceFieldAccess~
 +createDevice(data) : Promise~Device~
 +updateDevice(id, data) : Promise~Device~
+}
+class PlotApiClient {
++mergePreview(parcelCodes) : Promise~MergePreviewResult~
++merge(data) : Promise~MergePlotsResult~
 }
 class CoverageRequest {
 +plotCode
@@ -425,17 +424,84 @@ class CoveragePlan {
 OperationApiClient --> CoverageRequest : "接收"
 OperationApiClient --> CoveragePlan : "返回"
 IotApiClient --> DeviceFieldAccess : "返回"
+PlotApiClient --> MergePreviewResult : "返回"
 ```
 
 **图示来源**
 - [apps/web/src/api/index.ts:702-707](file://apps/web/src/api/index.ts#L702-L707)
 - [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
 - [apps/web/src/api/index.ts:372-374](file://apps/web/src/api/index.ts#L372-L374)
+- [apps/web/src/api/index.ts:115-127](file://apps/web/src/api/index.ts#L115-L127)
 
 **章节来源**
 - [apps/web/src/api/index.ts:702-707](file://apps/web/src/api/index.ts#L702-L707)
 - [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
 - [apps/web/src/api/index.ts:372-374](file://apps/web/src/api/index.ts#L372-L374)
+- [apps/web/src/api/index.ts:115-127](file://apps/web/src/api/index.ts#L115-L127)
+
+### 地块合并预览API
+- **合并预览接口**：/api/v1/plots/merge-preview POST
+  - 请求体：{ parcelCodes: string[] }，至少需要两个地块编码
+  - 响应：MergePreviewResult，包含源地块信息、面积计算、相邻性判定和连通分组
+  - 业务逻辑：预演合并但不实际执行，计算凸包面积、源面积合计、差额和连通分组
+- **预演结果字段**：
+  - sources：源地块数组，包含编码、名称和面积
+  - sourceAreaMu：源地块台账面积合计
+  - hullAreaMu：合并后凸包面积，与真实合并算法一致
+  - deltaMu：凸包比源面积和多出的亩数，即被圈进来的中间空地
+  - adjacent：所选地块是否连成一片
+  - groups：按相邻关系切出的连通分组
+  - toleranceM：容差距离（米）
+  - geom：预演边界，源地块顶点不足时为null
+
+```mermaid
+flowchart TD
+MergePreviewRequest["合并预览请求"] --> ValidateParcelCodes["验证地块编码数量"]
+ValidateParcelCodes --> CallService["调用service.previewMerge"]
+CallService --> CalculateGeometry["计算几何：相邻判定+凸包"]
+CalculateGeometry --> ComputeAreas["计算面积：源面积+凸包面积"]
+ComputeAreas --> DetermineAdjacency["判定相邻性"]
+DetermineAdjacency --> GroupConnected["分组连通区域"]
+GroupConnected --> ReturnPreview["返回预演结果"]
+```
+
+**图示来源**
+- [apps/plot-service/src/http.ts:616-625](file://apps/plot-service/src/http.ts#L616-L625)
+- [apps/plot-service/src/plot.service.ts:91-108](file://apps/plot-service/src/plot.service.ts#L91-L108)
+
+**章节来源**
+- [apps/plot-service/src/http.ts:616-625](file://apps/plot-service/src/http.ts#L616-L625)
+- [apps/plot-service/src/plot.service.ts:91-108](file://apps/plot-service/src/plot.service.ts#L91-L108)
+
+### 归档过滤系统
+- **归档过滤类型**：TaskArchiveFilter = 'NONE' | 'ONLY' | 'ALL'
+  - NONE：只查看册任务（默认行为）
+  - ONLY：只看已归档任务
+  - ALL：查看所有任务（在册和已归档）
+- **农事任务查询参数**：FarmTaskQuery.archived字段支持归档状态筛选
+- **服务端验证**：operation-service中验证归档过滤参数的合法性
+- **前端UI支持**：农事任务页面提供归档状态下拉选择框
+
+```mermaid
+flowchart TD
+TaskQuery["任务查询请求"] --> CheckArchived{"归档过滤参数"}
+CheckArchived --> |NONE| FilterActive["筛选在册任务"]
+CheckArchived --> |ONLY| FilterArchived["筛选已归档任务"]
+CheckArchived --> |ALL| FilterAll["筛选所有任务"]
+FilterActive --> Result["返回查询结果"]
+FilterArchived --> Result
+FilterAll --> Result
+```
+
+**图示来源**
+- [apps/operation-service/src/http.ts:77-78](file://apps/operation-service/src/http.ts#L77-L78)
+- [apps/operation-service/src/task.repository.ts:12](file://apps/operation-service/src/task.repository.ts#L12)
+- [apps/web/src/types/index.ts:317-318](file://apps/web/src/types/index.ts#L317-L318)
+
+**章节来源**
+- [apps/operation-service/src/http.ts:77-78](file://apps/operation-service/src/http.ts#L77-L78)
+- [apps/operation-service/src/task.repository.ts:12](file://apps/operation-service/src/task.repository.ts#L12)
+- [apps/web/src/types/index.ts:317-318](file://apps/web/src/types/index.ts#L317-L318)
 
 ### 地块合并与拆分API
 - **合并接口**：/api/v1/plots/merge POST，支持多个地块合并为单个地块
@@ -772,6 +838,20 @@ string defaultProtocol
 array profiles
 object defaults
 }
+MERGE_PREVIEW {
+array parcelCodes
+array sources
+number sourceAreaMu
+number hullAreaMu
+number deltaMu
+boolean adjacent
+array groups
+number toleranceM
+object geom
+}
+TASK_ARCHIVE_FILTER {
+string archived
+}
 ```
 
 **图示来源**
@@ -780,6 +860,7 @@ object defaults
 - [apps/iot-service/src/device.repository.ts:31-44](file://apps/iot-service/src/device.repository.ts#L31-L44)
 - [apps/web/src/api/index.ts:771-791](file://apps/web/src/api/index.ts#L771-L791)
 - [apps/web/src/types/index.ts:246-258](file://apps/web/src/types/index.ts#L246-L258)
+- [apps/web/src/types/index.ts:317-318](file://apps/web/src/types/index.ts#L317-L318)
 
 **章节来源**
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
@@ -797,7 +878,7 @@ object defaults
 - **TypeScript编译配置**：所有服务继承统一的tsconfig基座，确保编译一致性
 - **冒烟测试脚本**：依赖PostgreSQL数据库和服务间HTTP通信
 
-**更新** 新增了设备绑定模块的依赖关系，支持协议目录和绑定数据管理。
+**更新** 新增了合并预览服务和归档过滤系统的依赖关系。
 
 ```mermaid
 graph LR
@@ -809,8 +890,10 @@ IOT["IoT设备服务"] --> DEVICE_REPO["设备仓储"]
 IOT --> AUTHZ["权限验证"]
 IOT --> BINDING["设备绑定模块"]
 PLOT["地块服务"] --> CONTRACTS["公共契约包"]
+PLOT --> MERGE_PREVIEW["合并预览服务"]
 OPERATION["操作服务"] --> COVERAGE["覆盖规划算法"]
 OPERATION --> NAVIGATION["导航算法"]
+OPERATION --> ARCHIVE_FILTER["归档过滤系统"]
 CONTRACTS --> MESSAGES["消息模板"]
 TYPES --> CONTRACTS
 AUTHZ --> CONTRACTS
@@ -828,8 +911,10 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - [apps/iot-service/src/http.ts:1-8](file://apps/iot-service/src/http.ts#L1-L8)
 - [apps/iot-service/src/device-binding.ts:1-3](file://apps/iot-service/src/device-binding.ts#L1-L3)
 - [apps/plot-service/src/http.ts:4-7](file://apps/plot-service/src/http.ts#L4-L7)
+- [apps/plot-service/src/plot.service.ts:91-108](file://apps/plot-service/src/plot.service.ts#L91-L108)
 - [apps/operation-service/src/navigation.ts:1-3](file://apps/operation-service/src/navigation.ts#L1-L3)
 - [apps/operation-service/src/coverage.ts:1-3](file://apps/operation-service/src/coverage.ts#L1-L3)
+- [apps/operation-service/src/http.ts:77-78](file://apps/operation-service/src/http.ts#L77-L78)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
 - [packages/shared/src/authz.ts:1-3](file://packages/shared/src/authz.ts#L1-L3)
 - [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)
@@ -842,8 +927,10 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - [apps/iot-service/src/http.ts:1-8](file://apps/iot-service/src/http.ts#L1-L8)
 - [apps/iot-service/src/device-binding.ts:1-3](file://apps/iot-service/src/device-binding.ts#L1-L3)
 - [apps/plot-service/src/http.ts:4-7](file://apps/plot-service/src/http.ts#L4-L7)
+- [apps/plot-service/src/plot.service.ts:91-108](file://apps/plot-service/src/plot.service.ts#L91-L108)
 - [apps/operation-service/src/navigation.ts:1-3](file://apps/operation-service/src/navigation.ts#L1-L3)
 - [apps/operation-service/src/coverage.ts:1-3](file://apps/operation-service/src/coverage.ts#L1-L3)
+- [apps/operation-service/src/http.ts:77-78](file://apps/operation-service/src/http.ts#L77-L78)
 - [packages/contracts/src/index.ts:1-12](file://packages/contracts/src/index.ts#L1-L12)
 - [packages/shared/src/authz.ts:1-3](file://packages/shared/src/authz.ts#L1-L3)
 - [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)
@@ -860,12 +947,14 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - 设备查询优化：设备列表支持多维度筛选，减少前端过滤开销
 - 几何计算优化：管线长度自动计算，避免前端重复计算
 - **覆盖规划优化**：等距圆柱平面坐标转换，避免经纬度直接计算的精度损失；自动方向选择算法优化总里程；作业带间距自适应调整
+- **合并预览优化**：预演计算避免数据库写操作，仅进行几何计算和面积统计；前端缓存预演结果避免重复计算
+- **归档过滤优化**：服务端预过滤归档状态，减少前端数据量；支持增量加载已归档任务
 - **协议目录缓存**：现场接入目录可前端缓存，减少重复请求；协议配置变更时主动刷新
 - **绑定数据优化**：结构化绑定数据深拷贝避免引用污染；协议切换时批量处理绑定变更
 - **TypeScript编译优化**：skipLibCheck提升编译速度，isolatedModules支持并行编译
 - **测试优化**：冒烟测试使用独立端口和数据隔离，支持并发执行
 
-**更新** 新增了协议目录缓存和绑定数据优化的考虑。
+**更新** 新增了合并预览优化和归档过滤优化的考虑。
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -883,18 +972,23 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - **覆盖规划参数错误**：plotCode不能为空，boundary需为有效的Polygon几何，implementWidthM需在0~50米之间
 - **覆盖规划几何错误**：地块边界顶点不足3个，无法铺作业带；作业带间距不为正；按给定幅宽铺不出任何作业带
 - **覆盖规划算法错误**：作业带超过2000条上限；地块边界退化导致无法计算
+- **合并预览参数错误**：parcelCodes至少需要两个地块编码；地块编码必须存在
+- **合并预览几何错误**：源地块边界顶点不足，无法生成合并边界；地块不相邻且无法形成连通分组
+- **归档过滤参数错误**：archived参数必须是NONE/ONLY/ALL之一
 - **协议目录错误**：检查field-access接口是否正常返回；确认协议配置是否完整
 - **绑定数据错误**：检查ModbusBinding字段完整性；确认协议与绑定匹配关系
 - **TypeScript编译错误**：检查strictNullChecks和noUncheckedIndexedAccess相关的类型安全问题
 - **undefined字段错误**：使用assertDefined函数进行字段验证，避免运行时undefined访问
 - **冒烟测试失败**：检查数据库连接、服务端口配置和依赖服务可用性
 
-**更新** 新增了协议目录错误和绑定数据错误的故障排查指导。
+**更新** 新增了合并预览错误和归档过滤错误的故障排查指导。
 
 **章节来源**
 - [apps/web/src/utils/request.ts:37-86](file://apps/web/src/utils/request.ts#L37-L86)
 - [apps/gateway-service/src/http.ts:27-39](file://apps/gateway-service/src/http.ts#L27-L39)
 - [apps/plot-service/src/http.ts:100-103](file://apps/plot-service/src/http.ts#L100-L103)
+- [apps/plot-service/src/http.ts:616-625](file://apps/plot-service/src/http.ts#L616-L625)
+- [apps/operation-service/src/http.ts:77-78](file://apps/operation-service/src/http.ts#L77-L78)
 - [apps/iot-service/src/http.ts:72-76](file://apps/iot-service/src/http.ts#L72-L76)
 - [apps/operation-service/src/navigation.ts:400-447](file://apps/operation-service/src/navigation.ts#L400-L447)
 - [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
@@ -902,9 +996,9 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - [packages/tsconfig/base.json:4-21](file://packages/tsconfig/base.json#L4-L21)
 
 ## 结论
-本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、设备管理、片区管理、基础设施管线、导航规划、覆盖规划和消息模板等基本功能；**新增的现场协议目录API和设备绑定管理功能进一步增强了设备的灵活接入能力，支持动态协议配置和结构化连接信息管理**。后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
+本平台的API集成方案以Axios为中心，结合网关路由转发与统一响应信封，实现了清晰的请求封装、鉴权透传与错误处理。类型契约在前端与后端共享，保障类型安全。当前实现已覆盖认证、路由、分页、设备管理、片区管理、基础设施管线、导航规划、覆盖规划和消息模板等基本功能；**新增的合并预览API和归档过滤功能进一步增强了平台的业务能力，支持更精确的地块合并预演和任务归档状态管理**。后续可在此基础上扩展重试、缓存与性能优化策略，以满足更高并发与稳定性要求。
 
-**更新** 新增了现场协议目录API和设备绑定管理功能，进一步完善了智慧农业平台的设备接入能力。
+**更新** 新增了合并预览API和归档过滤功能，进一步完善了智慧农业平台的数据管理能力。
 
 [本节为总结性内容，不直接分析具体文件]
 
@@ -1006,6 +1100,19 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - [apps/operation-service/src/http.ts:134-141](file://apps/operation-service/src/http.ts#L134-L141)
 - [apps/operation-service/src/coverage.ts:266-356](file://apps/operation-service/src/coverage.ts#L266-L356)
 
+### 地块合并预览接口
+- **POST /api/v1/plots/merge-preview**
+  - 请求体：{ parcelCodes: string[] }
+  - 响应：MergePreviewResult
+  - 说明：预演地块合并，计算相邻判定、凸包面积和连通分组，不实际执行合并操作
+  - 关键字段：sources（源地块信息）、sourceAreaMu（源面积合计）、hullAreaMu（凸包面积）、deltaMu（面积差额）、adjacent（相邻性）、groups（连通分组）、toleranceM（容差）、geom（预演边界）
+
+**更新** 新增地块合并预览接口。
+
+**章节来源**
+- [apps/plot-service/src/http.ts:616-625](file://apps/plot-service/src/http.ts#L616-L625)
+- [apps/plot-service/src/plot.service.ts:91-108](file://apps/plot-service/src/plot.service.ts#L91-L108)
+
 ### 地块合并与拆分接口
 - **POST /api/v1/plots/merge**
   - 请求体：{ parcelCodes: string[], parcelName?: string, plotType?: string, remark?: string }
@@ -1100,12 +1207,27 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 **章节来源**
 - [apps/web/src/api/index.ts:428-482](file://apps/web/src/api/index.ts#L428-L482)
 
+### 农事任务归档过滤接口
+- **归档过滤类型**：TaskArchiveFilter = 'NONE' | 'ONLY' | 'ALL'
+  - NONE：只查看在册任务（默认）
+  - ONLY：只看已归档任务
+  - ALL：查看所有任务
+- **查询参数**：FarmTaskQuery.archived字段支持归档状态筛选
+- **服务端验证**：operation-service中验证归档过滤参数的合法性
+
+**更新** 新增农事任务归档过滤接口。
+
+**章节来源**
+- [apps/operation-service/src/http.ts:77-78](file://apps/operation-service/src/http.ts#L77-L78)
+- [apps/operation-service/src/task.repository.ts:12](file://apps/operation-service/src/task.repository.ts#L12)
+- [apps/web/src/types/index.ts:317-318](file://apps/web/src/types/index.ts#L317-L318)
+
 ### 通用类型
 - ApiResponse：code、message、data、traceId、timestamp
 - PageResult：items、total、page、size、pages
 - 领域模型：Plot、Device、FarmTask、UserInfo等
 
-**更新** 新增了ZoneSummary、InfraLine、NavPlan、CoveragePlan等相关类型。
+**更新** 新增了ZoneSummary、InfraLine、NavPlan、CoveragePlan、MergePreviewResult等相关类型。
 
 **章节来源**
 - [apps/web/src/types/index.ts:1-313](file://apps/web/src/types/index.ts#L1-L313)
@@ -1114,6 +1236,7 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - [apps/web/src/api/index.ts:110-118](file://apps/web/src/api/index.ts#L110-L118)
 - [apps/web/src/api/index.ts:428-482](file://apps/web/src/api/index.ts#L428-L482)
 - [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
+- [apps/web/src/api/index.ts:115-127](file://apps/web/src/api/index.ts#L115-L127)
 
 ### Geo几何类型
 - Coordinate：经纬度坐标对象
@@ -1169,6 +1292,27 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 - [apps/operation-service/src/coverage.ts:24-82](file://apps/operation-service/src/coverage.ts#L24-L82)
 - [apps/web/src/api/index.ts:748-791](file://apps/web/src/api/index.ts#L748-L791)
 
+### 合并预览类型
+- MergePreviewResult：合并预演结果，包含源地块信息、面积计算、相邻性判定和连通分组
+- MergePreviewSource：源地块信息，包含编码、名称和面积
+- MergePreviewInput：合并预演输入，包含地块编码数组
+
+**更新** 新增合并预览相关类型定义。
+
+**章节来源**
+- [apps/plot-service/src/plot.service.ts:91-108](file://apps/plot-service/src/plot.service.ts#L91-L108)
+- [apps/web/src/api/index.ts:115-127](file://apps/web/src/api/index.ts#L115-L127)
+
+### 归档过滤类型
+- TaskArchiveFilter：归档过滤类型，包含NONE、ONLY、ALL三种状态
+- FarmTaskQuery：农事任务查询参数，包含archived字段支持归档状态筛选
+
+**更新** 新增归档过滤相关类型定义。
+
+**章节来源**
+- [apps/operation-service/src/task.repository.ts:12](file://apps/operation-service/src/task.repository.ts#L12)
+- [apps/web/src/types/index.ts:317-318](file://apps/web/src/types/index.ts#L317-L318)
+
 ### TypeScript编译配置类型
 - BaseConfig：基础编译配置，包含target、lib、module等核心选项
 - StrictOptions：严格模式选项，包含strict、noUncheckedIndexedAccess等
@@ -1178,4 +1322,3 @@ TS_CONFIG["TypeScript配置"] --> ALL_SERVICES["所有服务"]
 
 **章节来源**
 - [packages/tsconfig/base.json:1-24](file://packages/tsconfig/base.json#L1-L24)
-</docs>
