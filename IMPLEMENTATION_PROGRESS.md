@@ -619,6 +619,11 @@
 - **验证（产物级）**：edge `http://localhost/healthz` 与 `https://localhost/healthz` 均 200；前端首页 200 且引用最新构建产物；app 容器内 `:8080/health` 返回 `gateway status: ok`；经 edge 访问 `/api/v1/plots` 返回 401 `GATEWAY-401`（鉴权链路生效）；postgres 中 `operation_task_change_logs` 表存在。
 - **说明**：两处类型错误是部署流程暴露的真实缺陷，属必要修复，已与本次改动一并提交。
 
+### 2026-11-13（续）：现场协议网关开关接入 compose 与演示库 QUEUED 收口核实
+
+- **现场网关开关接入 compose**：进度文档「现场网关的已知边界」里记着"部署编排里 `app` 容器目前没打开它——要不要在 compose 里给现场环境加这个开关，等真实设备到位再定"。本轮按自主推进补上：`infra/docker-compose.yml` 的 `app` 服务 `environment:` 增加 `FIELD_GATEWAY_ENABLED: ${FIELD_GATEWAY_ENABLED:-}`。服务端语义是 `apps/iot-service/src/main.ts` 里只控制现场协议网关是否启动（`gatewayEnabled ? new FieldGateway(...) : undefined`），不影响服务本身；开关留空时与接入前行为一致（默认关，不常驻轮询），现场设备到位、凭证就绪后再置 1 启用（`scripts/smoke-device-protocol.mjs` 冒烟现场网关时已显式设 1）。compose 改动经 `docker-compose config` 校验通过。
+- **演示库 QUEUED 收口核实**：点名处理「演示库 agri 的 22 行 QUEUED 待删行（控制服务会扫成 FAILED 并告警）」遗留。执行前先核对演示库现状：`control_commands` 当前 31 行，状态分布全部为 `FAILED`（含 036 收口过的演示指令与现场指令），**已无 QUEUED/SENT/ACKED**。该 22 行 QUEUED 遗留已在收口任务上线后被处理（已落到终态 FAILED），无待收口行，故不新写迁移、不动演示库数据。
+
 ## 下一步（中断后从这里继续）
 
 
