@@ -93,6 +93,7 @@ export function resolveRouteRule(method: string, pathname: string): RouteRule {
   if (matchesPrefix(path, "/api/v1/auth/users") || matchesPrefix(path, "/api/v1/auth/internal")) return { kind: "permission", code: "system:user" };
   if (matchesPrefix(path, "/api/v1/platform/roles")) return { kind: "permission", code: "system:role" };
   if (matchesPrefix(path, "/api/v1/platform/audit-logs")) return { kind: "permission", code: "system:audit" };
+  if (matchesPrefix(path, "/api/v1/platform/backups")) return { kind: "permission", code: "system:backup" };
   if (matchesPrefix(path, "/api/v1/platform/tenant") || matchesPrefix(path, "/api/v1/platform/permissions")) return { kind: "session" };
 
   // 管理员强制同步和风天气：同属于 weather 前缀但需更高权限，优先于 ROUTE_PERMISSIONS 判定

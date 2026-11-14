@@ -43,6 +43,9 @@ COPY scripts ./scripts
 COPY infra/postgres ./infra/postgres
 RUN pnpm install --prod --frozen-lockfile
 
+# 系统备份需要 pg_dump/pg_restore：容器内直接连接 postgres 做物理备份与恢复
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
+
 EXPOSE 8080
 # 迁移与 bucket 初始化都是幂等的，容器启动时先补齐基础设施再拉起服务
 CMD ["sh", "-c", "node scripts/migrate-postgres.mjs && node scripts/init-minio.mjs && node scripts/start-services.mjs"]

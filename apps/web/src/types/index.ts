@@ -494,6 +494,38 @@ export interface PlatformRole {
   updatedAt: string
 }
 
+// 系统备份（platform-service 备份接口，与 scripts/backup-system.mjs 的 manifest 对应）
+export interface BackupPart {
+  name: string
+  path: string
+  bytes: number
+  sha256: string
+  secrets?: boolean
+}
+
+export interface BackupRecord {
+  id: string
+  createdAt: string
+  root: string
+  host: string
+  tag: string
+  commit: string | null
+  branch: string | null
+  dirty: boolean | null
+  codeMode: string | null
+  includeSecrets: boolean
+  parts: BackupPart[]
+  database: { name: string; mode: string } | null
+}
+
+/** 备份/恢复脚本执行结果 */
+export interface BackupRunResult {
+  exitCode: number
+  stdout: string
+  stderr: string
+  command: string
+}
+
 // 权限目录分组
 export interface PermissionGroup {
   group: string

@@ -7,6 +7,7 @@ import { authorizeRequest } from "@agri/shared";
 
 import { InMemoryAuditRepository, InMemoryRoleRepository, seedRoles } from "./role.repository.js";
 import type { AuditRecord, AuditRepository, RoleRecord, RoleRepository } from "./role.repository.js";
+import { listBackups, readBackup, removeBackup, runBackup, runRestore } from "./backup.js";
 
 /**
  * 平台服务 HTTP 接口：租户信息、权限目录、角色管理与审计日志。
@@ -34,7 +35,7 @@ const PLATFORM_POLICY = {
   write: "system:role",
   publicPaths: ["/api/v1/internal/platform/role-permissions"],
   sessionPaths: ["/api/v1/platform/tenant", "/api/v1/platform/permissions"],
-  pathPermissions: [{ prefix: "/api/v1/platform/audit-logs", permission: "system:audit" }],
+  pathPermissions: [{ prefix: "/api/v1/platform/audit-logs", permission: "system:audit" }, { prefix: "/api/v1/platform/backups", permission: "system:backup" }],
 };
 
 /** 内部接口凭证：网关与管理脚本使用，不经公网暴露 */
@@ -152,6 +153,50 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
       const keyword = text(url.searchParams.get("keyword"));
       send(response, 200, await audits.page({ tenantId: tenantOf(request), ...(keyword ? { keyword } : {}), ...pageOf(url.searchParams) }), traceId);
       return;
+    }
+    // 系统备份：清单读取、触发备份/恢复脚本、详情与删除
+    if (request.method === "GET" && url.pathname === "/api/v1/platform/backups") {
+      send(response, 200, listBackups(), traceId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/v1/platform/backups/run") {
+      const body = await readJson(request);
+      const result = await runBackup({
+        dbOnly: body.dbOnly === true,
+        codeOnly: body.codeOnly === true,
+        includeSecrets: body.includeSecrets === true,
+        keep: typeof body.keep === "number" ? body.keep : undefined,
+      });
+      send(response, result.exitCode === 0 ? 200 : 500, result, traceId, result.exitCode === 0 ? "备份已执行" : "备份执行失败");
+      return;
+    }
+    const backupRestore = url.pathname.match(/^\/api\/v1\/platform\/backups\/([^/]+)\/restore$/);
+    if (backupRestore && request.method === "POST") {
+      const id = decodeURIComponent(backupRestore[1] ?? "");
+      const body = await readJson(request);
+      const result = await runRestore({
+        from: id,
+        only: body.only === "code" || body.only === "db" ? (body.only as "code" | "db") : undefined,
+        target: typeof body.target === "string" ? body.target : undefined,
+        db: typeof body.db === "string" ? body.db : undefined,
+      });
+      send(response, result.exitCode === 0 ? 200 : 500, result, traceId, result.exitCode === 0 ? "恢复已执行" : "恢复执行失败");
+      return;
+    }
+    const backupDetail = url.pathname.match(/^\/api\/v1\/platform\/backups\/([^/]+)$/);
+    if (backupDetail) {
+      const id = decodeURIComponent(backupDetail[1] ?? "");
+      if (request.method === "GET") {
+        const manifest = readBackup(id);
+        if (!manifest) { send(response, 404, null, traceId, "备份不存在"); return; }
+        send(response, 200, manifest, traceId);
+        return;
+      }
+      if (request.method === "DELETE") {
+        if (!removeBackup(id)) { send(response, 404, null, traceId, "备份不存在"); return; }
+        send(response, 200, null, traceId);
+        return;
+      }
     }
     send(response, 404, null, traceId, "接口不存在");
   } catch (error) { send(response, 400, null, traceId, error instanceof Error ? error.message : "请求处理失败"); } });

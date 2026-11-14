@@ -439,6 +439,8 @@ pnpm restore:system -- --from 20261114-120000 --only db --db agri_restore_test
 
 数据库恢复同样优先用本机 `pg_restore`，其次 `docker compose exec postgres pg_restore`。备份与恢复脚本为运维脚本，不参与 `tsc -b`。
 
+界面入口：登录后在首页左侧「系统管理 → 系统备份」打开备份管理页，可查看备份清单、触发备份、查看详情、删除与恢复；接口由 platform-service 的 `/api/v1/platform/backups` 提供，需 `system:backup` 权限。
+
 ## 八、注意事项
 
 - **装饰器元数据**：生产编译（`@agri/tsconfig/nest.json`）已开启 `experimentalDecorators` 与

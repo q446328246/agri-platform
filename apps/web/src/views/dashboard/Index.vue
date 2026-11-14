@@ -217,6 +217,7 @@ const panelComps: Record<string, Component> = {
   '/message': markRaw(defineAsyncComponent(() => import('@/views/message/Index.vue'))),
   '/system/user': markRaw(defineAsyncComponent(() => import('@/views/system/User.vue'))),
   '/system/role': markRaw(defineAsyncComponent(() => import('@/views/system/Role.vue'))),
+  '/system/backup': markRaw(defineAsyncComponent(() => import('@/views/system/Backup.vue'))),
   // 无路由前缀 = 只活在这张图里的面板，查询管线并回到地图操作
   'infra-lines': markRaw(defineAsyncComponent(() => import('@/components/InfraLinePanel.vue'))),
 }
@@ -290,6 +291,7 @@ const menuGroups: MenuGroup[] = [
     items: [
       { label: '用户管理', panel: '/system/user', perm: 'system:user' },
       { label: '角色管理', panel: '/system/role', perm: 'system:role' },
+      { label: '系统备份', panel: '/system/backup', perm: 'system:backup' },
     ],
   },
 ]

@@ -128,24 +128,35 @@ async function gitInfo() {
   };
 }
 
-async function backupCode(parts, dir) {
+async function backupCode(parts, dir, timestamp) {
   const info = await gitInfo();
-  if (!info) {
-    warn("代码备份跳过：当前目录不在 Git 仓库内");
-    return { ok: false, reason: "not-a-git-repo" };
+  if (info) {
+    const short = info.commit.slice(0, 12);
+    const file = path.join(dir, "code-" + short + ".tar.gz");
+    const prefix = "agri-platform-" + short + "/";
+    const result = await run("git", ["archive", "--format=tar.gz", "--prefix=" + prefix, "-o", file, "HEAD"]);
+    if (!result.ok) {
+      warn("代码备份失败：" + (result.stderr.trim() || (result.error && result.error.message) || "git archive 执行失败"));
+      return { ok: false, reason: "git-archive" };
+    }
+    const relative = path.basename(file);
+    parts.push({ name: relative, path: relative, bytes: fs.statSync(file).size, sha256: sha256File(file) });
+    log("代码备份完成：" + relative + "（提交 " + short + "，git archive）");
+    return { ok: true, info, mode: "git" };
   }
-  const short = info.commit.slice(0, 12);
-  const file = path.join(dir, "code-" + short + ".tar.gz");
-  const prefix = "agri-platform-" + short + "/";
-  const result = await run("git", ["archive", "--format=tar.gz", "--prefix=" + prefix, "-o", file, "HEAD"]);
+  // 容器内没有 Git：回退工作区打包，排除依赖与临时目录，避免把 node_modules 打进包
+  warn("未检测到 Git，代码备份改用工作区打包（不含 node_modules/.git/.tmp/backups/restore）");
+  const file = path.join(dir, "code-workspace-" + timestamp + ".tar.gz");
+  const excludes = ["node_modules", ".git", ".tmp", "backups", "restore"];
+  const result = await run("tar", ["-czf", file, "-C", root, ...excludes.flatMap((item) => ["--exclude", item]), "."]);
   if (!result.ok) {
-    warn("代码备份失败：" + (result.stderr.trim() || (result.error && result.error.message) || "git archive 执行失败"));
-    return { ok: false, reason: "git-archive" };
+    warn("代码备份失败：" + (result.stderr.trim() || "tar 执行失败"));
+    return { ok: false, reason: "tar-workspace" };
   }
   const relative = path.basename(file);
   parts.push({ name: relative, path: relative, bytes: fs.statSync(file).size, sha256: sha256File(file) });
-  log("代码备份完成：" + relative + "（提交 " + short + "）");
-  return { ok: true, info };
+  log("代码备份完成：" + relative + "（工作区打包）");
+  return { ok: true, info: { commit: null, branch: "", dirty: false }, mode: "tar" };
 }
 
 async function backupConfig(parts, dir, timestamp) {
@@ -293,7 +304,7 @@ async function main() {
   fs.mkdirSync(dir, { recursive: true });
   log("开始系统备份，产物目录：" + dir);
   const parts = [];
-  const code = dbOnly ? { ok: false, reason: "skipped" } : await backupCode(parts, dir);
+  const code = dbOnly ? { ok: false, reason: "skipped" } : await backupCode(parts, dir, timestamp);
   const config = dbOnly || codeOnly ? { ok: false, reason: "skipped" } : await backupConfig(parts, dir, timestamp);
   const database = codeOnly ? { ok: false, reason: "skipped" } : await backupDatabase(parts, dir, timestamp);
 
@@ -309,6 +320,7 @@ async function main() {
     dirty: git ? git.dirty : null,
     includeSecrets,
     parts,
+    codeMode: code && code.ok ? (code.mode ?? "git") : null,
     database: database && database.ok ? { name: database.database.database, mode: database.mode } : null,
   };
   fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");

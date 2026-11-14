@@ -184,6 +184,12 @@ const routes: RouteRecordRaw[] = [
             name: 'SystemRole',
             component: () => import('@/views/system/Role.vue'),
             meta: { title: '角色管理', permission: 'system:role' }
+          },
+          {
+            path: 'backup',
+            name: 'SystemBackup',
+            component: () => import('@/views/system/Backup.vue'),
+            meta: { title: '系统备份', permission: 'system:backup' }
           }
         ]
       }

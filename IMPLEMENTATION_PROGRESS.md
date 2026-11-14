@@ -643,6 +643,7 @@
 - **接入**：`package.json` 增加 `pnpm backup:system` / `pnpm restore:system`；`.env.example` 增加 `BACKUP_DIR` / `BACKUP_KEEP`；README 新增「七、备份与恢复」，原「七、注意事项」顺延为「八」；`infra/README.md` 补充容器化部署下的执行口径。
 - **脚本不参与 `tsc -b`**：`scripts/*.mjs` 为纯运维脚本，未纳入根 `tsconfig.json` 工程引用。
 - **未跑验证**：按长期口径，本轮未跑单测 / `tsc -b` / 构建 / 冒烟 / 浏览器实操；脚本为新增，建议后续在真实环境用 `pnpm backup:system -- --db-only` 做一次实跑核验。
+- **前端界面（本轮新增）**：platform-service 新增备份接口（清单 / 触发 / 详情 / 删除 / 恢复），网关与服务侧按 `system:backup` 权限拦截；前端新增「系统备份」页面与导航入口，可在界面触发备份、查看清单与恢复。容器内代码备份在无 Git 时回退工作区打包，数据库备份由镜像内置 `postgresql-client` 提供 `pg_dump/pg_restore`，备份目录经 compose 挂载到宿主机 `backups/`。
 
 ## 下一步（中断后从这里继续）
 

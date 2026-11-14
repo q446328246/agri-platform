@@ -12,6 +12,7 @@ import type {
   TelemetryHistoryPoint, TelemetryAlert,
   MessagePreference, MessageLevel,
   SystemUser, PlatformRole, PermissionGroup,
+  BackupRecord, BackupRunResult,
 } from '@/types'
 
 /** 剥掉查询参数里的 undefined/null/空串，避免发 ?keyword=&type= 这种无意义空条件 */
@@ -415,6 +416,26 @@ export const platformApi = {
   /** 权限目录：角色弹窗按分组渲染勾选项 */
   getPermissions(): Promise<PermissionGroup[]> {
     return get<PermissionGroup[]>('/platform/permissions')
+  },
+  /** 备份清单：按创建时间倒序 */
+  getBackups(): Promise<BackupRecord[]> {
+    return get<BackupRecord[]>('/platform/backups')
+  },
+  /** 备份详情（manifest） */
+  getBackup(id: string): Promise<BackupRecord> {
+    return get<BackupRecord>(`/platform/backups/${encodeURIComponent(id)}`)
+  },
+  /** 触发系统备份（代码 + 数据库 + 配置） */
+  runBackup(data?: { dbOnly?: boolean; codeOnly?: boolean; includeSecrets?: boolean; keep?: number }): Promise<BackupRunResult> {
+    return post<BackupRunResult>('/platform/backups/run', data ?? {})
+  },
+  /** 删除一份备份 */
+  deleteBackup(id: string): Promise<void> {
+    return del<void>(`/platform/backups/${encodeURIComponent(id)}`)
+  },
+  /** 从备份恢复：代码解压或数据库 pg_restore */
+  restoreBackup(id: string, data?: { only?: 'code' | 'db'; target?: string; db?: string }): Promise<BackupRunResult> {
+    return post<BackupRunResult>(`/platform/backups/${encodeURIComponent(id)}/restore`, data ?? {})
   }
 }
 

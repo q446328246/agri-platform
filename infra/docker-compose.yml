@@ -84,6 +84,8 @@ services:
       WEATHER_REPOSITORY_MODE: ${WEATHER_REPOSITORY_MODE:-sql}
     volumes:
       - ../ed25519-private.pem:/run/secrets/qweather-private.pem:ro
+      # 备份产物落到宿主机仓库根的 backups/，容器重建不丢
+      - ../backups:/app/backups
     depends_on:
       postgres:
         condition: service_healthy
