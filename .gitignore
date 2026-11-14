@@ -10,3 +10,7 @@ zhao-guang-farm-master/
 *.pem
 coverage/
 .tmp/
+# 备份产物：由 scripts/backup-system.mjs 写入，不入库
+backups/
+# PowerShell 模块分析缓存：pwsh 运行可能把它误落在工作目录
+Microsoft/Windows/PowerShell/ModuleAnalysisCache

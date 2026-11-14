@@ -165,7 +165,7 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
         dbOnly: body.dbOnly === true,
         codeOnly: body.codeOnly === true,
         includeSecrets: body.includeSecrets === true,
-        keep: typeof body.keep === "number" ? body.keep : undefined,
+        ...(typeof body.keep === "number" ? { keep: body.keep } : {}),
       });
       send(response, result.exitCode === 0 ? 200 : 500, result, traceId, result.exitCode === 0 ? "备份已执行" : "备份执行失败");
       return;
@@ -176,9 +176,9 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
       const body = await readJson(request);
       const result = await runRestore({
         from: id,
-        only: body.only === "code" || body.only === "db" ? (body.only as "code" | "db") : undefined,
-        target: typeof body.target === "string" ? body.target : undefined,
-        db: typeof body.db === "string" ? body.db : undefined,
+        ...(body.only === "code" || body.only === "db" ? { only: body.only as "code" | "db" } : {}),
+        ...(typeof body.target === "string" ? { target: body.target } : {}),
+        ...(typeof body.db === "string" ? { db: body.db } : {}),
       });
       send(response, result.exitCode === 0 ? 200 : 500, result, traceId, result.exitCode === 0 ? "恢复已执行" : "恢复执行失败");
       return;

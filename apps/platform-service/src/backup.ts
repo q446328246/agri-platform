@@ -12,7 +12,12 @@ import { fileURLToPath } from "node:url";
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(here, "../..");
+/**
+ * 仓库根：源码位于 <repo>/apps/platform-service/src，运行产物位于
+ * <repo>/apps/platform-service/dist（容器内即 /app/apps/platform-service/dist），
+ * 两者都要上溯三级才落在仓库根，脚本与默认备份目录都相对仓库根。
+ */
+const repoRoot = path.resolve(here, "../../..");
 
 export function backupDir(): string {
   return process.env.BACKUP_DIR ? path.resolve(process.env.BACKUP_DIR) : path.join(repoRoot, "backups");
