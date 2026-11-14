@@ -624,6 +624,12 @@
 - **现场网关开关接入 compose**：进度文档「现场网关的已知边界」里记着"部署编排里 `app` 容器目前没打开它——要不要在 compose 里给现场环境加这个开关，等真实设备到位再定"。本轮按自主推进补上：`infra/docker-compose.yml` 的 `app` 服务 `environment:` 增加 `FIELD_GATEWAY_ENABLED: ${FIELD_GATEWAY_ENABLED:-}`。服务端语义是 `apps/iot-service/src/main.ts` 里只控制现场协议网关是否启动（`gatewayEnabled ? new FieldGateway(...) : undefined`），不影响服务本身；开关留空时与接入前行为一致（默认关，不常驻轮询），现场设备到位、凭证就绪后再置 1 启用（`scripts/smoke-device-protocol.mjs` 冒烟现场网关时已显式设 1）。compose 改动经 `docker-compose config` 校验通过。
 - **演示库 QUEUED 收口核实**：点名处理「演示库 agri 的 22 行 QUEUED 待删行（控制服务会扫成 FAILED 并告警）」遗留。执行前先核对演示库现状：`control_commands` 当前 31 行，状态分布全部为 `FAILED`（含 036 收口过的演示指令与现场指令），**已无 QUEUED/SENT/ACKED**。该 22 行 QUEUED 遗留已在收口任务上线后被处理（已落到终态 FAILED），无待收口行，故不新写迁移、不动演示库数据。
 
+### 2026-11-13（续）：交付验收推进（备份/恢复演练 + 双人复核记录）
+
+- **备份/恢复演练（用户点名 D-1）**：对演示库 `agri` 做 `pg_dump -Fc` 备份 → `docker cp` 取出 → `pg_restore` 恢复到新建测试库 `agri_restore_test` → 基线比对 → 清理。结果：备份文件 218965 字节；备份前基线 `control_commands=28`、`plot_records=27`、`plot_change_logs=16`、`event_log.max(seq)=116`，恢复后**逐项一致**，测试库与备份文件已删除，回滚链路可用。演练中修正两处操作口径：备份须在容器内写文件再 `docker cp`（宿主路径在容器内无效），位点列用 `event_log.seq`（该表无 `id` 列）。
+- **双人复核记录（用户点名 D-3）**：新增 `DUAL_REVIEW_RECORD.md`，登记本轮六项关键改动（迁移 039、凹形合并入口、处方包络、类型修复、compose 网关开关、文档同步）的复核对象与复核要点。第一复核人（本会话）已逐项自查并填结论；**第二复核人确认栏留空待填**，不代填、不臆造第二人结论。
+- **未跑验证**：按长期口径，本节为交付验收流程推进，未跑单测 / `tsc -b` / 构建 / 冒烟 / 浏览器实操；备份/恢复为真实执行，双人复核需第二人确认。
+
 ## 下一步（中断后从这里继续）
 
 
