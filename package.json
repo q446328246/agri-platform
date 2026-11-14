@@ -38,7 +38,9 @@
     "smoke:demo": "node scripts/smoke-demo-data.mjs",
     "smoke:filters": "node scripts/smoke-filters.mjs",
     "smoke:weather": "node scripts/smoke-weather.mjs",
-    "seed:test-plots": "pnpm run build && node scripts/seed-test-plots.mjs"
+    "seed:test-plots": "pnpm run build && node scripts/seed-test-plots.mjs",
+    "backup:system": "node scripts/backup-system.mjs",
+    "restore:system": "node scripts/restore-system.mjs"
   },
   "devDependencies": {
     "@nestjs/common": "^11.2.8",

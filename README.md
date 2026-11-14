@@ -409,7 +409,37 @@ agri-platform-nodejs-scaffold/
   再在生产者侧用 `OutboxService.enqueue` 入队、消费者侧用 `@registerHandler` 声明处理方法。
 - **新增表与仓储**：在服务内定义模式，仓储方法首参显式传入事务对象，避免事务边界静默扩大。
 
-## 七、注意事项
+## 七、备份与恢复
+
+系统备份覆盖**代码 + 数据库 + 配置**，产物落在 `BACKUP_DIR`（默认 `backups/`）下的 `<时间戳>` 目录，附 `manifest.json` 清单（提交号、各分片大小与 sha256），并按 `BACKUP_KEEP` 保留最近若干份。
+
+```powershell
+# 全量备份（代码 + 数据库 + 配置）
+pnpm backup:system
+# 只备份数据库 / 只备份代码
+pnpm backup:system -- --db-only
+pnpm backup:system -- --code-only
+# 附带 .env 与私钥等敏感配置（默认不备份）
+pnpm backup:system -- --include-secrets
+# 列出已有备份 / 控制保留份数
+pnpm backup:system -- --list
+pnpm backup:system -- --keep 5
+```
+
+代码备份基于当前 Git 提交（`git archive`），**未提交的改动不在代码包内**；数据库备份优先用本机 `pg_dump`，本机没有时回退到 `docker compose exec postgres pg_dump`。
+
+```powershell
+# 查看可用备份
+pnpm restore:system -- --list
+# 恢复代码到指定目录
+pnpm restore:system -- --from 20261114-120000 --only code --target ./restore
+# 恢复数据库（默认恢复到 DB_URL 指向的库，可用 --db 指定目标库）
+pnpm restore:system -- --from 20261114-120000 --only db --db agri_restore_test
+```
+
+数据库恢复同样优先用本机 `pg_restore`，其次 `docker compose exec postgres pg_restore`。备份与恢复脚本为运维脚本，不参与 `tsc -b`。
+
+## 八、注意事项
 
 - **装饰器元数据**：生产编译（`@agri/tsconfig/nest.json`）已开启 `experimentalDecorators` 与
   `emitDecoratorMetadata`；测试期由 esbuild 转译，仅开启前者。因此测试中构造的提供者应显式声明

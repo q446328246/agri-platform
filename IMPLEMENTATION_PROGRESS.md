@@ -630,6 +630,20 @@
 - **双人复核记录（用户点名 D-3）**：新增 `DUAL_REVIEW_RECORD.md`，登记本轮六项关键改动（迁移 039、凹形合并入口、处方包络、类型修复、compose 网关开关、文档同步）的复核对象与复核要点。第一复核人（本会话）已逐项自查并填结论；**第二复核人确认栏留空待填**，不代填、不臆造第二人结论。
 - **未跑验证**：按长期口径，本节为交付验收流程推进，未跑单测 / `tsc -b` / 构建 / 冒烟 / 浏览器实操；备份/恢复为真实执行，双人复核需第二人确认。
 
+### 2026-11-14：系统备份与恢复功能
+
+- **能力**：新增系统级备份/恢复脚本，覆盖**代码 + 数据库 + 配置**，附清单与保留策略，把此前手工 `pg_dump` 的交付演练流程固化为可复用能力。
+- **备份 `scripts/backup-system.mjs`**：
+  - 代码：`git archive` 导出当前提交为 `code-<short>.tar.gz`，并记录提交号/分支/脏工作区标记。**未提交改动不在代码包内**，属刻意口径。
+  - 数据库：`pg_dump -Fc`，优先用本机 `pg_dump`，本机没有时回退 `docker compose -f infra/docker-compose.yml exec -T postgres pg_dump`（app 镜像内无 pg 客户端，数据库在 postgres 容器内）。
+  - 配置：默认打包 `.env.example` 等；`--include-secrets` 才附带 `.env` 与 `ed25519-private.pem`。
+  - 产物落 `BACKUP_DIR`（默认 `backups/`）下 `<时间戳>` 目录，附 `manifest.json`（提交号、分片、大小、sha256、库名与模式）；按 `BACKUP_KEEP`（默认 10）清理旧份。
+  - 支持 `--db-only` / `--code-only` / `--list` / `--keep` / `--dir` / `--tag`。
+- **恢复 `scripts/restore-system.mjs`**：`--list` 列备份；`--from <id>` 从清单定位备份；`--only code` 解压代码到 `--target`，`--only db` 用 `pg_restore`（本机优先，否则容器）恢复到 `--db` 指定库。
+- **接入**：`package.json` 增加 `pnpm backup:system` / `pnpm restore:system`；`.env.example` 增加 `BACKUP_DIR` / `BACKUP_KEEP`；README 新增「七、备份与恢复」，原「七、注意事项」顺延为「八」；`infra/README.md` 补充容器化部署下的执行口径。
+- **脚本不参与 `tsc -b`**：`scripts/*.mjs` 为纯运维脚本，未纳入根 `tsconfig.json` 工程引用。
+- **未跑验证**：按长期口径，本轮未跑单测 / `tsc -b` / 构建 / 冒烟 / 浏览器实操；脚本为新增，建议后续在真实环境用 `pnpm backup:system -- --db-only` 做一次实跑核验。
+
 ## 下一步（中断后从这里继续）
 
 

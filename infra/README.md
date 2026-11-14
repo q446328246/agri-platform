@@ -73,3 +73,18 @@ docker compose -f infra/docker-compose.yml logs -f app
 - 每个迁移文件按编号**只执行一次**（`schema_migrations` 记账）。如果事后往一个已应用过的迁移文件里追加段落，已存在的库不会自动补跑，需要手工执行同段 SQL；或删掉 `schema_migrations` 里对应行、清理该文件的 `demo` 前缀数据后重跑。全新数据库则会直接拿到完整文件。
 - 构建依赖 Docker Hub 与 npm 源：若 `docker pull` 报 `registry-1.docker.io ... EOF`（表现为域名解析到 `198.18.x` 后 TLS 失败），按上面第 0 步用镜像源拉取并重打 tag，无需修改 Dockerfile。
 - 本机已实测通过（2026-11-06）：两镜像构建成功、`app`/`edge` healthy、登录与 22 个业务接口 200、`POST /api/v1/plots` 201 并落库、`docker compose restart app` 后旧 token 与数据仍有效；同日条件查询改造后再次重建镜像，`pnpm smoke:demo`（37 项）与 `pnpm smoke:filters`（38 项）全部通过；气象服务升级后重建镜像（含 `012_weather_forecast.sql`），`pnpm smoke:weather`（13 项）通过。
+
+## 备份与恢复
+
+容器化部署下，备份脚本在**宿主机**仓库根目录执行（app 镜像内没有 `pg_dump`/`pg_restore`，数据库在 `postgres` 容器内）。
+
+```powershell
+# 全量备份（代码 + 数据库 + 配置）；数据库经 docker compose exec postgres pg_dump 导出
+pnpm backup:system
+# 查看已有备份
+pnpm backup:system -- --list
+# 恢复数据库到测试库
+pnpm restore:system -- --from <备份目录名> --only db --db agri_restore_test
+```
+
+代码备份为当前 Git 提交归档，数据库备份自动优先本机 `pg_dump`、否则回退容器；详见仓库根 README「七、备份与恢复」。
