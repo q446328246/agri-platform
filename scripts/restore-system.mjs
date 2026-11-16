@@ -133,17 +133,38 @@ async function restoreDatabase(manifest, backupPath) {
   const targetDatabase = targetDb || database.database;
 
   if (await commandAvailable("pg_restore")) {
-    const result = await run(
+    // pg_restore 的 -f 是“输出文件名”，不是输入；dump 必须从 stdin 读入，
+    // 否则 -d 与 -f 同时使用会直接报错“options -d/--dbname and -f/--file cannot be used together”。
+    const child = spawn(
       "pg_restore",
-      ["-h", database.host, "-p", database.port, "-U", database.user, "-d", targetDatabase, "-f", dumpFile],
-      { env: { ...process.env, PGPASSWORD: database.password || "" } },
+      ["-h", database.host, "-p", database.port, "-U", database.user, "-d", targetDatabase],
+      {
+        cwd: root,
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, PGPASSWORD: database.password || "" },
+      },
     );
-    if (!result.ok) {
-      fail("数据库恢复失败（pg_restore）：" + (result.stderr.trim() || "未知错误"));
-      return false;
-    }
-    log("数据库已恢复到：" + targetDatabase + "（pg_restore）");
-    return true;
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    const input = fs.createReadStream(dumpFile);
+    input.on("error", () => child.kill());
+    input.pipe(child.stdin);
+    return new Promise((resolve) => {
+      child.on("error", (error) => {
+        fail("数据库恢复失败（pg_restore）：" + error.message);
+        resolve(false);
+      });
+      child.on("close", (code) => {
+        if (code === 0) {
+          log("数据库已恢复到：" + targetDatabase + "（pg_restore）");
+          resolve(true);
+        } else {
+          fail("数据库恢复失败（pg_restore）：" + (stderr.trim() || "未知错误"));
+          resolve(false);
+        }
+      });
+    });
   }
 
   if (await commandAvailable("docker") && fs.existsSync(path.join(root, "infra/docker-compose.yml"))) {
