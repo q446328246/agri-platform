@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
 
-import { InMemoryAlertRepository, SqlAlertRepository } from "../src/alert.repository.js";
+import { InMemoryAlertRepository, SqlAlertRepository, isExpired } from "../src/alert.repository.js";
 import type { WeatherAlert } from "../src/alert.repository.js";
 import { demoAlerts, demoForecastDays, demoForecastHours } from "../src/demo.js";
 import { farmDateOffset, farmToday } from "../src/farm-time.js";
@@ -128,7 +128,8 @@ describe("天气服务 HTTP 接口", () => {
     await withServer(async (base) => {
       const active = await get(base, "/api/v1/weather/alerts");
       expect(active.status).toBe(200);
-      expect(active.body.data.total).toBe(3);
+      // 演示种子里 demo-3（高温黄色）已过失效时间但未解除，生效列表按失效时间过滤，只计 2 条
+      expect(active.body.data.total).toBe(2);
       expect(active.body.data.items.every((item: { active: boolean }) => item.active)).toBe(true);
 
       const critical = await get(base, "/api/v1/weather/alerts?level=CRITICAL");
@@ -148,6 +149,32 @@ describe("天气服务 HTTP 接口", () => {
       const badType = await get(base, "/api/v1/weather/alerts?alertType=TSUNAMI");
       expect(badType.status).toBe(400);
     });
+  });
+
+  it("灾害预警按失效时间过滤：已过期但未解除的预警不进入生效列表", async () => {
+    await withServer(async (base) => {
+      // demoAlerts 中 demo-3（高温黄色）expiresAt 已过但 active 仍为 true，demo-4 已解除
+      const active = await get(base, "/api/v1/weather/alerts");
+      const codes = active.body.data.items.map((item: { alertCode: string }) => item.alertCode);
+      expect(codes).toContain("WX-RAINSTORM-DEMO-1");
+      expect(codes).toContain("WX-WIND-DEMO-2");
+      expect(codes).not.toContain("WX-HOT-DEMO-3");
+      expect(codes).not.toContain("WX-THUNDER-DEMO-4");
+
+      // active=false 时仍能看到已过期但未解除的预警，便于回溯
+      const all = await get(base, "/api/v1/weather/alerts?active=false");
+      const allCodes = all.body.data.items.map((item: { alertCode: string }) => item.alertCode);
+      expect(allCodes).toContain("WX-HOT-DEMO-3");
+    });
+  });
+
+  it("isExpired 按失效时间判定，空失效期视为长期有效", () => {
+    const base = { id: "a", alertCode: "A", alertType: "FOG", level: "INFO", color: "蓝", title: "t", description: "d", city: "达州市", plotCode: "", issuedAt: "2026-11-14T00:00:00.000Z", active: true } as WeatherAlert;
+    const now = new Date("2026-11-14T00:00:00.000Z");
+    expect(isExpired({ ...base }, now)).toBe(false);
+    expect(isExpired({ ...base, expiresAt: "2026-11-14T01:00:00.000Z" }, now)).toBe(false);
+    expect(isExpired({ ...base, expiresAt: "2026-11-14T00:00:00.000Z" }, now)).toBe(true);
+    expect(isExpired({ ...base, expiresAt: "2026-11-13T23:00:00.000Z" }, now)).toBe(true);
   });
 
   it("气象历史曲线转发遥测读数，指标白名单外返回 400", async () => {

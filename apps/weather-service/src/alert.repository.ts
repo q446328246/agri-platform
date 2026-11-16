@@ -41,6 +41,16 @@ export interface AlertQuery {
   activeOnly?: boolean | undefined;
 }
 
+/**
+ * 预警是否已过失效时间。expiresAt 为空视为长期有效（不设失效期）。
+ * SQL 与内存两套仓储共用，保证「生效中」口径一致：active 且未过期才算生效。
+ */
+export function isExpired(alert: WeatherAlert, now: Date = new Date()): boolean {
+  if (!alert.expiresAt) return false;
+  const expiry = Date.parse(alert.expiresAt);
+  return Number.isFinite(expiry) && expiry <= now.getTime();
+}
+
 function toAlert(row: Record<string, unknown>): WeatherAlert {
   const alert: WeatherAlert = {
     id: String(row.id),
@@ -73,7 +83,7 @@ export class SqlAlertRepository {
     if (query.level) { values.push(query.level); conditions.push(`level = $${values.length}`); }
     if (query.alertType) { values.push(query.alertType); conditions.push(`alert_type = $${values.length}`); }
     if (query.plotCode) { values.push(query.plotCode); conditions.push(`plot_code = $${values.length}`); }
-    if (query.activeOnly) conditions.push(`active = TRUE`);
+    if (query.activeOnly) conditions.push(`active = TRUE AND (expires_at IS NULL OR expires_at > now())`);
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     values.push(200);
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
@@ -130,7 +140,7 @@ export class InMemoryAlertRepository {
       .filter((row) => (query.level ? row.level === query.level : true))
       .filter((row) => (query.alertType ? row.alertType === query.alertType : true))
       .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
-      .filter((row) => (query.activeOnly ? row.active : true))
+      .filter((row) => (query.activeOnly ? row.active && !isExpired(row) : true))
       .sort((a, b) => b.issuedAt.localeCompare(a.issuedAt))
       .slice(0, 200)
       .map((row) => structuredClone(row));

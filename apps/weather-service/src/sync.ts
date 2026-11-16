@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { ForecastRepository } from "./forecast.repository.js";
-import type { WeatherAlert } from "./alert.repository.js";
+import { isExpired, type WeatherAlert } from "./alert.repository.js";
 import {
   createEd25519JwtSigner,
   createQWeatherClient,
@@ -208,10 +208,11 @@ export function createWeatherSyncer(config: WeatherSyncerConfig): WeatherSyncer 
         incomingCodes.add(alert.alertCode);
         await config.alerts.create(undefined, alert);
       }
-      // 和风已撤销但本地仍 active 的预警自动解除
-      const active = await config.alerts.list({ activeOnly: true });
+      // 和风已撤销或已过失效时间的本地预警自动解除：
+      // 取全部 active（含已过期项），逐个解除「不在本次发布」或「已过期」的 QW- 预警
+      const active = (await config.alerts.list({})).filter((row) => row.active);
       for (const row of active) {
-        if (row.alertCode.startsWith("QW-") && !incomingCodes.has(row.alertCode)) {
+        if (row.alertCode.startsWith("QW-") && (!incomingCodes.has(row.alertCode) || isExpired(row))) {
           await config.alerts.deactivate(row.alertCode);
         }
       }
