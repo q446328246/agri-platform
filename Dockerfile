@@ -43,8 +43,17 @@ COPY scripts ./scripts
 COPY infra/postgres ./infra/postgres
 RUN pnpm install --prod --frozen-lockfile
 
-# 系统备份需要 pg_dump/pg_restore：容器内直接连接 postgres 做物理备份与恢复
-RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
+# 系统备份需要 pg_dump/pg_restore：容器内直接连接 postgres 做物理备份与恢复。
+# 客户端版本必须与 postgres 容器一致：postgis/postgis:16-3.5 是 PostgreSQL 16，
+# 而 Debian bookworm 默认源只提供 PG15，PG15 客户端 dump PG16 会因 server version mismatch
+# 直接 abort，导致备份里没有数据库分片。因此从 PGDG 官方源安装 PostgreSQL 16 客户端。
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client-16 \
+ && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8080
 # 迁移与 bucket 初始化都是幂等的，容器启动时先补齐基础设施再拉起服务
