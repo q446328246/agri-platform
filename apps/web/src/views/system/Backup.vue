@@ -149,7 +149,8 @@ async function runBackup(): Promise<void> {
   if (runForm.scope === 'code') payload.codeOnly = true
   running.value = true
   try {
-    const result = await platformApi.runBackup(payload)
+    // 备份执行耗时较长（代码打包 + pg_dump），单独放宽超时，避免被全局 15s 提前中断
+    const result = await platformApi.runBackup(payload, { timeout: 300000 })
     if (result.exitCode === 0) {
       ElMessage.success('备份完成')
       if (result.stderr.trim()) ElMessage.warning(result.stderr.trim())
@@ -191,7 +192,8 @@ async function doRestore(): Promise<void> {
   if (restoreForm.only === 'db' && restoreForm.db) payload.db = restoreForm.db
   running.value = true
   try {
-    const result = await platformApi.restoreBackup(restoreTarget.value.id, payload)
+    // 恢复同样是长耗时操作，单独放宽超时
+    const result = await platformApi.restoreBackup(restoreTarget.value.id, payload, { timeout: 300000 })
     if (result.exitCode === 0) {
       ElMessage.success('恢复完成')
     } else {

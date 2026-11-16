@@ -1,3 +1,4 @@
+import type { AxiosRequestConfig } from 'axios'
 import { get, post, put, del } from '@/utils/request'
 import type {
   Plot, PlotQuery, PlotForm, PlotType, InfraLineType,
@@ -425,17 +426,17 @@ export const platformApi = {
   getBackup(id: string): Promise<BackupRecord> {
     return get<BackupRecord>(`/platform/backups/${encodeURIComponent(id)}`)
   },
-  /** 触发系统备份（代码 + 数据库 + 配置） */
-  runBackup(data?: { dbOnly?: boolean; codeOnly?: boolean; includeSecrets?: boolean; keep?: number }): Promise<BackupRunResult> {
-    return post<BackupRunResult>('/platform/backups/run', data ?? {})
+  /** 触发系统备份（代码 + 数据库 + 配置）；长耗时操作，允许调用方单独放宽超时 */
+  runBackup(data?: { dbOnly?: boolean; codeOnly?: boolean; includeSecrets?: boolean; keep?: number }, config?: AxiosRequestConfig): Promise<BackupRunResult> {
+    return post<BackupRunResult>('/platform/backups/run', data ?? {}, config)
   },
   /** 删除一份备份 */
   deleteBackup(id: string): Promise<void> {
     return del<void>(`/platform/backups/${encodeURIComponent(id)}`)
   },
-  /** 从备份恢复：代码解压或数据库 pg_restore */
-  restoreBackup(id: string, data?: { only?: 'code' | 'db'; target?: string; db?: string }): Promise<BackupRunResult> {
-    return post<BackupRunResult>(`/platform/backups/${encodeURIComponent(id)}/restore`, data ?? {})
+  /** 从备份恢复：代码解压或数据库 pg_restore；长耗时操作，允许调用方单独放宽超时 */
+  restoreBackup(id: string, data?: { only?: 'code' | 'db'; target?: string; db?: string }, config?: AxiosRequestConfig): Promise<BackupRunResult> {
+    return post<BackupRunResult>(`/platform/backups/${encodeURIComponent(id)}/restore`, data ?? {}, config)
   }
 }
 
