@@ -135,9 +135,11 @@ async function restoreDatabase(manifest, backupPath) {
   if (await commandAvailable("pg_restore")) {
     // pg_restore 的 -f 是“输出文件名”，不是输入；dump 必须从 stdin 读入，
     // 否则 -d 与 -f 同时使用会直接报错“options -d/--dbname and -f/--file cannot be used together”。
+    // 加 --clean --if-exists 实现“覆盖目标库”：先删除目标库中已存在的对象再重建，
+    // 避免恢复到已有数据的库时因关系已存在而失败（否则退出码非 0，接口返回 500）。
     const child = spawn(
       "pg_restore",
-      ["-h", database.host, "-p", database.port, "-U", database.user, "-d", targetDatabase],
+      ["-h", database.host, "-p", database.port, "-U", database.user, "-d", targetDatabase, "--clean", "--if-exists"],
       {
         cwd: root,
         windowsHide: true,
@@ -170,7 +172,7 @@ async function restoreDatabase(manifest, backupPath) {
   if (await commandAvailable("docker") && fs.existsSync(path.join(root, "infra/docker-compose.yml"))) {
     const child = spawn(
       "docker",
-      ["compose", "-f", "infra/docker-compose.yml", "exec", "-T", "postgres", "pg_restore", "-d", targetDatabase],
+      ["compose", "-f", "infra/docker-compose.yml", "exec", "-T", "postgres", "pg_restore", "-d", targetDatabase, "--clean", "--if-exists"],
       {
         cwd: root,
         windowsHide: true,
