@@ -1,5 +1,5 @@
 import type { AxiosRequestConfig } from 'axios'
-import { get, post, put, del } from '@/utils/request'
+import { get, post, put, del, request } from '@/utils/request'
 import type {
   Plot, PlotQuery, PlotForm, PlotType, InfraLineType,
   CropSeason, CropSeasonStatus,
@@ -437,6 +437,14 @@ export const platformApi = {
   /** 从备份恢复：代码解压或数据库 pg_restore；长耗时操作，允许调用方单独放宽超时 */
   restoreBackup(id: string, data?: { only?: 'code' | 'db'; target?: string; db?: string }, config?: AxiosRequestConfig): Promise<BackupRunResult> {
     return post<BackupRunResult>(`/platform/backups/${encodeURIComponent(id)}/restore`, data ?? {}, config)
+  },
+  /** 整包下载备份（tar.gz）：以 Blob 返回，由调用方保存为文件 */
+  downloadBackup(id: string, config?: AxiosRequestConfig): Promise<Blob> {
+    return request<Blob>({ method: 'GET', url: `/platform/backups/${encodeURIComponent(id)}/download`, responseType: 'blob', ...config })
+  },
+  /** 下载备份中的单个分片：以 Blob 返回，由调用方保存为文件 */
+  downloadBackupPart(id: string, partName: string, config?: AxiosRequestConfig): Promise<Blob> {
+    return request<Blob>({ method: 'GET', url: `/platform/backups/${encodeURIComponent(id)}/download/${encodeURIComponent(partName)}`, responseType: 'blob', ...config })
   }
 }
 

@@ -3,23 +3,39 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Server } from "node:http";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { createPlatformHttpServer } from "../src/http.js";
-import { backupDir, backupScript, listBackups, readBackup, removeBackup, restoreScript, runBackup, runRestore } from "../src/backup.js";
+import { backupDir, backupScript, listBackups, readBackup, readBackupPart, removeBackup, restoreScript, runBackup, runRestore } from "../src/backup.js";
 
 // 源码位于 <repo>/apps/platform-service/test，上溯三级即仓库根
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
+
+// 整包下载依赖系统 tar：本机不可用时，整包测试走“明确错误”分支
+let tarAvailable = false;
+try {
+  execFileSync("tar", ["--version"], { stdio: "ignore" });
+  tarAvailable = true;
+} catch {
+  tarAvailable = false;
+}
 
 const servers: Server[] = [];
 let backupRoot: string;
 let argsOut: string;
 let saved: Record<string, string | undefined> = {};
 
-function writeManifest(id: string): void {
+interface FakePart { name: string; content?: string; bytes?: number; sha256?: string }
+
+function writeManifest(id: string, parts?: FakePart[]): void {
   const dir = path.join(backupRoot, id);
   fs.mkdirSync(dir, { recursive: true });
+  const partList = parts ?? [{ name: "code", path: "code.tgz", bytes: 1, sha256: "deadbeef" }];
+  for (const part of partList) {
+    if (part.content !== undefined) fs.writeFileSync(path.join(dir, part.name), part.content, "utf8");
+  }
   fs.writeFileSync(
     path.join(dir, "manifest.json"),
     JSON.stringify({
@@ -32,7 +48,12 @@ function writeManifest(id: string): void {
       branch: "main",
       dirty: false,
       includeSecrets: false,
-      parts: [{ name: "code", path: "code.tgz", bytes: 1, sha256: "deadbeef" }],
+      parts: partList.map((part) => ({
+        name: part.name,
+        path: part.name,
+        bytes: part.bytes ?? (part.content !== undefined ? Buffer.byteLength(part.content) : 1),
+        sha256: part.sha256 ?? "deadbeef",
+      })),
       database: { name: "agri", mode: "custom" },
     }, null, 2),
   );
@@ -132,6 +153,25 @@ describe("系统备份模块", () => {
     expect(removeBackup("backup-a")).toBe(false);
     expect(removeBackup("../secret")).toBe(false);
   });
+
+  it("读取分片：只放行 manifest 内、位于备份目录内的真实文件", () => {
+    writeManifest("backup-a", [
+      { name: "code.tgz", content: "hello-code" },
+      { name: "db.dump", content: "dump" },
+    ]);
+    const code = readBackupPart("backup-a", "code.tgz");
+    expect(code?.part.name).toBe("code.tgz");
+    expect(fs.readFileSync(code!.filePath, "utf8")).toBe("hello-code");
+
+    // 分片缺失、不在 manifest、路径穿越与非法 id 一律拒绝
+    expect(readBackupPart("backup-a", "missing.tgz")).toBeNull();
+    expect(readBackupPart("backup-a", "manifest.json")).toBeNull();
+    expect(readBackupPart("backup-a", "../backup-b/code.tgz")).toBeNull();
+    expect(readBackupPart("backup-a", "..")).toBeNull();
+    expect(readBackupPart("missing", "code.tgz")).toBeNull();
+    expect(readBackupPart("../secret", "code.tgz")).toBeNull();
+    expect(readBackupPart("a/b", "code.tgz")).toBeNull();
+  });
 });
 
 describe("备份/恢复脚本参数组装", () => {
@@ -192,5 +232,62 @@ describe("备份 HTTP 接口", () => {
     // 编码后的路径穿越不能命中任何目录
     const illegal = await fetch(`${base}/api/v1/platform/backups/${encodeURIComponent("../secret")}`, { method: "DELETE", headers });
     expect(illegal.status).toBe(404);
+  });
+});
+
+describe("备份下载接口", () => {
+  it("分片下载返回文件流并带附件文件名，缺失或穿越分片返回 404", async () => {
+    writeManifest("backup-a", [{ name: "code.tgz", content: "hello-code" }]);
+    process.env.AUTH_GUARD_MODE = "enforce";
+    const base = await start(createPlatformHttpServer());
+    const headers = { "x-user-id": "u1", "x-permissions": "system:backup" };
+
+    const ok = await fetch(`${base}/api/v1/platform/backups/backup-a/download/code.tgz`, { headers });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-disposition")).toContain("code.tgz");
+    expect(ok.headers.get("content-length")).toBe(String(Buffer.byteLength("hello-code")));
+    expect(await ok.text()).toBe("hello-code");
+
+    const missing = await fetch(`${base}/api/v1/platform/backups/backup-a/download/nope.tgz`, { headers });
+    expect(missing.status).toBe(404);
+
+    const illegal = await fetch(`${base}/api/v1/platform/backups/backup-a/download/${encodeURIComponent("../secret")}`, { headers });
+    expect(illegal.status).toBe(404);
+  });
+
+  it("下载接口按 system:backup 权限放行与拒绝", async () => {
+    writeManifest("backup-a", [{ name: "code.tgz", content: "x" }]);
+    process.env.AUTH_GUARD_MODE = "enforce";
+    const base = await start(createPlatformHttpServer());
+
+    const anonymous = await fetch(`${base}/api/v1/platform/backups/backup-a/download/code.tgz`);
+    expect(anonymous.status).toBe(401);
+
+    const noPermission = await fetch(`${base}/api/v1/platform/backups/backup-a/download/code.tgz`, { headers: { "x-user-id": "u1", "x-permissions": "system:role" } });
+    expect(noPermission.status).toBe(403);
+
+    const ok = await fetch(`${base}/api/v1/platform/backups/backup-a/download/code.tgz`, { headers: { "x-user-id": "u1", "x-permissions": "system:backup" } });
+    expect(ok.status).toBe(200);
+  });
+
+  it("整包下载：tar 可用时返回 gzip 流，不可用时返回明确错误", async () => {
+    writeManifest("backup-a", [{ name: "code.tgz", content: "hello" }]);
+    process.env.AUTH_GUARD_MODE = "enforce";
+    const base = await start(createPlatformHttpServer());
+    const headers = { "x-user-id": "u1", "x-permissions": "system:backup" };
+
+    const res = await fetch(`${base}/api/v1/platform/backups/backup-a/download`, { headers });
+    if (tarAvailable) {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-disposition")).toContain("backup-backup-a.tar.gz");
+      const buffer = Buffer.from(await res.arrayBuffer());
+      expect(buffer.subarray(0, 2)).toEqual(Buffer.from([0x1f, 0x8b]));
+    } else {
+      expect(res.status).toBe(400);
+      expect((await res.json() as { message: string }).message).toContain("tar");
+    }
+
+    const missing = await fetch(`${base}/api/v1/platform/backups/nope/download`, { headers });
+    expect(missing.status).toBe(404);
   });
 });

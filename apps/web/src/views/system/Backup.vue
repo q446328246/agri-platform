@@ -51,9 +51,10 @@
         <el-table-column label="数据库" width="130">
           <template #default="{ row }">{{ row.database ? row.database.name : '-' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="210" fixed="right">
+        <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="showDetail(row)">详情</el-button>
+            <el-button link type="primary" @click="downloadBackup(row)">下载</el-button>
             <el-button link type="warning" @click="openRestore(row)">恢复</el-button>
             <el-button link type="danger" @click="remove(row)">删除</el-button>
           </template>
@@ -76,11 +77,16 @@
         <el-descriptions-item label="含敏感配置">{{ detail.includeSecrets ? '是' : '否' }}</el-descriptions-item>
       </el-descriptions>
       <el-table :data="detail ? detail.parts : []" border size="small" style="margin-top: 12px">
-        <el-table-column prop="name" label="分片" min-width="220" />
-        <el-table-column label="大小" width="110">
+        <el-table-column prop="name" label="分片" min-width="200" />
+        <el-table-column label="大小" width="100">
           <template #default="{ row }">{{ formatBytes(row.bytes) }}</template>
         </el-table-column>
-        <el-table-column prop="sha256" label="SHA-256" min-width="240" show-overflow-tooltip />
+        <el-table-column prop="sha256" label="SHA-256" min-width="220" show-overflow-tooltip />
+        <el-table-column label="操作" width="80">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="downloadPart(row)">下载</el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </el-dialog>
 
@@ -114,7 +120,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { platformApi } from '@/api'
 import { formatDateTime } from '@/utils'
-import type { BackupRecord } from '@/types'
+import type { BackupPart, BackupRecord } from '@/types'
 
 const loading = ref(false)
 const running = ref(false)
@@ -205,6 +211,41 @@ async function doRestore(): Promise<void> {
   } finally {
     running.value = false
   }
+}
+
+/** 整包下载：拉取 tar.gz 并以浏览器下载保存 */
+async function downloadBackup(row: BackupRecord): Promise<void> {
+  try {
+    const blob = await platformApi.downloadBackup(row.id)
+    saveBlob(blob, `backup-${row.id}.tar.gz`)
+    ElMessage.success('已开始下载备份整包')
+  } catch {
+    // 请求拦截器已提示错误
+  }
+}
+
+/** 分片下载：只拉取该分片文件并保存 */
+async function downloadPart(row: BackupPart): Promise<void> {
+  if (!detail.value) return
+  try {
+    const blob = await platformApi.downloadBackupPart(detail.value.id, row.name)
+    saveBlob(blob, row.name)
+    ElMessage.success('已开始下载分片')
+  } catch {
+    // 请求拦截器已提示错误
+  }
+}
+
+/** 触发浏览器下载：文件名由调用方决定，不依赖响应头，跨网关也稳定 */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
 }
 
 function formatBytes(bytes: number): string {

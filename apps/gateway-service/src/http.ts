@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { Readable } from "node:stream";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { serializePermissions } from "@agri/contracts";
 
 import type { GatewayAuthorizer } from "./authz.js";
@@ -93,8 +95,18 @@ export function createGatewayHttpServer(options: GatewayOptions = {}): Server {
       const init: RequestInit = { method, headers };
       if (method !== "GET" && method !== "HEAD") init.body = await body(request);
       const upstream = await fetch(`${route.target}${url.pathname}${url.search}`, init);
-      response.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") || "application/json" });
-      response.end(Buffer.from(await upstream.arrayBuffer()));
+      const outHeaders: Record<string, string> = {
+        "content-type": upstream.headers.get("content-type") || "application/json",
+      };
+      // 透传下载相关响应头，保留上游给出的文件名与安全/缓存语义
+      for (const name of ["content-disposition", "content-length", "cache-control", "x-content-type-options"]) {
+        const value = upstream.headers.get(name);
+        if (value) outHeaders[name] = value;
+      }
+      response.writeHead(upstream.status, outHeaders);
+      // 流式转发上游响应，避免大文件（如备份包）在网关内存中整包缓冲
+      if (!upstream.body) { response.end(); return; }
+      Readable.fromWeb(upstream.body as unknown as WebReadableStream).on("error", () => response.destroy()).pipe(response);
     } catch (error) {
       reply(response, 502, "GATEWAY-502", error instanceof Error ? error.message : "下游服务不可用");
     }

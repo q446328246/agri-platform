@@ -29,6 +29,10 @@ service.interceptors.request.use(
 // 响应拦截器
 service.interceptors.response.use(
   (response: AxiosResponse<ApiResponse>) => {
+    // 文件下载（responseType: 'blob'）直接返回原始数据，不走 JSON 响应解析
+    if (response.config.responseType === 'blob') {
+      return response.data as any
+    }
     const res = response.data
     // 兼容不同的API响应格式
     if (res.code !== 0 && res.code !== '0' && res.code !== 'OK' && res.success !== true) {

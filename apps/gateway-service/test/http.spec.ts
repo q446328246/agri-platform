@@ -32,6 +32,25 @@ describe("gateway HTTP API", () => {
     expect(result).toMatchObject({ path: "/api/v1/test/commands?x=1", method: "POST", userId: "user-admin", body: JSON.stringify({ ok: true }) });
   });
 
+  it("透传上游响应头并流式返回文件内容", async () => {
+    const content = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x01, 0x02]);
+    const upstream = await start(createServer((_request, response) => {
+      response.writeHead(200, {
+        "content-type": "application/gzip",
+        "content-length": String(content.length),
+        "content-disposition": 'attachment; filename="backup.tar.gz"',
+        "x-content-type-options": "nosniff",
+      });
+      response.end(content);
+    }));
+    const gateway = await start(createGatewayHttpServer({ routes: [{ prefix: "/api/v1/test", target: upstream }] }));
+    const response = await fetch(`${gateway}/api/v1/test/files/download`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-disposition")).toBe('attachment; filename="backup.tar.gz"');
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(content);
+  });
+
   it("最长前缀路由优先，避免具体路径被父路径吞掉", async () => {
     const parentUpstream = await start(createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });

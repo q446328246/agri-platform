@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -7,7 +8,7 @@ import { authorizeRequest } from "@agri/shared";
 
 import { InMemoryAuditRepository, InMemoryRoleRepository, seedRoles } from "./role.repository.js";
 import type { AuditRecord, AuditRepository, RoleRecord, RoleRepository } from "./role.repository.js";
-import { listBackups, readBackup, removeBackup, runBackup, runRestore } from "./backup.js";
+import { backupArchive, listBackups, readBackup, readBackupPart, removeBackup, runBackup, runRestore } from "./backup.js";
 
 /**
  * 平台服务 HTTP 接口：租户信息、权限目录、角色管理与审计日志。
@@ -181,6 +182,46 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
         ...(typeof body.db === "string" ? { db: body.db } : {}),
       });
       send(response, result.exitCode === 0 ? 200 : 500, result, traceId, result.exitCode === 0 ? "恢复已执行" : "恢复执行失败");
+      return;
+    }
+    // 备份下载：整包 tar.gz 或单个分片，均以文件流返回
+    const backupDownload = url.pathname.match(/^\/api\/v1\/platform\/backups\/([^/]+)\/download$/);
+    if (backupDownload && request.method === "GET") {
+      const id = decodeURIComponent(backupDownload[1] ?? "");
+      const archive = await backupArchive(id);
+      if (!archive.ok) { send(response, archive.reason === "备份不存在" ? 404 : 400, null, traceId, archive.reason ?? "备份不存在"); return; }
+      const child = archive.child!;
+      const out = child.stdout;
+      const err = child.stderr;
+      if (!out || !err) { send(response, 500, null, traceId, "整包打包失败"); return; }
+      err.on("data", () => { /* tar 告警不写入响应体，避免污染下载流 */ });
+      child.on("error", () => { if (!response.headersSent) send(response, 500, null, traceId, "整包打包失败"); else response.destroy(); });
+      child.on("close", (code) => { if (code !== 0) response.destroy(); });
+      response.writeHead(200, {
+        "content-type": "application/gzip",
+        "content-disposition": `attachment; filename="${archive.filename}"; filename*=UTF-8''${encodeURIComponent(archive.filename!)}`,
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, no-store",
+      });
+      out.pipe(response);
+      return;
+    }
+    const backupDownloadPart = url.pathname.match(/^\/api\/v1\/platform\/backups\/([^/]+)\/download\/([^/]+)$/);
+    if (backupDownloadPart && request.method === "GET") {
+      const id = decodeURIComponent(backupDownloadPart[1] ?? "");
+      const partName = decodeURIComponent(backupDownloadPart[2] ?? "");
+      const partFile = readBackupPart(id, partName);
+      if (!partFile) { send(response, 404, null, traceId, "备份分片不存在"); return; }
+      const stat = fs.statSync(partFile.filePath);
+      const encoded = encodeURIComponent(partFile.part.name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+      response.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": String(stat.size),
+        "content-disposition": `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`,
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, no-store",
+      });
+      fs.createReadStream(partFile.filePath).pipe(response);
       return;
     }
     const backupDetail = url.pathname.match(/^\/api\/v1\/platform\/backups\/([^/]+)$/);
