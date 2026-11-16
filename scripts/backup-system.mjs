@@ -325,7 +325,11 @@ async function main() {
   };
   fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
 
-  const failed = [code, config, database].filter((item) => !item.ok && item.reason !== "skipped");
+  // 配置缺失（容器镜像只携带源码与脚本，不包含 .env.example 等配置文件）属预期跳过，
+  // 不算失败项，否则脚本会返回非零退出码，前端据此误报“备份失败”。
+  const failed = [code, config, database].filter(
+    (item) => !item.ok && item.reason !== "skipped" && item.reason !== "no-config",
+  );
   prune(backupDir, keep);
   log("备份清单：" + path.join(dir, "manifest.json"));
   if (failed.length > 0) {
