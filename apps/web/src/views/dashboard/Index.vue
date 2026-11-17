@@ -180,6 +180,7 @@ import { iotApi, messageApi, plotApi, weatherApi, zoneApi } from '@/api'
 import type { InfraLine, InfraLineType, ZoneSummary } from '@/api'
 import type { MapShapeActive, MapShapeKind, MapShapeSaved, Plot } from '@/types'
 import { getPlotTypeText } from '@/utils'
+import { gcj02ToWgs84, wgs84ToGcj02 } from '@/utils/gcj02'
 import { parsePlotBoundaries, polygonAreaMu, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 import { LINE_PANEL_BRIDGE, catColor, categorize, lineCategories, lineColorOf, lineTypeLabel } from '@/utils/infraLine'
 import type { LineCat, LinePanelBridge } from '@/utils/infraLine'
@@ -204,13 +205,15 @@ const baseLayerOptions: Array<{ key: LayerKey; label: string }> = [
   { key: 'zones', label: '片区范围' },
 ]
 
-// ---------- 底图切换：天地图影像 / Esri 高清影像 / 天地图矢量 ----------
+// ---------- 底图切换：天地图影像 / Esri 高清影像 / 高德影像 / 天地图矢量 ----------
 // 天地图影像在乡村区域分辨率有限，Esri World Imagery 通常更清晰且同为 WGS84 无偏移；
+// 高德影像与手机地图同源（路网/注记密、更新快），但用 GCJ-02 加密坐标，须经显示层投影转换；
 // 高清影像上叠加天地图中文注记（cia），地名可读性不丢。选择存 localStorage，刷新后保持。
-type BaseMapKey = 'tdt-img' | 'esri-img' | 'tdt-vec'
+type BaseMapKey = 'tdt-img' | 'esri-img' | 'amap-img' | 'tdt-vec'
 const baseMapOptions: Array<{ key: BaseMapKey; label: string; hint: string }> = [
   { key: 'tdt-img', label: '天地图影像', hint: '天地图卫星影像 + 中文注记' },
   { key: 'esri-img', label: '高清影像', hint: 'Esri World Imagery 卫星影像（乡村区域通常更清晰）+ 天地图中文注记' },
+  { key: 'amap-img', label: '高德影像', hint: '高德卫星影像 + 路网注记（手机地图同源，GCJ-02 已转换，地块边界不偏移）' },
   { key: 'tdt-vec', label: '矢量地图', hint: '天地图矢量底图 + 中文注记' },
 ]
 const BASEMAP_STORAGE_KEY = 'agri-basemap'
@@ -449,11 +452,39 @@ function createEsriTiles() {
   return L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20, maxNativeZoom: 18 })
 }
 
+/** 高德瓦片：style=6 卫星影像，style=8 透明路网+注记（叠在影像上就是手机地图的观感） */
+function createAmapTiles(style: '6' | '8') {
+  const host = style === '6' ? 'webst0{s}' : 'wprd0{s}'
+  const extra = style === '8' ? '&lang=zh_cn&size=1&scl=1' : ''
+  return L.tileLayer(`https://${host}.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&style=${style}${extra}`, { subdomains: ['1', '2', '3', '4'], maxZoom: 20, maxNativeZoom: 18 })
+}
+
+/** GCJ-02 显示投影：业务坐标（WGS84）先正算到 GCJ-02 再做墨卡托投影，屏幕点位逆算回 WGS84。
+ *  高德瓦片与地块边界自此同一坐标系；入库坐标与面积计算不受影响，仍是 WGS84。 */
+function createGcjCrs() {
+  const mercator = L.Projection.SphericalMercator
+  const projection = {
+    bounds: mercator.bounds,
+    project(latlng: any) {
+      const [lng, lat] = wgs84ToGcj02(latlng.lng, latlng.lat)
+      return mercator.project(L.latLng(lat, lng))
+    },
+    unproject(point: any) {
+      const ll = mercator.unproject(point)
+      const [lng, lat] = gcj02ToWgs84(ll.lng, ll.lat)
+      return L.latLng(lat, lng)
+    },
+  }
+  return L.extend({}, L.CRS.EPSG3857, { projection })
+}
+
 function initMap() {
-  map = L.map('tianditu-map', { center: [30.982425, 107.421325], zoom: 15, maxZoom: 20, zoomControl: true, attributionControl: false })
+  const gcj = baseMapKey.value === 'amap-img'
+  map = L.map('tianditu-map', { center: [30.982425, 107.421325], zoom: 15, maxZoom: 20, zoomControl: true, attributionControl: false, crs: gcj ? createGcjCrs() : L.CRS.EPSG3857 })
   baseLayers = {
     'tdt-img': L.layerGroup([createTiles('img'), createTiles('cia')]),
     'esri-img': L.layerGroup([createEsriTiles(), createTiles('cia')]),
+    'amap-img': L.layerGroup([createAmapTiles('6'), createAmapTiles('8')]),
     'tdt-vec': L.layerGroup([createTiles('vec'), createTiles('cva')]),
   }
   baseLayers[baseMapKey.value].addTo(map)
@@ -475,15 +506,30 @@ function toggleLayer(key: LayerKey) {
   if (key === 'zones' && zoneLayer) visibleLayers.zones ? zoneLayer.addTo(map) : map.removeLayer(zoneLayer)
 }
 
-/** 底图热切换：只换底图组，业务图层与当前视野不动；选择持久化供刷新后恢复 */
+/** 底图热切换：同坐标系只换底图组，业务图层与当前视野不动；选择持久化供刷新后恢复。
+ *  高德（GCJ-02）与天地图/Esri（WGS84）投影不同而 Leaflet CRS 不能热改，跨系切换时
+ *  重建地图并按原视野重绘业务图层；先取消绘制草稿，避免草稿层留在已销毁的旧地图上。 */
 function switchBaseMap(key: BaseMapKey) {
-  if (key === baseMapKey.value) return
-  if (map && baseLayers) {
-    map.removeLayer(baseLayers[baseMapKey.value])
-    baseLayers[key].addTo(map)
-  }
+  const prev = baseMapKey.value
+  if (key === prev) return
   baseMapKey.value = key
   localStorage.setItem(BASEMAP_STORAGE_KEY, key)
+  if (!map || !baseLayers) return
+  if ((prev === 'amap-img') === (key === 'amap-img')) {
+    map.removeLayer(baseLayers[prev])
+    baseLayers[key].addTo(map)
+    return
+  }
+  const center = map.getCenter()
+  const zoom = map.getZoom()
+  shapeEditor.value?.cancel()
+  map.remove()
+  map = null
+  initMap()
+  map.setView(center, zoom)
+  void loadPlots(false).then(() => loadDevices())
+  void loadZones()
+  void loadLines()
 }
 
 function toggleLine(cat: LineCat) {
