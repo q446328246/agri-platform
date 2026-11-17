@@ -707,7 +707,7 @@
 - **精确缩放条**：`BaseMapSwitch.vue` 第二行滑杆 + 步进 + 级别徽标（超原生级琥珀警示）+ **框选放大**（拖矩形自定义放大区域，期间捕获 click 抑制绘制态误加顶点、禁用拖拽/双击缩放，退出恢复）；需父组件传 `:map` 响应式句柄（五处地图新增 `mapHandle` shallowRef，init/destroy 同步）。
 - **驾驶舱统一**：一张图底部居中切换条改用共享 `BaseMapSwitch`（暗色 :deep 覆盖保留驾驶舱观感），同样获得谷歌/自定义/缩放条/框选能力；`baseMapLabelOf` 统一状态条文案。
 - **测试同步**：zone 回归 spec 桩补 `baseMapMaxZoom`/`createBaseLayer`/google-img 组与 map mock 的 `setMaxZoom/getZoom/getCenter`；BaseMapSwitch 桩 props 增 `map`。
-- **交付口径**：按长期约定未跑单测/构建/冒烟、未重建镜像（语言服务器未就绪，静态核验无残留旧标识）；需重建 `app`/`edge` 镜像后浏览器验收，待用户点名。
+- **交付与部署**：按长期口径功能提交后未跑单测/构建即推送；随后用户点名「构建部署」，`docker compose --profile app up -d --build` 重建 app/edge 双目标镜像（278.5s，前端 vite 步骤随新源码重跑 26.5s），postgres/minio/app Healthy、edge Up；`.runtime/verify-edge-basemap.mjs` 判别标记换本批新增物后只读核验 5 项 PASS（递归扫 39 个 chunk 含 `basemap-switch__slider`/`agri-basemap-custom`/谷歌瓦片 URL，网关 401 为未带 token 预期）。浏览器可见：五处地图谷歌影像 20–22 级真实细节、自定义源对话框与精确缩放条/框选放大。
 
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
@@ -1115,3 +1115,4 @@
 | 2026-11-17 | `node .runtime/verify-044.mjs` | **18 项全 PASS**：13 块无软删、面积 ≤3.85 亩、管线 ≤500.58m、类型/状态四样齐备、片区归属完整、八张业务表引用零悬空、11 台设备绑定保留 |
 | 2026-11-17 | `node scripts/smoke-demo-data.mjs` + `node scripts/seed-test-plots.mjs` | 冒烟 **37 项通过**（33 PASS + 4 WARN：演示账号 11-12 页面改密/启用所致，与重置无关）；维护脚本幂等复跑「清理 0 块、3 块样例田就地更新、13 块重置数据完好」 |
 | 2026-11-17 | `docker compose --profile app up -d --build` + `node .runtime/verify-edge-basemap.mjs` | 双目标镜像重建 135.7s、app Healthy；线上 bundle 只读核验 **5 项 PASS**（扫 40 个 chunk 含新切换条/片区包装容器标记，网关可达） |
+| 2026-11-17 | `docker compose --profile app up -d --build` + `node .runtime/verify-edge-basemap.mjs`（续五部署，判别标记换本批新增物） | 双目标镜像重建 278.5s（vite 26.5s 重跑）、四容器 Healthy/Up；线上 bundle 只读核验 **5 项 PASS**（扫 39 个 chunk 含 `basemap-switch__slider`/`agri-basemap-custom`/谷歌瓦片 URL，网关 401 预期） |
