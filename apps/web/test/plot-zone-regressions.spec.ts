@@ -145,6 +145,7 @@ function leafletMock() {
       const map = {
         getContainer: () => element,
         invalidateSize: vi.fn(), fitBounds: vi.fn(), setView: vi.fn(),
+        setMaxZoom: vi.fn(), getZoom: () => 15, getCenter: () => ({ lat: 30.982425, lng: 107.421325 }),
         removeLayer: vi.fn(), remove: vi.fn(),
       };
       maps.push(map);
@@ -190,16 +191,18 @@ function mountZone(initialZones: ReturnType<typeof zone>[] | Promise<ReturnType<
   const basemapGroup = { addTo: vi.fn(), clearLayers: vi.fn() };
   const basemap = {
     baseMapCrs: () => undefined,
+    baseMapMaxZoom: () => 22,
     isGcjBaseMap: (key: string) => key === "amap-img",
     readStoredBaseMap: () => "tdt-img",
     storeBaseMap: vi.fn(),
+    createBaseLayer: () => basemapGroup,
     createBaseLayers: () => {
       const pair = [leaflet.leaflet.tileLayer(), leaflet.leaflet.tileLayer()];
       basemapGroup.addTo.mockImplementation((map: any) => {
         pair.forEach((tile) => tile.addTo(map));
         return basemapGroup;
       });
-      return { "tdt-img": basemapGroup, "esri-img": basemapGroup, "amap-img": basemapGroup, "tdt-vec": basemapGroup };
+      return { "tdt-img": basemapGroup, "esri-img": basemapGroup, "google-img": basemapGroup, "amap-img": basemapGroup, "tdt-vec": basemapGroup };
     },
   };
   const view = mountView(new URL("../src/views/zone/Index.vue", import.meta.url), {
@@ -207,7 +210,7 @@ function mountZone(initialZones: ReturnType<typeof zone>[] | Promise<ReturnType<
     "@/api": { zoneApi, plotApi: { getList: vi.fn().mockResolvedValue({ items: [] }) } },
     "@/utils/geo": { parsePlotBoundaries },
     "@/utils/basemap": basemap,
-    "@/components/BaseMapSwitch.vue": { name: "BaseMapSwitch", props: ["modelValue"], render: () => null },
+    "@/components/BaseMapSwitch.vue": { name: "BaseMapSwitch", props: ["modelValue", "map"], render: () => null },
   });
   cleanups.push(view.unmount);
   return { ...view, zoneApi, ...leaflet };

@@ -1,7 +1,7 @@
 <template>
   <div class="polygon-editor">
     <div ref="mapEl" class="polygon-editor__map"></div>
-    <BaseMapSwitch :model-value="baseMapKey" @update:model-value="switchBaseMap" />
+    <BaseMapSwitch :model-value="baseMapKey" :map="mapHandle" @update:model-value="switchBaseMap" @custom-updated="onCustomUpdated" />
     <div ref="toolbarEl" class="polygon-editor__toolbar">
       <el-button size="small" :disabled="points.length === 0" @click="undo">撤销上一点</el-button>
       <el-button size="small" :disabled="points.length === 0" @click="clear">清空</el-button>
@@ -14,11 +14,11 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
-import { baseMapCrs, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
+import { baseMapCrs, baseMapMaxZoom, createBaseLayer, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { polygonAreaMu } from '@/utils/geo'
 
 const props = defineProps<{ modelValue?: [number, number][] | undefined }>()
@@ -40,6 +40,8 @@ const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
 let map: any = null
 let shapeLayer: any = null
 let baseLayers: Record<BaseMapKey, any> | null = null
+// 缩放条/框选放大需要响应式 map 句柄（map 本体为普通变量，重建时同步刷新句柄）
+const mapHandle = shallowRef<any>(null)
 
 function normalize(value?: [number, number][]): [number, number][] {
   return (value ?? [])
@@ -117,24 +119,29 @@ function clear() {
 }
 
 function initMap() {
-  map = L.map(mapEl.value!, { zoomControl: true, attributionControl: false, maxZoom: 20, crs: baseMapCrs(baseMapKey.value) })
+  map = L.map(mapEl.value!, { zoomControl: true, attributionControl: false, maxZoom: baseMapMaxZoom(baseMapKey.value), crs: baseMapCrs(baseMapKey.value) })
   baseLayers = createBaseLayers()
   baseLayers[baseMapKey.value].addTo(map)
   shapeLayer = L.layerGroup().addTo(map)
   map.on('click', handleMapClick)
+  mapHandle.value = map
 }
 
 /** 底图热切换：同坐标系只换底图组；跨系（高德 GCJ-02）Leaflet CRS 不能热改，
- *  重建地图并按原视野重绘已绘顶点（顶点状态是 WGS84，不随底图丢失）；点击取点经 CRS 逆算仍入库 WGS84。 */
-function switchBaseMap(key: BaseMapKey) {
+ *  重建地图并按原视野重绘已绘顶点（顶点状态是 WGS84，不随底图丢失）；点击取点经 CRS 逆算仍入库 WGS84。
+ *  force 用于自定义源配置变更：同系也重建，确保新瓦片参数生效。 */
+function switchBaseMap(key: BaseMapKey, force = false) {
   const prev = baseMapKey.value
-  if (key === prev) return
+  if (key === prev && !force) return
   baseMapKey.value = key
   storeBaseMap(key)
   if (!map || !baseLayers) return
-  if (isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+  map.setMaxZoom(baseMapMaxZoom(key))
+  if (!force && isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+    const next = baseLayers[key] ?? (baseLayers[key] = createBaseLayer(key))
+    if (!next) return
     map.removeLayer(baseLayers[prev])
-    baseLayers[key].addTo(map)
+    next.addTo(map)
     return
   }
   const center = map.getCenter()
@@ -143,9 +150,14 @@ function switchBaseMap(key: BaseMapKey) {
   map.remove()
   map = null
   shapeLayer = null
+  mapHandle.value = null
   initMap()
   map.setView(center, zoom)
   draw()
+}
+
+function onCustomUpdated() {
+  switchBaseMap('custom', true)
 }
 
 onMounted(async () => {
@@ -166,6 +178,7 @@ onBeforeUnmount(() => {
   if (shapeLayer && map) map.removeLayer(shapeLayer)
   shapeLayer = null
   baseLayers = null
+  mapHandle.value = null
   if (map) map.remove()
   map = null
 })

@@ -88,18 +88,8 @@
       </div>
     </div>
 
-    <!-- 底部居中：底图切换（天地图影像 / Esri 高清影像 / 矢量），选择持久化 -->
-    <div v-if="!panelOpen" class="basemap-switch">
-      <button
-        v-for="opt in baseMapOptions"
-        :key="opt.key"
-        class="basemap-chip"
-        :class="{ active: baseMapKey === opt.key }"
-        type="button"
-        :title="opt.hint"
-        @click="switchBaseMap(opt.key)"
-      >{{ opt.label }}</button>
-    </div>
+    <!-- 底部居中：底图切换 + 精确缩放条（共享组件暗色覆盖），选择持久化 -->
+    <BaseMapSwitch v-if="!panelOpen" :model-value="baseMapKey" :map="mapHandle" @update:model-value="switchBaseMap" @custom-updated="onCustomUpdated" />
 
     <!-- 地图绘制/改边界卡片：管线、地块、片区共用，单击地图落点，拖动顶点微调 -->
     <MapShapeEditor
@@ -170,7 +160,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, markRaw, onMounted, onUnmounted, provide, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, markRaw, onMounted, onUnmounted, provide, reactive, ref, shallowRef } from 'vue'
 import type { Component } from 'vue'
 import { useRouter } from 'vue-router'
 import L from 'leaflet'
@@ -180,11 +170,12 @@ import { iotApi, messageApi, plotApi, weatherApi, zoneApi } from '@/api'
 import type { InfraLine, InfraLineType, ZoneSummary } from '@/api'
 import type { MapShapeActive, MapShapeKind, MapShapeSaved, Plot } from '@/types'
 import { getPlotTypeText } from '@/utils'
-import { BASE_MAP_OPTIONS, baseMapCrs, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
+import { baseMapCrs, baseMapLabelOf, baseMapMaxZoom, createBaseLayer, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { parsePlotBoundaries, polygonAreaMu, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 import { LINE_PANEL_BRIDGE, catColor, categorize, lineCategories, lineColorOf, lineTypeLabel } from '@/utils/infraLine'
 import type { LineCat, LinePanelBridge } from '@/utils/infraLine'
 import MapShapeEditor from '@/components/MapShapeEditor.vue'
+import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
 import { useUserStore } from '@/stores'
 import { checkPermission } from '@/utils/permission'
 
@@ -204,11 +195,10 @@ const baseLayerOptions: Array<{ key: LayerKey; label: string }> = [
   { key: 'zones', label: '片区范围' },
 ]
 
-// ---------- 底图切换：天地图影像 / Esri 高清影像 / 高德影像 / 天地图矢量 ----------
+// ---------- 底图切换：天地图影像 / Esri 高清影像 / 谷歌影像 / 高德影像 / 天地图矢量 / 自定义 ----------
 // 选项、瓦片源、GCJ-02 显示投影与持久化统一在 utils/basemap，与弹出页面地图共用同一选择。
-const baseMapOptions = BASE_MAP_OPTIONS
 const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
-const baseMapLabel = computed(() => baseMapOptions.find((opt) => opt.key === baseMapKey.value)?.label ?? '天地图影像')
+const baseMapLabel = computed(() => baseMapLabelOf(baseMapKey.value))
 
 // ---------- 左侧功能菜单（地图内浮层面板） ----------
 interface MenuItem { label: string; panel?: string; layer?: LineCat; draw?: MapShapeKind; perm?: string }
@@ -421,6 +411,8 @@ async function loadWeather() {
 // ---------- 地图 ----------
 const mapMessage = ref('地块边界加载中')
 let map: any = null
+// 缩放条/框选放大需要响应式 map 句柄（map 本体为普通变量，重建时同步刷新句柄）
+const mapHandle = shallowRef<any>(null)
 let baseLayers: Record<BaseMapKey, any> | null = null
 let deviceLayer: any = null
 let fieldLayer: any = null
@@ -429,7 +421,7 @@ const lineLayers: Record<LineCat | 'ROAD', any> = { WATER: null, ELECTRIC: null,
 const parcelCenter = new Map<string, [number, number]>()
 
 function initMap() {
-  map = L.map('tianditu-map', { center: [30.982425, 107.421325], zoom: 15, maxZoom: 20, zoomControl: true, attributionControl: false, crs: baseMapCrs(baseMapKey.value) })
+  map = L.map('tianditu-map', { center: [30.982425, 107.421325], zoom: 15, maxZoom: baseMapMaxZoom(baseMapKey.value), zoomControl: true, attributionControl: false, crs: baseMapCrs(baseMapKey.value) })
   baseLayers = createBaseLayers()
   baseLayers[baseMapKey.value].addTo(map)
   // 片区放在地块下方：片区淡填充可点开编辑，又不会盖住地块的点击
@@ -440,6 +432,7 @@ function initMap() {
   zoneLayer = L.layerGroup().addTo(map)
   for (const key of ['WATER', 'ELECTRIC', 'NET', 'ROAD'] as const) lineLayers[key] = L.layerGroup().addTo(map)
   shapeEditor.value?.attach(map)
+  mapHandle.value = map
 }
 
 function toggleLayer(key: LayerKey) {
@@ -451,17 +444,21 @@ function toggleLayer(key: LayerKey) {
 }
 
 /** 底图热切换：同坐标系只换底图组，业务图层与当前视野不动；选择持久化供刷新后恢复。
- *  高德（GCJ-02）与天地图/Esri（WGS84）投影不同而 Leaflet CRS 不能热改，跨系切换时
- *  重建地图并按原视野重绘业务图层；先取消绘制草稿，避免草稿层留在已销毁的旧地图上。 */
-function switchBaseMap(key: BaseMapKey) {
+ *  高德（GCJ-02）与天地图/Esri/谷歌（WGS84）投影不同而 Leaflet CRS 不能热改，跨系切换时
+ *  重建地图并按原视野重绘业务图层；先取消绘制草稿，避免草稿层留在已销毁的旧地图上。
+ *  force 用于自定义源配置变更：同系也重建，确保新瓦片参数生效。 */
+function switchBaseMap(key: BaseMapKey, force = false) {
   const prev = baseMapKey.value
-  if (key === prev) return
+  if (key === prev && !force) return
   baseMapKey.value = key
   storeBaseMap(key)
   if (!map || !baseLayers) return
-  if (isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+  map.setMaxZoom(baseMapMaxZoom(key))
+  if (!force && isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+    const next = baseLayers[key] ?? (baseLayers[key] = createBaseLayer(key))
+    if (!next) return
     map.removeLayer(baseLayers[prev])
-    baseLayers[key].addTo(map)
+    next.addTo(map)
     return
   }
   const center = map.getCenter()
@@ -469,11 +466,16 @@ function switchBaseMap(key: BaseMapKey) {
   shapeEditor.value?.cancel()
   map.remove()
   map = null
+  mapHandle.value = null
   initMap()
   map.setView(center, zoom)
   void loadPlots(false).then(() => loadDevices())
   void loadZones()
   void loadLines()
+}
+
+function onCustomUpdated() {
+  switchBaseMap('custom', true)
 }
 
 function toggleLine(cat: LineCat) {
@@ -990,6 +992,7 @@ onMounted(() => void loadLines())
 onMounted(() => void loadWeather())
 onMounted(() => { refreshUnread(); unreadTimer = setInterval(refreshUnread, 30000) })
 onUnmounted(() => {
+  mapHandle.value = null
   map?.remove()
   map = null
   if (unreadTimer) clearInterval(unreadTimer)
@@ -1038,11 +1041,23 @@ onUnmounted(() => {
 .legend-chip i { width: 14px; height: 3px; border-radius: 2px; }
 .legend-chip.off { opacity: .4; }
 
-/* 底部居中底图切换 */
-.basemap-switch { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 500; display: flex; gap: 6px; padding: 5px 6px; background: rgba(7,25,48,.82); border: 1px solid rgba(0,212,255,.24); border-radius: 4px; backdrop-filter: blur(10px); }
-.basemap-chip { padding: 5px 12px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: #9fc3d3; cursor: pointer; font-size: 12px; }
-.basemap-chip:hover { color: #cdeeff; }
-.basemap-chip.active { background: rgba(0,212,255,.16); border-color: rgba(0,212,255,.5); color: #7fe7ff; font-weight: 600; }
+/* 底部居中底图切换 + 精确缩放条：共享组件暗色驾驶舱覆盖 */
+:deep(.basemap-switch) { top: auto; right: auto; left: 50%; bottom: 16px; transform: translateX(-50%); background: rgba(7,25,48,.82); border-color: rgba(0,212,255,.24); backdrop-filter: blur(10px); }
+:deep(.basemap-switch__chip) { color: #9fc3d3; }
+:deep(.basemap-switch__chip:hover) { color: #cdeeff; }
+:deep(.basemap-switch__chip--active) { background: rgba(0,212,255,.16); border: 1px solid rgba(0,212,255,.5); color: #7fe7ff; font-weight: 600; }
+:deep(.basemap-switch__gear) { color: #9fc3d3; }
+:deep(.basemap-switch__gear:hover) { background: rgba(0,212,255,.12); color: #7fe7ff; }
+:deep(.basemap-switch__zoom) { border-top-color: rgba(0,212,255,.18); }
+:deep(.basemap-switch__step) { background: transparent; border-color: rgba(0,212,255,.3); color: #9fc3d3; }
+:deep(.basemap-switch__step:hover) { border-color: rgba(0,212,255,.6); color: #7fe7ff; }
+:deep(.basemap-switch__slider) { background: linear-gradient(90deg, #00d4ff, #0077aa); }
+:deep(.basemap-switch__slider::-webkit-slider-thumb) { background: #00d4ff; border-color: #071930; }
+:deep(.basemap-switch__slider::-moz-range-thumb) { background: #00d4ff; border-color: #071930; }
+:deep(.basemap-switch__level) { background: rgba(0,212,255,.14); color: #7fe7ff; }
+:deep(.basemap-switch__level--over) { background: rgba(230,162,60,.18); color: #e6a23c; }
+:deep(.basemap-switch__box) { background: transparent; border-color: rgba(0,212,255,.3); color: #9fc3d3; }
+:deep(.basemap-switch__box--on) { background: rgba(0,212,255,.2); border-color: rgba(0,212,255,.6); color: #7fe7ff; }
 
 /* 右下天气卡片 */
 .weather-card { position: absolute; right: 16px; bottom: 16px; z-index: 500; display: flex; align-items: center; gap: 16px; padding: 14px 18px; background: rgba(6,22,42,.86); border: 1px solid rgba(0,212,255,.28); border-radius: 4px; backdrop-filter: blur(10px); }

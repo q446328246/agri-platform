@@ -63,7 +63,7 @@
 
     <div class="card-container nav-map-wrap">
       <div ref="mapEl" class="nav-map"></div>
-      <BaseMapSwitch :model-value="baseMapKey" @update:model-value="switchBaseMap" />
+      <BaseMapSwitch :model-value="baseMapKey" :map="mapHandle" @update:model-value="switchBaseMap" @custom-updated="onCustomUpdated" />
       <div class="nav-map__tip">{{ mapTip }}</div>
     </div>
 
@@ -162,7 +162,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { ElMessage } from 'element-plus'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -170,7 +170,7 @@ import { operationApi, plotApi } from '@/api'
 import type { CoveragePlan, GeoLineString, GeoPolygon, NavPlan } from '@/api'
 import type { Plot } from '@/types'
 import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
-import { baseMapCrs, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
+import { baseMapCrs, baseMapMaxZoom, createBaseLayer, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { parsePlotBoundary } from '@/utils/geo'
 
 /**
@@ -211,6 +211,8 @@ const tableRef = ref<any>(null)
 const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
 let map: any = null
 let baseLayers: Record<BaseMapKey, any> | null = null
+// 缩放条/框选放大需要响应式 map 句柄（map 本体为普通变量，重建时同步刷新句柄）
+const mapHandle = shallowRef<any>(null)
 let plotLayer: any = null
 let roadLayer: any = null
 let routeLayer: any = null
@@ -456,10 +458,11 @@ function handleMapClick(event: any) {
 }
 
 function initMap() {
-  map = L.map(mapEl.value!, { center: CENTER, zoom: 15, attributionControl: false, maxZoom: 20, crs: baseMapCrs(baseMapKey.value) })
+  map = L.map(mapEl.value!, { center: CENTER, zoom: 15, attributionControl: false, maxZoom: baseMapMaxZoom(baseMapKey.value), crs: baseMapCrs(baseMapKey.value) })
   baseLayers = createBaseLayers()
   baseLayers[baseMapKey.value].addTo(map)
   map.on('click', handleMapClick)
+  mapHandle.value = map
 }
 
 function destroyNavMap() {
@@ -467,21 +470,26 @@ function destroyNavMap() {
   for (const layer of [plotLayer, roadLayer, routeLayer]) if (layer && map) map.removeLayer(layer)
   plotLayer = roadLayer = routeLayer = null
   baseLayers = null
+  mapHandle.value = null
   map?.remove()
   map = null
 }
 
 /** 底图热切换：同坐标系只换底图组；跨系（高德 GCJ-02）Leaflet CRS 不能热改，
- *  重建地图并按原视野重绘地块/机耕道/方案；选择持久化与一张图共用。 */
-function switchBaseMap(key: BaseMapKey) {
+ *  重建地图并按原视野重绘地块/机耕道/方案；选择持久化与一张图共用。
+ *  force 用于自定义源配置变更：同系也重建，确保新瓦片参数生效。 */
+function switchBaseMap(key: BaseMapKey, force = false) {
   const prev = baseMapKey.value
-  if (key === prev) return
+  if (key === prev && !force) return
   baseMapKey.value = key
   storeBaseMap(key)
   if (!map || !baseLayers) return
-  if (isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+  map.setMaxZoom(baseMapMaxZoom(key))
+  if (!force && isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+    const next = baseLayers[key] ?? (baseLayers[key] = createBaseLayer(key))
+    if (!next) return
     map.removeLayer(baseLayers[prev])
-    baseLayers[key].addTo(map)
+    next.addTo(map)
     return
   }
   const center = map.getCenter()
@@ -491,6 +499,10 @@ function switchBaseMap(key: BaseMapKey) {
   map.setView(center, zoom)
   renderBase()
   renderPlan()
+}
+
+function onCustomUpdated() {
+  switchBaseMap('custom', true)
 }
 
 onMounted(async () => {

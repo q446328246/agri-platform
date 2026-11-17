@@ -47,7 +47,7 @@
           </div>
           <div class="zone-map-wrap">
             <div ref="mapEl" class="zone-map"></div>
-            <BaseMapSwitch :model-value="baseMapKey" @update:model-value="switchBaseMap" />
+            <BaseMapSwitch :model-value="baseMapKey" :map="mapHandle" @update:model-value="switchBaseMap" @custom-updated="onCustomUpdated" />
           </div>
           <el-table :data="members" size="small" border empty-text="片区下暂无地块，可点「划入地块」分配">
             <el-table-column prop="parcelCode" label="地块编码" width="240" />
@@ -116,7 +116,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -124,7 +124,7 @@ import { plotApi, zoneApi } from '@/api'
 import type { ZoneSummary } from '@/api'
 import type { Plot } from '@/types'
 import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
-import { baseMapCrs, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
+import { baseMapCrs, baseMapMaxZoom, createBaseLayer, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { parsePlotBoundaries } from '@/utils/geo'
 
 /**
@@ -155,6 +155,8 @@ const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
 let map: any = null
 let baseLayers: Record<BaseMapKey, any> | null = null
 let zoneLayer: any = null
+// 缩放条/框选放大需要响应式 map 句柄（map 本体为普通变量，重建时同步刷新句柄）
+const mapHandle = shallowRef<any>(null)
 let detailRequest = 0
 let disposed = false
 
@@ -175,27 +177,33 @@ function clearZoneLayer() {
 function destroyZoneMap() {
   clearZoneLayer()
   baseLayers = null
+  mapHandle.value = null
   map?.remove()
   map = null
 }
 
 function createZoneMap(element: HTMLElement) {
-  map = L.map(element, { center: CENTER, zoom: 15, attributionControl: false, maxZoom: 20, crs: baseMapCrs(baseMapKey.value) })
+  map = L.map(element, { center: CENTER, zoom: 15, attributionControl: false, maxZoom: baseMapMaxZoom(baseMapKey.value), crs: baseMapCrs(baseMapKey.value) })
   baseLayers = createBaseLayers()
   baseLayers[baseMapKey.value].addTo(map)
+  mapHandle.value = map
 }
 
 /** 底图热切换：同坐标系只换底图组；跨系（高德 GCJ-02）Leaflet CRS 不能热改，
- *  重建地图并按原视野重绘成员地块与凸包；选择持久化与一张图共用。 */
-function switchBaseMap(key: BaseMapKey) {
+ *  重建地图并按原视野重绘成员地块与凸包；选择持久化与一张图共用。
+ *  force 用于自定义源配置变更：同系也重建，确保新瓦片参数生效。 */
+function switchBaseMap(key: BaseMapKey, force = false) {
   const prev = baseMapKey.value
-  if (key === prev) return
+  if (key === prev && !force) return
   baseMapKey.value = key
   storeBaseMap(key)
   if (!map || !baseLayers) return
-  if (isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+  map.setMaxZoom(baseMapMaxZoom(key))
+  if (!force && isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+    const next = baseLayers[key] ?? (baseLayers[key] = createBaseLayer(key))
+    if (!next) return
     map.removeLayer(baseLayers[prev])
-    baseLayers[key].addTo(map)
+    next.addTo(map)
     return
   }
   const center = map.getCenter()
@@ -205,6 +213,10 @@ function switchBaseMap(key: BaseMapKey) {
   createZoneMap(mapEl.value)
   map.setView(center, zoom)
   renderZoneMap()
+}
+
+function onCustomUpdated() {
+  switchBaseMap('custom', true)
 }
 
 // mapEl 位于 v-if 内，必须等异步数据生成容器、DOM 更新完成后再初始化。

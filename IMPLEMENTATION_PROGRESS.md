@@ -699,6 +699,16 @@
 - **测试同步**：`plot-zone-regressions.spec.ts` 登记 basemap/BaseMapSwitch 桩（双瓦片语义保留），底图释放断言改为随 `map.remove` 统一释放口径；Detail/Split 两 spec 原本桩掉地图组件，不受影响。
 - **部署**：用户点名重建，`docker compose --profile app up -d --build` 一次重建 app/edge 双目标（前端静态资源在 edge 目标，共享 build 阶段），135.7s 完成、app Healthy；`.runtime/verify-edge-basemap.mjs` 只读核验 5 项 PASS（递归扫 40 个 chunk，含本批新增 `basemap-switch__chip`/`zone-map-wrap` 判别标记，网关可达）。
 
+### 2026-11-17（续五）：影像深度放大——谷歌影像源 / 自定义影像源 / 精确缩放条
+
+- **需求**：用户反馈「图片还是不够清晰，能否自定义放大」。实测取证（`.runtime/probe-native-zoom.mjs` + 同号瓦片目视比对）：农场中心 (107.424, 30.986) 处 Esri/高德/天地图原生瓦片仅到 18 级（19 级起为固定字节占位瓦片，放大即插值模糊）；谷歌卫星影像原生实测到 22 级（z23 起 400），且与 Esri 同号瓦片地物完全对齐 → WGS84 无偏移，可直接接入。
+- **谷歌影像源**：`utils/basemap.ts` 新增 `google-img`（mt{s}.google.com lyrs=s，maxNativeZoom 22）+ 天地图中文注记；五处地图显示上限 20 → 22（`MAP_MAX_ZOOM`），公共源 18 级以上为插值放大并在级别徽标琥珀色警示。
+- **自定义影像源**：`agri-basemap-custom` localStorage 配置（名称/XYZ URL 模板/{s} 子域/原生最高级/显示最高级，上限 24 级），切换条齿轮按钮开对话框，保存前可按当前地图中心试加载瓦片预览；保存即切换、配置变更 force 重建底图、移除回退天地图；按 WGS84 约定接入（对话框内明示 GCJ-02 源勿接）。无人机正射/本地瓦片服务可由此实现真·高清自定义放大。
+- **精确缩放条**：`BaseMapSwitch.vue` 第二行滑杆 + 步进 + 级别徽标（超原生级琥珀警示）+ **框选放大**（拖矩形自定义放大区域，期间捕获 click 抑制绘制态误加顶点、禁用拖拽/双击缩放，退出恢复）；需父组件传 `:map` 响应式句柄（五处地图新增 `mapHandle` shallowRef，init/destroy 同步）。
+- **驾驶舱统一**：一张图底部居中切换条改用共享 `BaseMapSwitch`（暗色 :deep 覆盖保留驾驶舱观感），同样获得谷歌/自定义/缩放条/框选能力；`baseMapLabelOf` 统一状态条文案。
+- **测试同步**：zone 回归 spec 桩补 `baseMapMaxZoom`/`createBaseLayer`/google-img 组与 map mock 的 `setMaxZoom/getZoom/getCenter`；BaseMapSwitch 桩 props 增 `map`。
+- **交付口径**：按长期约定未跑单测/构建/冒烟、未重建镜像（语言服务器未就绪，静态核验无残留旧标识）；需重建 `app`/`edge` 镜像后浏览器验收，待用户点名。
+
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
 > 口径：A 类是不依赖外部条件、可在现有代码上补齐的功能缺口；B 类依赖现场硬件 / 第三方系统 / 算法服务，与「下一步」第 10 条既有口径一致；C 类是已文档化的刻意架构偏差，不是漏实现。每条均经代码核实，不臆造。
