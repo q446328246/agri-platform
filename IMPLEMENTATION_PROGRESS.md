@@ -713,7 +713,7 @@
 
 - **问题**：用户反馈部署后地图只能放大缩小、不能拖移。根因：框选放大松开后仍停留框选态（`dragging` 保持禁用），其后每次拖拽都被当作画矩形（>8px 还会 fitBounds 跳视野），滚轮/步进缩放不受影响，故表现为「只能缩放不能移动」；退出需再点「框选」按钮，语义不直观。
 - **修复**：`BaseMapSwitch.vue` 框选改一次性工具——mouseup 完成放大（或空点击）后立即 `stopBox()` 恢复拖移与双击缩放；Esc 与窗口失焦（alt-tab 拖拽中切走）取消并退出，防矩形与禁用态残留；激活期间地图内底部浮提示「框选放大：拖出矩形松开即放大 · Esc 取消」（pointer-events:none 不挡操作）；按钮 title 同步一次性语义。监听器（keydown/blur）随 cleanup 全量移除，地图重建 watch 仍统一 stopBox。
-- **交付口径**：按长期约定未跑单测/构建/浏览器实操，未重建镜像（线上仍为续五 bundle，修复需重建部署后生效，用户点名即执行）；静态复核监听器增删配对与 stopBox 幂等。
+- **交付与部署**：按长期口径修复提交后未跑单测/构建即推送；随后用户点名「根据修改代码构建（可只前端）」——本批仅前端改动，故只重建 edge 目标：`docker compose --profile app up -d --build edge` 会连带重建依赖 app（其末段 curl PGDG key 遇网络抖动 exit 18 中止，edge 镜像虽已产出但容器未更新），改用 `docker build --target edge -t agri-platform-edge:local .`（0.6s 全缓存命中含新源码的 vite 产物）+ `compose --profile app up -d edge`（不带 --build）单独换 edge 容器；app/postgres/minio 保持原容器 Healthy 未重启。`.runtime/verify-edge-basemap.mjs` 判别标记换本批新增物后 5 项 PASS（扫 39 个 chunk 含框选浮提示文案/「退出框选放大（Esc）」title/续五缩放条回归标记）。浏览器刷新即生效：框选松开即恢复拖移，Esc/失焦可取消。
 
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
@@ -1122,3 +1122,4 @@
 | 2026-11-17 | `node scripts/smoke-demo-data.mjs` + `node scripts/seed-test-plots.mjs` | 冒烟 **37 项通过**（33 PASS + 4 WARN：演示账号 11-12 页面改密/启用所致，与重置无关）；维护脚本幂等复跑「清理 0 块、3 块样例田就地更新、13 块重置数据完好」 |
 | 2026-11-17 | `docker compose --profile app up -d --build` + `node .runtime/verify-edge-basemap.mjs` | 双目标镜像重建 135.7s、app Healthy；线上 bundle 只读核验 **5 项 PASS**（扫 40 个 chunk 含新切换条/片区包装容器标记，网关可达） |
 | 2026-11-17 | `docker compose --profile app up -d --build` + `node .runtime/verify-edge-basemap.mjs`（续五部署，判别标记换本批新增物） | 双目标镜像重建 278.5s（vite 26.5s 重跑）、四容器 Healthy/Up；线上 bundle 只读核验 **5 项 PASS**（扫 39 个 chunk 含 `basemap-switch__slider`/`agri-basemap-custom`/谷歌瓦片 URL，网关 401 预期） |
+| 2026-11-17 | `docker build --target edge` + `compose --profile app up -d edge` + `node .runtime/verify-edge-basemap.mjs`（续六仅前端部署） | compose `up --build edge` 连带重建 app 且其 PGDG curl 网络抖动 exit 18 中止 → 改单独 build edge 目标（0.6s 缓存）再 up；edge 换新 bundle、app 等三容器未重启保持 Healthy；只读核验 **5 项 PASS**（框选浮提示文案/Esc title/缩放条回归标记） |
