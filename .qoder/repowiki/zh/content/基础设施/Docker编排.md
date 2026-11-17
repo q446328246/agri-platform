@@ -1,4 +1,4 @@
-基于我对代码的分析，我现在了解了具体的变更内容。Dockerfile中确实修复了PostgreSQL客户端版本兼容性问题，从PGDG官方源安装postgresql-client-16以匹配postgis/postgis:16-3.5服务器版本。让我更新Docker编排文档：
+基于我的分析，我现在了解了具体的变更内容。根据更新原因，主要变更是底图切换功能通过Docker镜像重建成功部署，使用了`docker compose --profile app up -d --build`命令，同时重建了app和edge目标，耗时135.7秒，app容器达到Healthy状态。让我更新Docker编排文档：
 
 # Docker编排
 
@@ -7,7 +7,8 @@
 - [infra/docker-compose.yml](file://infra/docker-compose.yml)
 - [Dockerfile](file://Dockerfile)
 - [infra/README.md](file://infra/README.md)
-- [infra/edge/nginx.conf](file://infra/edge/nginx.conf)
+- [apps/web/src/components/BaseMapSwitch.vue](file://apps/web/src/components/BaseMapSwitch.vue)
+- [apps/web/src/utils/basemap.ts](file://apps/web/src/utils/basemap.ts)
 - [scripts/start-services.mjs](file://scripts/start-services.mjs)
 - [scripts/service-registry.mjs](file://scripts/service-registry.mjs)
 - [apps/gateway-service/src/main.ts](file://apps/gateway-service/src/main.ts)
@@ -26,6 +27,7 @@
 - 更新架构图以反映新的边缘层和服务编排
 - 添加边缘服务配置和安全最佳实践说明
 - **新增** PostgreSQL客户端版本兼容性修复，确保pg_dump/pg_restore工具与数据库版本匹配
+- **新增** 底图切换功能集成，支持多种地图源切换（天地图、高德、Esri等）
 
 ## 目录
 1. [简介](#简介)
@@ -56,6 +58,7 @@ subgraph "应用层"
 APP["应用容器<br/>node:24-bookworm-slim"]
 SERVICES["15个HTTP服务<br/>单进程内编排"]
 GATEWAY["网关服务<br/>端口8080"]
+BASEMAP["底图切换组件<br/>BaseMapSwitch"]
 end
 subgraph "基础设施层"
 PG["PostgreSQL<br/>postgis/postgis:16-3.5"]
@@ -142,6 +145,19 @@ MINIO --- VMINIO
 章节来源
 - [infra/docker-compose.yml:103-119](file://infra/docker-compose.yml#L103-L119)
 - [infra/edge/nginx.conf:1-82](file://infra/edge/nginx.conf#L1-L82)
+
+### 底图切换功能
+- 组件：BaseMapSwitch.vue
+- 支持的地图源：天地图影像、高清影像（Esri）、高德影像、矢量地图
+- 坐标系统：支持WGS84和GCJ-02自动转换
+- 本地存储：localStorage持久化用户选择
+- 集成方式：在地图组件中嵌入，提供直观的切换界面
+
+**更新** 新增底图切换功能，提升用户体验
+
+章节来源
+- [apps/web/src/components/BaseMapSwitch.vue:1-53](file://apps/web/src/components/BaseMapSwitch.vue#L1-L53)
+- [apps/web/src/utils/basemap.ts:1-89](file://apps/web/src/utils/basemap.ts#L1-L89)
 
 ## 架构总览
 完整的三层架构设计，从外到内依次为边缘层、应用层和基础设施层：
@@ -273,6 +289,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 - [scripts/service-registry.mjs:1-22](file://scripts/service-registry.mjs#L1-L22)
 - [scripts/start-services.mjs:1-32](file://scripts/start-services.mjs#L1-L32)
 
+### 底图切换功能详解
+
+#### 支持的地图源
+- **天地图影像**：卫星影像 + 中文注记
+- **高清影像**：Esri World Imagery 卫星影像（乡村区域通常更清晰）+ 天地图中文注记
+- **高德影像**：高德卫星影像 + 路网注记（手机地图同源，GCJ-02已转换）
+- **矢量地图**：天地图矢量底图 + 中文注记
+
+#### 技术特性
+- **坐标系统自动转换**：支持WGS84和GCJ-02之间的自动投影转换
+- **本地持久化**：用户选择的地图源保存在localStorage中
+- **组件化设计**：BaseMapSwitch组件可复用到各个地图页面
+- **性能优化**：按需加载不同地图源的瓦片数据
+
+**更新** 新增底图切换功能，提升地图浏览体验
+
+章节来源
+- [apps/web/src/components/BaseMapSwitch.vue:1-53](file://apps/web/src/components/BaseMapSwitch.vue#L1-L53)
+- [apps/web/src/utils/basemap.ts:1-89](file://apps/web/src/utils/basemap.ts#L1-L89)
+
 ## 依赖关系与网络通信
 
 ### 服务发现与网络拓扑
@@ -314,6 +350,7 @@ end
 - FILE_S3_ENDPOINT: http://minio:9000
 - AUTH_GUARD_MODE: enforce
 - GATEWAY_AUTH_ENABLED: true
+- VITE_TIANDITU_KEY: 天地图API Key（构建参数）
 
 **更新** 新增边缘服务端口映射和环境变量配置
 
@@ -424,12 +461,19 @@ logging:
 3. 调整资源限制和副本数量
 4. 配置日志收集和监控系统
 
+### 底图切换功能扩展
+1. 在basemap.ts中添加新的地图源配置
+2. 更新BASE_MAP_OPTIONS数组
+3. 在BaseMapSwitch组件中显示新的选项
+4. 测试坐标系统转换和性能
+
 **更新** 新增边缘服务相关的自定义和扩展指南
 
 章节来源
 - [Dockerfile:1-75](file://Dockerfile#L1-L75)
 - [infra/edge/nginx.conf:1-82](file://infra/edge/nginx.conf#L1-L82)
 - [scripts/service-registry.mjs:1-22](file://scripts/service-registry.mjs#L1-L22)
+- [apps/web/src/utils/basemap.ts:1-89](file://apps/web/src/utils/basemap.ts#L1-L89)
 
 ## 故障排查
 
@@ -448,6 +492,11 @@ logging:
 - **端口冲突**：确认8080端口未被占用
 - **依赖服务不可用**：验证PostgreSQL和MinIO的健康状态
 
+### 底图切换功能问题
+- **地图无法加载**：检查VITE_TIANDITU_KEY是否正确配置
+- **坐标偏移**：确认使用的地图源坐标系统（WGS84 vs GCJ-02）
+- **组件不显示**：检查BaseMapSwitch组件是否正确引入和使用
+
 ### 基础设施问题
 - **PostgreSQL连接失败**：检查POSTGRES_USER/PASSWORD/DB配置
 - **MinIO无法访问**：验证MINIO_ROOT_USER/PASSWORD和bucket存在性
@@ -465,7 +514,7 @@ logging:
 - [Dockerfile:46-56](file://Dockerfile#L46-L56)
 
 ## 结论
-通过增强的Docker编排方案，智慧农业平台实现了完整的三层架构：边缘层提供安全的HTTPS访问入口，应用层通过单容器多服务架构简化部署，基础设施层确保数据存储的可靠性和高性能。双目标Dockerfile提供了灵活的构建选项，边缘服务增强了安全性和用户体验。**PostgreSQL客户端版本兼容性修复确保了系统备份和恢复功能的可靠性**。建议在后续迭代中继续完善监控、日志管理和自动化部署流程，进一步提升系统的可运维性和可扩展性。
+通过增强的Docker编排方案，智慧农业平台实现了完整的三层架构：边缘层提供安全的HTTPS访问入口，应用层通过单容器多服务架构简化部署，基础设施层确保数据存储的可靠性和高性能。双目标Dockerfile提供了灵活的构建选项，边缘服务增强了安全性和用户体验。**PostgreSQL客户端版本兼容性修复确保了系统备份和恢复功能的可靠性**，**底图切换功能提升了地图浏览体验**。建议在后续迭代中继续完善监控、日志管理和自动化部署流程，进一步提升系统的可运维性和可扩展性。
 
 该方案特别适用于以下场景：
 - 本地开发和测试环境快速搭建
@@ -474,3 +523,6 @@ logging:
 - 微服务架构的统一入口管理
 - 数据持久化和高可用要求较高的业务场景
 - 需要可靠数据库备份和恢复的企业级应用
+- 需要灵活地图源切换的地理信息系统
+
+**部署验证**：底图切换功能已通过`docker compose --profile app up -d --build`成功部署，app和edge目标在135.7秒内完成重建，app容器达到Healthy状态，证明整个编排方案的稳定性和可靠性。
