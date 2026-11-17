@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-11-17T03:14:57Z"
+exported_at: "2026-11-17T03:47:58Z"
 modules:
     "":
-        dir_name: 无人农场 AI 平台 Monorepo 根
-        title: 无人农场 AI 平台 Monorepo 根
+        dir_name: 无人农场 AI 平台 Monorepo 根编排
+        title: 无人农场 AI 平台 Monorepo 根编排
         scope:
             - README.md
             - IMPLEMENTATION_PROGRESS.md
