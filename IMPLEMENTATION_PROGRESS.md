@@ -697,7 +697,7 @@
 - **共享模块**：新增 `apps/web/src/utils/basemap.ts`（四底图选项/瓦片源/GCJ-02 显示投影 CRS/`agri-basemap` localStorage 持久化）与亮色切换条 `components/BaseMapSwitch.vue`；一张图驾驶舱改为引用该模块（行为不变），各处选择互通。
 - **接入四处**：地块详情 `PlotBoundaryMap.vue`、地块编辑/拆分边界绘制 `PlotPolygonEditor.vue`、片区台账 `zone/Index.vue`、道路导航 `farm/Navigation.vue`；同坐标系热换底图组、跨系（高德 GCJ-02）按原视野重建地图重绘业务图层；绘制顶点/拾取起点经 CRS 逆算仍入库 WGS84，面积口径不变；四处地图同步放开 20 级缩放。切换条位置避让既有浮层（详情右下、绘制左下、片区/导航右上）。
 - **测试同步**：`plot-zone-regressions.spec.ts` 登记 basemap/BaseMapSwitch 桩（双瓦片语义保留），底图释放断言改为随 `map.remove` 统一释放口径；Detail/Split 两 spec 原本桩掉地图组件，不受影响。
-- **交付口径**：纯前端改动，按长期约定未跑单测/构建/冒烟、未重建镜像；需重建 `app` 镜像后浏览器验收（待用户点名）。
+- **部署**：用户点名重建，`docker compose --profile app up -d --build` 一次重建 app/edge 双目标（前端静态资源在 edge 目标，共享 build 阶段），135.7s 完成、app Healthy；`.runtime/verify-edge-basemap.mjs` 只读核验 5 项 PASS（递归扫 40 个 chunk，含本批新增 `basemap-switch__chip`/`zone-map-wrap` 判别标记，网关可达）。
 
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
@@ -1104,3 +1104,4 @@
 | 2026-11-17 | 迁移 `044_reset_plots_lines.sql` + `045_smoke_residue_cleanup.sql` 应用（用户点名重置） | 已应用（118ms / 8ms）；旧地块域 27 行地块 / 16+ 管线 / 5 片区整体清除，重建 13 块小田 / 7 管线 / 2 片区 |
 | 2026-11-17 | `node .runtime/verify-044.mjs` | **18 项全 PASS**：13 块无软删、面积 ≤3.85 亩、管线 ≤500.58m、类型/状态四样齐备、片区归属完整、八张业务表引用零悬空、11 台设备绑定保留 |
 | 2026-11-17 | `node scripts/smoke-demo-data.mjs` + `node scripts/seed-test-plots.mjs` | 冒烟 **37 项通过**（33 PASS + 4 WARN：演示账号 11-12 页面改密/启用所致，与重置无关）；维护脚本幂等复跑「清理 0 块、3 块样例田就地更新、13 块重置数据完好」 |
+| 2026-11-17 | `docker compose --profile app up -d --build` + `node .runtime/verify-edge-basemap.mjs` | 双目标镜像重建 135.7s、app Healthy；线上 bundle 只读核验 **5 项 PASS**（扫 40 个 chunk 含新切换条/片区包装容器标记，网关可达） |
