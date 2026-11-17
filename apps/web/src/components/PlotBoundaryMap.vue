@@ -1,6 +1,7 @@
 <template>
   <div class="boundary-map">
     <div ref="mapEl" class="boundary-map__canvas"></div>
+    <BaseMapSwitch :model-value="baseMapKey" @update:model-value="switchBaseMap" />
     <div v-if="message" class="boundary-map__tip" :class="{ 'boundary-map__tip--empty': empty }">{{ message }}</div>
   </div>
 </template>
@@ -9,6 +10,8 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
+import { baseMapCrs, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { parsePlotBoundary, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 
 const props = defineProps<{ source?: PlotBoundarySource | null }>()
@@ -16,18 +19,10 @@ const props = defineProps<{ source?: PlotBoundarySource | null }>()
 const mapEl = ref<HTMLElement | null>(null)
 const message = ref('')
 const empty = ref(false)
+const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
 let map: any = null
 let layer: any = null
-let tiles: any[] = []
-
-function tianditu(layerName: string) {
-  const key = import.meta.env.VITE_TIANDITU_KEY
-  return L.tileLayer(
-    'https://t{s}.tianditu.gov.cn/' + layerName + '_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=' + layerName +
-      '&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=' + key,
-    { subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'], maxZoom: 18 },
-  )
-}
+let baseLayers: Record<BaseMapKey, any> | null = null
 
 /** 把地块边界画到地图上；没有边界时保留提示，避免空白画布。 */
 function render(boundary: PlotBoundary | null) {
@@ -58,22 +53,48 @@ function sync() {
   render(props.source ? parsePlotBoundary(props.source) : null)
 }
 
+function initMap() {
+  map = L.map(mapEl.value!, { zoomControl: true, attributionControl: false, maxZoom: 20, crs: baseMapCrs(baseMapKey.value) })
+  baseLayers = createBaseLayers()
+  baseLayers[baseMapKey.value].addTo(map)
+}
+
+/** 底图热切换：同坐标系只换底图组；跨系（高德 GCJ-02）Leaflet CRS 不能热改，
+ *  重建地图并按原视野重绘边界；选择持久化与一张图共用。 */
+function switchBaseMap(key: BaseMapKey) {
+  const prev = baseMapKey.value
+  if (key === prev) return
+  baseMapKey.value = key
+  storeBaseMap(key)
+  if (!map || !baseLayers) return
+  if (isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+    map.removeLayer(baseLayers[prev])
+    baseLayers[key].addTo(map)
+    return
+  }
+  const center = map.getCenter()
+  const zoom = map.getZoom()
+  map.remove()
+  map = null
+  layer = null
+  initMap()
+  map.setView(center, zoom)
+  sync()
+}
+
 onMounted(() => {
   if (!mapEl.value) return
-  map = L.map(mapEl.value, { zoomControl: true, attributionControl: false })
-  tiles = [tianditu('img'), tianditu('cia')]
-  tiles.forEach((tile) => tile.addTo(map))
+  initMap()
   sync()
 })
 
 watch(() => props.source, sync, { deep: true })
 
 onBeforeUnmount(() => {
-  tiles.forEach((tile) => tile.remove())
-  tiles = []
   if (layer && map) map.removeLayer(layer)
   layer = null
-  map.remove()
+  baseLayers = null
+  map?.remove()
   map = null
 })
 </script>
@@ -83,6 +104,8 @@ onBeforeUnmount(() => {
 .boundary-map__canvas { width: 100%; height: 100%; }
 .boundary-map__tip { position: absolute; z-index: 400; top: 10px; left: 10px; padding: 6px 12px; font-size: 12px; color: #fff; background: rgba(9, 30, 66, .82); border-radius: 4px; }
 .boundary-map__tip--empty { color: #ff9c65; }
+/* 顶部已有名称/面积提示条：切换条放右下空位 */
+:deep(.basemap-switch) { top: auto; bottom: 12px; }
 :deep(.boundary-label) { background: none; border: 0; }
 :deep(.boundary-label span) { display: inline-block; padding: 2px 8px; font-size: 12px; color: #dff4f8; background: rgba(9, 30, 66, .78); border-radius: 4px; white-space: nowrap; }
 </style>

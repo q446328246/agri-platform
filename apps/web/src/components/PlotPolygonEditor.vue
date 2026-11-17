@@ -1,6 +1,7 @@
 <template>
   <div class="polygon-editor">
     <div ref="mapEl" class="polygon-editor__map"></div>
+    <BaseMapSwitch :model-value="baseMapKey" @update:model-value="switchBaseMap" />
     <div ref="toolbarEl" class="polygon-editor__toolbar">
       <el-button size="small" :disabled="points.length === 0" @click="undo">撤销上一点</el-button>
       <el-button size="small" :disabled="points.length === 0" @click="clear">清空</el-button>
@@ -16,6 +17,8 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
+import { baseMapCrs, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { polygonAreaMu } from '@/utils/geo'
 
 const props = defineProps<{ modelValue?: [number, number][] | undefined }>()
@@ -32,19 +35,11 @@ const mapEl = ref<HTMLElement | null>(null)
 const toolbarEl = ref<HTMLElement | null>(null)
 const points = ref<[number, number][]>([])
 const areaMu = ref(0)
+const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
 
 let map: any = null
 let shapeLayer: any = null
-let tiles: any[] = []
-
-function tianditu(layerName: string) {
-  const key = import.meta.env.VITE_TIANDITU_KEY
-  return L.tileLayer(
-    'https://t{s}.tianditu.gov.cn/' + layerName + '_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=' + layerName +
-      '&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=' + key,
-    { subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'], maxZoom: 18 },
-  )
-}
+let baseLayers: Record<BaseMapKey, any> | null = null
 
 function normalize(value?: [number, number][]): [number, number][] {
   return (value ?? [])
@@ -121,14 +116,43 @@ function clear() {
   commit()
 }
 
+function initMap() {
+  map = L.map(mapEl.value!, { zoomControl: true, attributionControl: false, maxZoom: 20, crs: baseMapCrs(baseMapKey.value) })
+  baseLayers = createBaseLayers()
+  baseLayers[baseMapKey.value].addTo(map)
+  shapeLayer = L.layerGroup().addTo(map)
+  map.on('click', handleMapClick)
+}
+
+/** 底图热切换：同坐标系只换底图组；跨系（高德 GCJ-02）Leaflet CRS 不能热改，
+ *  重建地图并按原视野重绘已绘顶点（顶点状态是 WGS84，不随底图丢失）；点击取点经 CRS 逆算仍入库 WGS84。 */
+function switchBaseMap(key: BaseMapKey) {
+  const prev = baseMapKey.value
+  if (key === prev) return
+  baseMapKey.value = key
+  storeBaseMap(key)
+  if (!map || !baseLayers) return
+  if (isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+    map.removeLayer(baseLayers[prev])
+    baseLayers[key].addTo(map)
+    return
+  }
+  const center = map.getCenter()
+  const zoom = map.getZoom()
+  map.off('click', handleMapClick)
+  map.remove()
+  map = null
+  shapeLayer = null
+  initMap()
+  map.setView(center, zoom)
+  draw()
+}
+
 onMounted(async () => {
   await nextTick()
   if (!mapEl.value) return
-  map = L.map(mapEl.value, { zoomControl: true, attributionControl: false }).setView(DEFAULT_CENTER, DEFAULT_ZOOM)
-  tiles = [tianditu('img'), tianditu('cia')]
-  tiles.forEach((tile) => tile.addTo(map))
-  shapeLayer = L.layerGroup().addTo(map)
-  map.on('click', handleMapClick)
+  initMap()
+  map.setView(DEFAULT_CENTER, DEFAULT_ZOOM)
   if (toolbarEl.value) L.DomEvent.disableClickPropagation(toolbarEl.value)
   syncFromProps(props.modelValue, true)
   // 表单容器完成布局后再校正画布尺寸，避免地图只渲染左上角
@@ -139,10 +163,9 @@ watch(() => props.modelValue, (value) => syncFromProps(value, true), { deep: tru
 
 onBeforeUnmount(() => {
   if (map) map.off('click', handleMapClick)
-  tiles.forEach((tile) => tile.remove())
-  tiles = []
   if (shapeLayer && map) map.removeLayer(shapeLayer)
   shapeLayer = null
+  baseLayers = null
   if (map) map.remove()
   map = null
 })
@@ -194,6 +217,14 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.92);
   border-radius: 4px;
   font-size: 12px;
+}
+
+/* 顶部已有顶点工具条、右下已有提示：切换条放左下空位 */
+:deep(.basemap-switch) {
+  top: auto;
+  right: auto;
+  bottom: 12px;
+  left: 12px;
 }
 
 :deep(.polygon-vertex-label) {

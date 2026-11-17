@@ -63,6 +63,7 @@
 
     <div class="card-container nav-map-wrap">
       <div ref="mapEl" class="nav-map"></div>
+      <BaseMapSwitch :model-value="baseMapKey" @update:model-value="switchBaseMap" />
       <div class="nav-map__tip">{{ mapTip }}</div>
     </div>
 
@@ -168,6 +169,8 @@ import 'leaflet/dist/leaflet.css'
 import { operationApi, plotApi } from '@/api'
 import type { CoveragePlan, GeoLineString, GeoPolygon, NavPlan } from '@/api'
 import type { Plot } from '@/types'
+import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
+import { baseMapCrs, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { parsePlotBoundary } from '@/utils/geo'
 
 /**
@@ -205,8 +208,9 @@ const stopPoints = ref<Array<{ code: string; name: string; lat: number; lng: num
 
 const mapEl = ref<HTMLElement | null>(null)
 const tableRef = ref<any>(null)
+const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
 let map: any = null
-let tiles: any[] = []
+let baseLayers: Record<BaseMapKey, any> | null = null
 let plotLayer: any = null
 let roadLayer: any = null
 let routeLayer: any = null
@@ -219,15 +223,6 @@ const summary = computed(() => {
   if (plan) return `${plan.laneCount} 条作业带 · 总里程 ${plan.totalDistanceM.toFixed(0)} 米 · 约 ${plan.durationMin.toFixed(0)} 分钟`
   return ''
 })
-
-function tianditu(layerName: string) {
-  const key = import.meta.env.VITE_TIANDITU_KEY
-  return L.tileLayer(
-    'https://t{s}.tianditu.gov.cn/' + layerName + '_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=' + layerName +
-      '&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=' + key,
-    { subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'], maxZoom: 18 },
-  )
-}
 
 function label(html: string, background = '#00d4ff'): any {
   return L.divIcon({ className: 'nav-label', html: `<span style="background:${background}">${html}</span>`, iconSize: [0, 0] })
@@ -451,30 +446,62 @@ function clearPlan() {
   renderPlan()
 }
 
+/** 地图拾取起点：GCJ-02 底图下 event.latlng 已经 CRS 逆算回 WGS84，入库口径不变。 */
+function handleMapClick(event: any) {
+  if (!picking.value) return
+  start.lat = Number(event.latlng.lat.toFixed(6))
+  start.lng = Number(event.latlng.lng.toFixed(6))
+  picking.value = false
+  renderPlan()
+}
+
+function initMap() {
+  map = L.map(mapEl.value!, { center: CENTER, zoom: 15, attributionControl: false, maxZoom: 20, crs: baseMapCrs(baseMapKey.value) })
+  baseLayers = createBaseLayers()
+  baseLayers[baseMapKey.value].addTo(map)
+  map.on('click', handleMapClick)
+}
+
+function destroyNavMap() {
+  if (map) map.off('click', handleMapClick)
+  for (const layer of [plotLayer, roadLayer, routeLayer]) if (layer && map) map.removeLayer(layer)
+  plotLayer = roadLayer = routeLayer = null
+  baseLayers = null
+  map?.remove()
+  map = null
+}
+
+/** 底图热切换：同坐标系只换底图组；跨系（高德 GCJ-02）Leaflet CRS 不能热改，
+ *  重建地图并按原视野重绘地块/机耕道/方案；选择持久化与一张图共用。 */
+function switchBaseMap(key: BaseMapKey) {
+  const prev = baseMapKey.value
+  if (key === prev) return
+  baseMapKey.value = key
+  storeBaseMap(key)
+  if (!map || !baseLayers) return
+  if (isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+    map.removeLayer(baseLayers[prev])
+    baseLayers[key].addTo(map)
+    return
+  }
+  const center = map.getCenter()
+  const zoom = map.getZoom()
+  destroyNavMap()
+  initMap()
+  map.setView(center, zoom)
+  renderBase()
+  renderPlan()
+}
+
 onMounted(async () => {
   if (!mapEl.value) return
-  map = L.map(mapEl.value, { center: CENTER, zoom: 15, attributionControl: false })
-  tiles = [tianditu('img'), tianditu('cia')]
-  tiles.forEach((tile) => tile.addTo(map))
-  routeLayer = L.layerGroup().addTo(map)
+  initMap()
   renderPlan()
-  map.on('click', (event: any) => {
-    if (!picking.value) return
-    start.lat = Number(event.latlng.lat.toFixed(6))
-    start.lng = Number(event.latlng.lng.toFixed(6))
-    picking.value = false
-    renderPlan()
-  })
   await loadData()
 })
 
 onBeforeUnmount(() => {
-  tiles.forEach((tile) => tile.remove())
-  tiles = []
-  for (const layer of [plotLayer, roadLayer, routeLayer]) if (layer && map) map.removeLayer(layer)
-  plotLayer = roadLayer = routeLayer = null
-  map?.remove()
-  map = null
+  destroyNavMap()
 })
 </script>
 

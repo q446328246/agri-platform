@@ -180,7 +180,7 @@ import { iotApi, messageApi, plotApi, weatherApi, zoneApi } from '@/api'
 import type { InfraLine, InfraLineType, ZoneSummary } from '@/api'
 import type { MapShapeActive, MapShapeKind, MapShapeSaved, Plot } from '@/types'
 import { getPlotTypeText } from '@/utils'
-import { gcj02ToWgs84, wgs84ToGcj02 } from '@/utils/gcj02'
+import { BASE_MAP_OPTIONS, baseMapCrs, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { parsePlotBoundaries, polygonAreaMu, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 import { LINE_PANEL_BRIDGE, catColor, categorize, lineCategories, lineColorOf, lineTypeLabel } from '@/utils/infraLine'
 import type { LineCat, LinePanelBridge } from '@/utils/infraLine'
@@ -190,7 +190,6 @@ import { checkPermission } from '@/utils/permission'
 
 const router = useRouter()
 const userStore = useUserStore()
-const tiandituKey = import.meta.env.VITE_TIANDITU_KEY
 
 // ---------- 图层与底图状态 ----------
 type LayerKey = 'devices' | 'fields' | 'zones'
@@ -206,21 +205,8 @@ const baseLayerOptions: Array<{ key: LayerKey; label: string }> = [
 ]
 
 // ---------- 底图切换：天地图影像 / Esri 高清影像 / 高德影像 / 天地图矢量 ----------
-// 天地图影像在乡村区域分辨率有限，Esri World Imagery 通常更清晰且同为 WGS84 无偏移；
-// 高德影像与手机地图同源（路网/注记密、更新快），但用 GCJ-02 加密坐标，须经显示层投影转换；
-// 高清影像上叠加天地图中文注记（cia），地名可读性不丢。选择存 localStorage，刷新后保持。
-type BaseMapKey = 'tdt-img' | 'esri-img' | 'amap-img' | 'tdt-vec'
-const baseMapOptions: Array<{ key: BaseMapKey; label: string; hint: string }> = [
-  { key: 'tdt-img', label: '天地图影像', hint: '天地图卫星影像 + 中文注记' },
-  { key: 'esri-img', label: '高清影像', hint: 'Esri World Imagery 卫星影像（乡村区域通常更清晰）+ 天地图中文注记' },
-  { key: 'amap-img', label: '高德影像', hint: '高德卫星影像 + 路网注记（手机地图同源，GCJ-02 已转换，地块边界不偏移）' },
-  { key: 'tdt-vec', label: '矢量地图', hint: '天地图矢量底图 + 中文注记' },
-]
-const BASEMAP_STORAGE_KEY = 'agri-basemap'
-function readStoredBaseMap(): BaseMapKey {
-  const stored = localStorage.getItem(BASEMAP_STORAGE_KEY)
-  return baseMapOptions.some((opt) => opt.key === stored) ? (stored as BaseMapKey) : 'tdt-img'
-}
+// 选项、瓦片源、GCJ-02 显示投影与持久化统一在 utils/basemap，与弹出页面地图共用同一选择。
+const baseMapOptions = BASE_MAP_OPTIONS
 const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
 const baseMapLabel = computed(() => baseMapOptions.find((opt) => opt.key === baseMapKey.value)?.label ?? '天地图影像')
 
@@ -440,53 +426,11 @@ let deviceLayer: any = null
 let fieldLayer: any = null
 let zoneLayer: any = null
 const lineLayers: Record<LineCat | 'ROAD', any> = { WATER: null, ELECTRIC: null, NET: null, ROAD: null }
-// 瓦片原生最高 18 级，地图允许放到 20 级（18 级以上放大渲染），便于精确对齐地块边界顶点
-const tileOptions = { subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'], maxZoom: 20, maxNativeZoom: 18 }
 const parcelCenter = new Map<string, [number, number]>()
 
-function createTiles(layer: string) {
-  return L.tileLayer(`https://t{s}.tianditu.gov.cn/${layer}_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${layer}&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=${tiandituKey}`, { ...tileOptions })
-}
-
-function createEsriTiles() {
-  return L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20, maxNativeZoom: 18 })
-}
-
-/** 高德瓦片：style=6 卫星影像，style=8 透明路网+注记（叠在影像上就是手机地图的观感） */
-function createAmapTiles(style: '6' | '8') {
-  const host = style === '6' ? 'webst0{s}' : 'wprd0{s}'
-  const extra = style === '8' ? '&lang=zh_cn&size=1&scl=1' : ''
-  return L.tileLayer(`https://${host}.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&style=${style}${extra}`, { subdomains: ['1', '2', '3', '4'], maxZoom: 20, maxNativeZoom: 18 })
-}
-
-/** GCJ-02 显示投影：业务坐标（WGS84）先正算到 GCJ-02 再做墨卡托投影，屏幕点位逆算回 WGS84。
- *  高德瓦片与地块边界自此同一坐标系；入库坐标与面积计算不受影响，仍是 WGS84。 */
-function createGcjCrs() {
-  const mercator = L.Projection.SphericalMercator
-  const projection = {
-    bounds: mercator.bounds,
-    project(latlng: any) {
-      const [lng, lat] = wgs84ToGcj02(latlng.lng, latlng.lat)
-      return mercator.project(L.latLng(lat, lng))
-    },
-    unproject(point: any) {
-      const ll = mercator.unproject(point)
-      const [lng, lat] = gcj02ToWgs84(ll.lng, ll.lat)
-      return L.latLng(lat, lng)
-    },
-  }
-  return L.extend({}, L.CRS.EPSG3857, { projection })
-}
-
 function initMap() {
-  const gcj = baseMapKey.value === 'amap-img'
-  map = L.map('tianditu-map', { center: [30.982425, 107.421325], zoom: 15, maxZoom: 20, zoomControl: true, attributionControl: false, crs: gcj ? createGcjCrs() : L.CRS.EPSG3857 })
-  baseLayers = {
-    'tdt-img': L.layerGroup([createTiles('img'), createTiles('cia')]),
-    'esri-img': L.layerGroup([createEsriTiles(), createTiles('cia')]),
-    'amap-img': L.layerGroup([createAmapTiles('6'), createAmapTiles('8')]),
-    'tdt-vec': L.layerGroup([createTiles('vec'), createTiles('cva')]),
-  }
+  map = L.map('tianditu-map', { center: [30.982425, 107.421325], zoom: 15, maxZoom: 20, zoomControl: true, attributionControl: false, crs: baseMapCrs(baseMapKey.value) })
+  baseLayers = createBaseLayers()
   baseLayers[baseMapKey.value].addTo(map)
   // 片区放在地块下方：片区淡填充可点开编辑，又不会盖住地块的点击
   map.createPane('zonePane')
@@ -513,9 +457,9 @@ function switchBaseMap(key: BaseMapKey) {
   const prev = baseMapKey.value
   if (key === prev) return
   baseMapKey.value = key
-  localStorage.setItem(BASEMAP_STORAGE_KEY, key)
+  storeBaseMap(key)
   if (!map || !baseLayers) return
-  if ((prev === 'amap-img') === (key === 'amap-img')) {
+  if (isGcjBaseMap(prev) === isGcjBaseMap(key)) {
     map.removeLayer(baseLayers[prev])
     baseLayers[key].addTo(map)
     return

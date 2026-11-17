@@ -45,7 +45,10 @@
               </el-popconfirm>
             </div>
           </div>
-          <div ref="mapEl" class="zone-map"></div>
+          <div class="zone-map-wrap">
+            <div ref="mapEl" class="zone-map"></div>
+            <BaseMapSwitch :model-value="baseMapKey" @update:model-value="switchBaseMap" />
+          </div>
           <el-table :data="members" size="small" border empty-text="片区下暂无地块，可点「划入地块」分配">
             <el-table-column prop="parcelCode" label="地块编码" width="240" />
             <el-table-column prop="name" label="地块名称" min-width="160" />
@@ -120,6 +123,8 @@ import 'leaflet/dist/leaflet.css'
 import { plotApi, zoneApi } from '@/api'
 import type { ZoneSummary } from '@/api'
 import type { Plot } from '@/types'
+import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
+import { baseMapCrs, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { parsePlotBoundaries } from '@/utils/geo'
 
 /**
@@ -146,8 +151,9 @@ const assignCode = ref('')
 const assignCandidates = computed(() => allPlots.value.filter((plot) => plot.zoneCode !== activeCode.value))
 
 const mapEl = ref<HTMLElement | null>(null)
+const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
 let map: any = null
-let tiles: any[] = []
+let baseLayers: Record<BaseMapKey, any> | null = null
 let zoneLayer: any = null
 let detailRequest = 0
 let disposed = false
@@ -168,10 +174,37 @@ function clearZoneLayer() {
 
 function destroyZoneMap() {
   clearZoneLayer()
-  tiles.forEach((tile) => tile.remove())
-  tiles = []
+  baseLayers = null
   map?.remove()
   map = null
+}
+
+function createZoneMap(element: HTMLElement) {
+  map = L.map(element, { center: CENTER, zoom: 15, attributionControl: false, maxZoom: 20, crs: baseMapCrs(baseMapKey.value) })
+  baseLayers = createBaseLayers()
+  baseLayers[baseMapKey.value].addTo(map)
+}
+
+/** 底图热切换：同坐标系只换底图组；跨系（高德 GCJ-02）Leaflet CRS 不能热改，
+ *  重建地图并按原视野重绘成员地块与凸包；选择持久化与一张图共用。 */
+function switchBaseMap(key: BaseMapKey) {
+  const prev = baseMapKey.value
+  if (key === prev) return
+  baseMapKey.value = key
+  storeBaseMap(key)
+  if (!map || !baseLayers) return
+  if (isGcjBaseMap(prev) === isGcjBaseMap(key)) {
+    map.removeLayer(baseLayers[prev])
+    baseLayers[key].addTo(map)
+    return
+  }
+  const center = map.getCenter()
+  const zoom = map.getZoom()
+  destroyZoneMap()
+  if (!mapEl.value) return
+  createZoneMap(mapEl.value)
+  map.setView(center, zoom)
+  renderZoneMap()
 }
 
 // mapEl 位于 v-if 内，必须等异步数据生成容器、DOM 更新完成后再初始化。
@@ -181,11 +214,7 @@ watch([mapEl, active, members], ([element, current]) => {
     return
   }
   if (map && map.getContainer() !== element) destroyZoneMap()
-  if (!map) {
-    map = L.map(element, { center: CENTER, zoom: 15, attributionControl: false })
-    tiles = [tianditu('img'), tianditu('cia')]
-    tiles.forEach((tile) => tile.addTo(map))
-  }
+  if (!map) createZoneMap(element)
   map.invalidateSize({ pan: false })
   renderZoneMap()
 }, { flush: 'post' })
@@ -196,15 +225,6 @@ function mapTooltip(name: string, summary: string): HTMLElement {
   title.textContent = name
   content.append(title, document.createElement('br'), document.createTextNode(summary))
   return content
-}
-
-function tianditu(layerName: string) {
-  const key = import.meta.env.VITE_TIANDITU_KEY
-  return L.tileLayer(
-    'https://t{s}.tianditu.gov.cn/' + layerName + '_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=' + layerName +
-      '&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=' + key,
-    { subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'], maxZoom: 18 },
-  )
 }
 
 /** 画成员地块与片区凸包；坐标入库是 [经度, 纬度]，Leaflet 需要 [纬度, 经度]。 */
@@ -411,6 +431,7 @@ onBeforeUnmount(() => {
 .zone-body__head h3 { margin: 0; font-size: 16px; }
 .zone-body__head p { margin: 4px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
 .zone-body__actions { display: flex; gap: 8px; flex: none; }
+.zone-map-wrap { position: relative; }
 .zone-map { height: 360px; border-radius: 6px; overflow: hidden; }
 .assign-tip { margin: 0 0 12px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.6; }
 .assign-tip--empty { margin: 10px 0 0; color: var(--el-color-warning); }

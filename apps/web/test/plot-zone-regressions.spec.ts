@@ -185,10 +185,29 @@ function mountZone(initialZones: ReturnType<typeof zone>[] | Promise<ReturnType<
     remove: vi.fn().mockResolvedValue(undefined),
   };
   const leaflet = leafletMock();
+  // 共享底图模块桩：双瓦片（影像+注记）装进一个底图组，组 addTo 时把瓦片挂到地图，
+  // 保持「双底图」断言语义；底图组不进 groups（groups 只跟踪业务图层）。
+  const basemapGroup = { addTo: vi.fn(), clearLayers: vi.fn() };
+  const basemap = {
+    baseMapCrs: () => undefined,
+    isGcjBaseMap: (key: string) => key === "amap-img",
+    readStoredBaseMap: () => "tdt-img",
+    storeBaseMap: vi.fn(),
+    createBaseLayers: () => {
+      const pair = [leaflet.leaflet.tileLayer(), leaflet.leaflet.tileLayer()];
+      basemapGroup.addTo.mockImplementation((map: any) => {
+        pair.forEach((tile) => tile.addTo(map));
+        return basemapGroup;
+      });
+      return { "tdt-img": basemapGroup, "esri-img": basemapGroup, "amap-img": basemapGroup, "tdt-vec": basemapGroup };
+    },
+  };
   const view = mountView(new URL("../src/views/zone/Index.vue", import.meta.url), {
     "element-plus": { ElMessage: messages() }, leaflet: leaflet.leaflet,
     "@/api": { zoneApi, plotApi: { getList: vi.fn().mockResolvedValue({ items: [] }) } },
     "@/utils/geo": { parsePlotBoundaries },
+    "@/utils/basemap": basemap,
+    "@/components/BaseMapSwitch.vue": { name: "BaseMapSwitch", props: ["modelValue"], render: () => null },
   });
   cleanups.push(view.unmount);
   return { ...view, zoneApi, ...leaflet };
@@ -229,7 +248,8 @@ describe("片区地图生命周期与异步详情回归", () => {
     await flushView();
     expect(state.mapEl).toBeNull();
     expect(maps[0].remove).toHaveBeenCalledTimes(1);
-    tiles.forEach((tile) => expect(tile.remove).toHaveBeenCalledTimes(1));
+    // 底图瓦片随 map.remove 统一释放（共享底图模块口径），不再逐瓦片 remove；此处确认未曾重复挂载
+    tiles.forEach((tile) => expect(tile.addTo).toHaveBeenCalledTimes(1));
     firstGroups.forEach((group) => expect(group.clearLayers).toHaveBeenCalled());
     zoneApi.getMap.mockResolvedValue([zone("NEW")]);
     state.openCreate();
@@ -320,7 +340,8 @@ describe("片区地图生命周期与异步详情回归", () => {
     await pending;
     await flushView();
     expect(maps[0].remove).toHaveBeenCalledTimes(1);
-    tiles.forEach((tile) => expect(tile.remove).toHaveBeenCalledTimes(1));
+    // 底图瓦片随 map.remove 统一释放（共享底图模块口径），不再逐瓦片 remove；此处确认未曾重复挂载
+    tiles.forEach((tile) => expect(tile.addTo).toHaveBeenCalledTimes(1));
     groups.forEach((group) => expect(group.clearLayers).toHaveBeenCalled());
     expect(groups).toHaveLength(count);
     expect(state.members).toEqual([]);
