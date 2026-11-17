@@ -36,7 +36,7 @@
         type="button"
         class="basemap-switch__box"
         :class="{ 'basemap-switch__box--on': boxMode }"
-        :title="boxMode ? '退出框选放大' : '框选放大：在地图上拖出矩形，松开即放大到该区域'"
+        :title="boxMode ? '退出框选放大（Esc）' : '框选放大：拖出矩形松开即放大到该区域；一次性工具，Esc 取消'"
         @click="toggleBox"
       >框选</button>
     </div>
@@ -129,6 +129,7 @@ function onSlider(e: Event) {
 }
 
 // ---------- 框选放大：拖矩形自定义放大区域；期间捕获 click 抑制绘制态误加顶点 ----------
+// 一次性工具：松开即退出并恢复拖移/双击缩放，避免停留框选态把地图拖移误当画矩形（"只能缩放不能移动"）
 const boxMode = ref(false)
 let boxCleanup: (() => void) | null = null
 
@@ -147,6 +148,11 @@ function startBox() {
   const container = m.getContainer() as HTMLElement
   const prevCursor = container.style.cursor
   container.style.cursor = 'crosshair'
+  // 地图内浮提示：明示一次性语义与退出键，避免拖移被禁用期间误以为地图卡死
+  const hint = document.createElement('div')
+  hint.style.cssText = 'position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:650;pointer-events:none;padding:4px 10px;border-radius:4px;background:rgba(7,25,48,.85);color:#7fe7ff;font-size:12px;white-space:nowrap;'
+  hint.textContent = '框选放大：拖出矩形松开即放大 · Esc 取消'
+  container.appendChild(hint)
   let start: any = null
   let rect: HTMLDivElement | null = null
   const suppressClick = (e: Event) => e.stopPropagation()
@@ -179,16 +185,32 @@ function startBox() {
     const a = start
     start = null
     if (wide) m.fitBounds(L.latLngBounds(m.containerPointToLatLng(a), m.containerPointToLatLng(end)), { padding: [16, 16] })
+    stopBox()
+  }
+  const cancel = () => {
+    rect?.remove()
+    rect = null
+    start = null
+    stopBox()
+  }
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') cancel()
   }
   container.addEventListener('mousedown', down)
   window.addEventListener('mousemove', move)
   window.addEventListener('mouseup', up)
+  window.addEventListener('keydown', onKey)
+  // 拖拽中切走窗口（alt-tab 等）mouseup 不会落回本页：失焦即取消，防矩形与禁用态残留
+  window.addEventListener('blur', cancel)
   boxCleanup = () => {
     container.removeEventListener('click', suppressClick, true)
     container.removeEventListener('mousedown', down)
     window.removeEventListener('mousemove', move)
     window.removeEventListener('mouseup', up)
+    window.removeEventListener('keydown', onKey)
+    window.removeEventListener('blur', cancel)
     rect?.remove()
+    hint.remove()
     container.style.cursor = prevCursor
     m.dragging.enable()
     m.doubleClickZoom.enable()

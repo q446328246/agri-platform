@@ -709,6 +709,12 @@
 - **测试同步**：zone 回归 spec 桩补 `baseMapMaxZoom`/`createBaseLayer`/google-img 组与 map mock 的 `setMaxZoom/getZoom/getCenter`；BaseMapSwitch 桩 props 增 `map`。
 - **交付与部署**：按长期口径功能提交后未跑单测/构建即推送；随后用户点名「构建部署」，`docker compose --profile app up -d --build` 重建 app/edge 双目标镜像（278.5s，前端 vite 步骤随新源码重跑 26.5s），postgres/minio/app Healthy、edge Up；`.runtime/verify-edge-basemap.mjs` 判别标记换本批新增物后只读核验 5 项 PASS（递归扫 39 个 chunk 含 `basemap-switch__slider`/`agri-basemap-custom`/谷歌瓦片 URL，网关 401 为未带 token 预期）。浏览器可见：五处地图谷歌影像 20–22 级真实细节、自定义源对话框与精确缩放条/框选放大。
 
+### 2026-11-17（续六）：框选放大一次性化——修复「地图只能缩放不能移动」
+
+- **问题**：用户反馈部署后地图只能放大缩小、不能拖移。根因：框选放大松开后仍停留框选态（`dragging` 保持禁用），其后每次拖拽都被当作画矩形（>8px 还会 fitBounds 跳视野），滚轮/步进缩放不受影响，故表现为「只能缩放不能移动」；退出需再点「框选」按钮，语义不直观。
+- **修复**：`BaseMapSwitch.vue` 框选改一次性工具——mouseup 完成放大（或空点击）后立即 `stopBox()` 恢复拖移与双击缩放；Esc 与窗口失焦（alt-tab 拖拽中切走）取消并退出，防矩形与禁用态残留；激活期间地图内底部浮提示「框选放大：拖出矩形松开即放大 · Esc 取消」（pointer-events:none 不挡操作）；按钮 title 同步一次性语义。监听器（keydown/blur）随 cleanup 全量移除，地图重建 watch 仍统一 stopBox。
+- **交付口径**：按长期约定未跑单测/构建/浏览器实操，未重建镜像（线上仍为续五 bundle，修复需重建部署后生效，用户点名即执行）；静态复核监听器增删配对与 stopBox 幂等。
+
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
 > 口径：A 类是不依赖外部条件、可在现有代码上补齐的功能缺口；B 类依赖现场硬件 / 第三方系统 / 算法服务，与「下一步」第 10 条既有口径一致；C 类是已文档化的刻意架构偏差，不是漏实现。每条均经代码核实，不臆造。
