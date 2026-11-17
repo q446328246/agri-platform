@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: scripts
-title: agri-platform 运维与冒烟脚本集
+title: 运维与冒烟测试脚本集
 scope:
     - scripts/
 source_files: []

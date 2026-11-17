@@ -1,3 +1,5 @@
+基于我对代码的分析，我现在了解了具体的变更内容。Dockerfile中确实修复了PostgreSQL客户端版本兼容性问题，从PGDG官方源安装postgresql-client-16以匹配postgis/postgis:16-3.5服务器版本。让我更新Docker编排文档：
+
 # Docker编排
 
 <cite>
@@ -12,6 +14,8 @@
 - [infra/postgres/001_initial_schema.sql](file://infra/postgres/001_initial_schema.sql)
 - [apps/file-service/src/main.ts](file://apps/file-service/src/main.ts)
 - [scripts/init-minio.mjs](file://scripts/init-minio.mjs)
+- [scripts/backup-system.mjs](file://scripts/backup-system.mjs)
+- [scripts/restore-system.mjs](file://scripts/restore-system.mjs)
 </cite>
 
 ## 更新摘要
@@ -21,6 +25,7 @@
 - 增强docker-compose配置以支持完整的应用部署
 - 更新架构图以反映新的边缘层和服务编排
 - 添加边缘服务配置和安全最佳实践说明
+- **新增** PostgreSQL客户端版本兼容性修复，确保pg_dump/pg_restore工具与数据库版本匹配
 
 ## 目录
 1. [简介](#简介)
@@ -67,12 +72,12 @@ MINIO --- VMINIO
 ```
 
 **图表来源**
-- [infra/docker-compose.yml:1-104](file://infra/docker-compose.yml#L1-L104)
-- [Dockerfile:1-63](file://Dockerfile#L1-L63)
+- [infra/docker-compose.yml:1-124](file://infra/docker-compose.yml#L1-L124)
+- [Dockerfile:1-75](file://Dockerfile#L1-L75)
 
 章节来源
-- [infra/docker-compose.yml:1-104](file://infra/docker-compose.yml#L1-L104)
-- [Dockerfile:1-63](file://Dockerfile#L1-L63)
+- [infra/docker-compose.yml:1-124](file://infra/docker-compose.yml#L1-L124)
+- [Dockerfile:1-75](file://Dockerfile#L1-L75)
 - [infra/README.md:37-75](file://infra/README.md#L37-L75)
 
 ## 核心组件
@@ -88,7 +93,7 @@ MINIO --- VMINIO
 **更新** 新增双目标构建支持，简化部署流程
 
 章节来源
-- [Dockerfile:1-63](file://Dockerfile#L1-L63)
+- [Dockerfile:1-75](file://Dockerfile#L1-L75)
 
 ### PostgreSQL服务
 - 镜像：postgis/postgis:16-3.5
@@ -120,8 +125,8 @@ MINIO --- VMINIO
 **更新** 新增应用服务，支持单容器多服务架构
 
 章节来源
-- [infra/docker-compose.yml:1-104](file://infra/docker-compose.yml#L1-L104)
-- [Dockerfile:31-48](file://Dockerfile#L31-L48)
+- [infra/docker-compose.yml:1-124](file://infra/docker-compose.yml#L1-L124)
+- [Dockerfile:31-60](file://Dockerfile#L31-L60)
 
 ### 边缘服务（Edge Service）
 - 镜像：agri-platform-edge:local（自定义构建）
@@ -135,8 +140,8 @@ MINIO --- VMINIO
 **更新** 新增边缘服务，提供安全的HTTPS访问入口
 
 章节来源
-- [infra/docker-compose.yml:83-100](file://infra/docker-compose.yml#L83-L100)
-- [infra/edge/nginx.conf:1-77](file://infra/edge/nginx.conf#L1-L77)
+- [infra/docker-compose.yml:103-119](file://infra/docker-compose.yml#L103-L119)
+- [infra/edge/nginx.conf:1-82](file://infra/edge/nginx.conf#L1-L82)
 
 ## 架构总览
 完整的三层架构设计，从外到内依次为边缘层、应用层和基础设施层：
@@ -166,7 +171,7 @@ Edge-->>Client : HTTPS响应
 ```
 
 **图表来源**
-- [infra/docker-compose.yml:1-104](file://infra/docker-compose.yml#L1-L104)
+- [infra/docker-compose.yml:1-124](file://infra/docker-compose.yml#L1-L124)
 - [infra/edge/nginx.conf:52-63](file://infra/edge/nginx.conf#L52-L63)
 - [apps/gateway-service/src/main.ts:12-30](file://apps/gateway-service/src/main.ts#L12-L30)
 
@@ -190,7 +195,42 @@ Edge-->>Client : HTTPS响应
 **更新** 新增双目标构建逻辑，优化镜像大小和安全性
 
 章节来源
-- [Dockerfile:31-63](file://Dockerfile#L31-L63)
+- [Dockerfile:31-75](file://Dockerfile#L31-L75)
+
+### PostgreSQL客户端版本兼容性修复
+
+**重要更新** 已修复PostgreSQL客户端版本兼容性问题，确保系统备份和恢复功能正常工作。
+
+#### 问题背景
+- PostgreSQL服务器版本：postgis/postgis:16-3.5（PostgreSQL 16）
+- Debian bookworm默认源只提供PG15客户端
+- 使用PG15客户端dump PG16数据库会导致server version mismatch错误
+- 备份过程中断，导致数据库分片丢失
+
+#### 解决方案
+从PGDG（PostgreSQL Global Development Group）官方源安装postgresql-client-16：
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client-16 \
+ && rm -rf /var/lib/apt/lists/*
+```
+
+#### 影响范围
+- 系统备份功能：`scripts/backup-system.mjs`
+- 系统恢复功能：`scripts/restore-system.mjs`
+- 容器内直接连接PostgreSQL进行物理备份与恢复
+
+**更新** 新增PostgreSQL客户端版本兼容性修复，解决pg_dump的server version mismatch错误
+
+章节来源
+- [Dockerfile:46-56](file://Dockerfile#L46-L56)
+- [scripts/backup-system.mjs:203-255](file://scripts/backup-system.mjs#L203-L255)
+- [scripts/restore-system.mjs:120-184](file://scripts/restore-system.mjs#L120-L184)
 
 ### 边缘服务配置详解
 
@@ -210,7 +250,7 @@ Edge-->>Client : HTTPS响应
 **更新** 新增完整的边缘服务配置，提供企业级安全特性
 
 章节来源
-- [infra/edge/nginx.conf:1-77](file://infra/edge/nginx.conf#L1-L77)
+- [infra/edge/nginx.conf:1-82](file://infra/edge/nginx.conf#L1-L82)
 
 ### 应用服务编排详解
 
@@ -256,7 +296,7 @@ end
 ```
 
 **图表来源**
-- [infra/docker-compose.yml:1-104](file://infra/docker-compose.yml#L1-L104)
+- [infra/docker-compose.yml:1-124](file://infra/docker-compose.yml#L1-L124)
 
 ### 端口映射与服务暴露
 | 服务 | 容器端口 | 宿主机端口 | 访问方式 |
@@ -278,7 +318,7 @@ end
 **更新** 新增边缘服务端口映射和环境变量配置
 
 章节来源
-- [infra/docker-compose.yml:46-81](file://infra/docker-compose.yml#L46-L81)
+- [infra/docker-compose.yml:46-119](file://infra/docker-compose.yml#L46-L119)
 
 ## 健康检查、持久化与重启策略
 
@@ -304,8 +344,8 @@ end
 章节来源
 - [infra/docker-compose.yml:13-17](file://infra/docker-compose.yml#L13-L17)
 - [infra/docker-compose.yml:30-34](file://infra/docker-compose.yml#L30-L34)
-- [infra/docker-compose.yml:74-81](file://infra/docker-compose.yml#L74-L81)
-- [infra/docker-compose.yml:93-96](file://infra/docker-compose.yml#L93-L96)
+- [infra/docker-compose.yml:94-101](file://infra/docker-compose.yml#L94-L101)
+- [infra/docker-compose.yml:113-116](file://infra/docker-compose.yml#L113-L116)
 
 ## 资源限制、日志与安全最佳实践
 
@@ -387,11 +427,16 @@ logging:
 **更新** 新增边缘服务相关的自定义和扩展指南
 
 章节来源
-- [Dockerfile:1-63](file://Dockerfile#L1-L63)
-- [infra/edge/nginx.conf:1-77](file://infra/edge/nginx.conf#L1-L77)
+- [Dockerfile:1-75](file://Dockerfile#L1-L75)
+- [infra/edge/nginx.conf:1-82](file://infra/edge/nginx.conf#L1-L82)
 - [scripts/service-registry.mjs:1-22](file://scripts/service-registry.mjs#L1-L22)
 
 ## 故障排查
+
+### PostgreSQL客户端版本问题
+- **pg_dump server version mismatch错误**：确认Dockerfile中已正确安装postgresql-client-16
+- **备份失败**：检查容器内是否安装了正确的PostgreSQL客户端版本
+- **恢复失败**：验证pg_restore工具版本与数据库版本匹配
 
 ### 边缘服务问题
 - **HTTPS证书错误**：检查/etc/nginx/tls目录下的证书文件
@@ -413,13 +458,14 @@ logging:
 - **端口映射冲突**：检查宿主机端口占用情况
 - **防火墙拦截**：确认防火墙允许相应端口访问
 
-**更新** 新增边缘服务相关的故障排查指南
+**更新** 新增PostgreSQL客户端版本问题和边缘服务相关的故障排查指南
 
 章节来源
 - [infra/README.md:65-75](file://infra/README.md#L65-L75)
+- [Dockerfile:46-56](file://Dockerfile#L46-L56)
 
 ## 结论
-通过增强的Docker编排方案，智慧农业平台实现了完整的三层架构：边缘层提供安全的HTTPS访问入口，应用层通过单容器多服务架构简化部署，基础设施层确保数据存储的可靠性和高性能。双目标Dockerfile提供了灵活的构建选项，边缘服务增强了安全性和用户体验。建议在后续迭代中继续完善监控、日志管理和自动化部署流程，进一步提升系统的可运维性和可扩展性。
+通过增强的Docker编排方案，智慧农业平台实现了完整的三层架构：边缘层提供安全的HTTPS访问入口，应用层通过单容器多服务架构简化部署，基础设施层确保数据存储的可靠性和高性能。双目标Dockerfile提供了灵活的构建选项，边缘服务增强了安全性和用户体验。**PostgreSQL客户端版本兼容性修复确保了系统备份和恢复功能的可靠性**。建议在后续迭代中继续完善监控、日志管理和自动化部署流程，进一步提升系统的可运维性和可扩展性。
 
 该方案特别适用于以下场景：
 - 本地开发和测试环境快速搭建
@@ -427,3 +473,4 @@ logging:
 - 需要HTTPS支持的Web应用
 - 微服务架构的统一入口管理
 - 数据持久化和高可用要求较高的业务场景
+- 需要可靠数据库备份和恢复的企业级应用
