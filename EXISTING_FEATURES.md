@@ -8,7 +8,8 @@
 
 - **技术栈**：pnpm workspace + Turborepo；后端为多个 Node/TypeScript HTTP 服务，前端为 `apps/web`（Vue 3 + Element Plus + ECharts + Vite）。
 - **服务规模**：`apps/` 下 15 个 HTTP 服务，加 `apps/web` 前端；`packages/` 下 9 个共享包。
-- **数据层**：PostgreSQL + PostGIS，统一通过 `@agri/db` 的 `PrismaClientLike` 跑**原生 SQL**（`$queryRawUnsafe` / `$executeRawUnsafe`），迁移为 `infra/postgres/migrations/` 下编号 SQL 文件（当前到 `039`），**无 Prisma schema**。
+- **数据层**：PostgreSQL + PostGIS，统一通过 `@agri/db` 的 `PrismaClientLike` 跑**原生 SQL**（`$queryRawUnsafe` / `$executeRawUnsafe`），迁移为 `infra/postgres/migrations/` 下编号 SQL 文件（当前到 `045`），**无 Prisma schema**。
+- **演示数据集**：迁移 `044`–`045` 按卫星底图（Esri z17 瓦片目视解译）重置地块/管线测试数据——13 块小田（1.25~3.85 亩，类型/状态四样齐备）、7 条管线（机耕道/灌溉/电力/通信）、2 个片区；旧 010 大尺度示范与页面手绘残留整体清除，设备/任务/财务/溯源/遥测等业务历史按映射改挂新地块、零悬空引用。
 - **部署**：`Dockerfile` 两阶段目标 `app`（15 个服务）与 `edge`（nginx）；`infra/docker-compose.yml` 用 `--profile app` 拉起 postgres / minio / app / edge。
 
 ### 共享包

@@ -6,7 +6,7 @@
 
 - 更新时间：2026-11-17
 - 当前阶段：全量验证与交付
-- 总体状态：首版交付完成（待验收）；2026-11-17 完成需求差距审计，代码侧缺口见「未完成功能清单」；同日补齐核心业务闭环批 6 项（A3 忽略 / A4 导出 / A5 优先级与冲突提示 / A6 自动停灌 / A9 流转 / A16 审计留存，迁移 040–043 已应用，镜像已重建部署并只读冒烟通过）
+- 总体状态：首版交付完成（待验收）；2026-11-17 完成需求差距审计，代码侧缺口见「未完成功能清单」；同日补齐核心业务闭环批 6 项（A3 忽略 / A4 导出 / A5 优先级与冲突提示 / A6 自动停灌 / A9 流转 / A16 审计留存，迁移 040–043 已应用，镜像已重建部署并只读冒烟通过）；同日按用户点名完成地块/管线测试数据重置（迁移 044–045 已应用：13 块 1.25~3.85 亩小田 / 7 条管线 / 2 片区按卫星底图重划，业务引用改挂零悬空）
 - 当前主线：事件日志总线打通跨进程链路，处方效果回流调优规则，系统管理用户/角色已落库，越限/处方事件已驱动控制指令与生产档案，消息中心按订阅偏好过滤并按来源主题去重，网关与服务侧已按角色权限拦截接口，控制指令来源与生产档案事件类型已在前端展示并可筛选；登录会话已落 `auth_sessions`、口令改为 scrypt 并支持滑动续期；已完成本机容器化部署（`app` + `edge`，HTTPS 443）并逐接口复验；四情监控（苗情/虫情/灾情/阈值规则）、视频 AI 识别联动、水肥配比与变量灌溉曲线、一张图管网图层已补齐并通过冒烟；片区台账（`plot_zones`）、田间导航（机耕道沿路里程）与一张图片区图层已补齐，需求矩阵仅「智能决策」保留「部分完成」（决策侧未内置图像识别模型，属外部依赖）；全页面演示数据已就位（`010_demo_data.sql` 落库 + iot/video/operation/finance 服务种子）；地块档案字段（类型/状态/当前作物/负责人，`011_plot_profile.sql`）已落库，地块/设备/任务/指令/核算/溯源/视频/四情/消息等页面统一「关键词+枚举+时间区间+重置+分页」查询条并全部下沉服务端，`pnpm smoke:filters` 38 项条件查询冒烟通过；气象服务升级为完整微服务（`weather-service` 7 个 REST 端点、SQL/内存双模式、`012_weather_forecast.sql` 三张表），决策服务处方生成自动从 weather 取降雨概率参与规则求值，前端新增「气象服务」独立页面，`pnpm smoke:weather` 13 项天气冒烟通过
 
 ## 规格来源
@@ -680,6 +680,17 @@
 - **范围口径**：只改一张图驾驶舱；地块详情/边界编辑/片区/导航页仍为天地图影像双瓦片，如需同等待遇另行排期。高德/Esri 均依赖外网，现场网络受限时切回天地图。
 - **验证**：`utils/gcj02.ts` 经 `.runtime/verify-gcj.mjs` 实测（正算偏移约 0.0047°/-0.0022° 符合百米级预期、往返误差 0、高德两类瓦片 200）；镜像内 `vue-tsc -b && vite build` 随构建通过；重建 `agri-platform:local` 并 `up -d` 部署。浏览器实操留待用户验收。
 
+### 2026-11-17（续三）：地块/管线测试数据重置（迁移 `044`–`045`，按卫星底图重划）
+
+- **背景**：用户点名旧演示地块太大（迁移 010 单块 70~110 亩，另有页面手绘残留），与丘陵实景梯田尺度不符；要求删除全部旧地块/管线数据、按最新卫星底图重新生成测试数据。
+- **解译来源**：下载厂区周边 Esri World Imagery z16/z17 瓦片（`.runtime/tiles/`，WGS84 原生切片，瓦片角点坐标即入库坐标，无 GCJ 换算环节），目视解译田块边界：北坡梯田/台地、塘边东片矩形田、山坪塘。生成脚本 `.runtime/gen-reset-migration.mjs` 保留坐标与口径来源。
+- **迁移 044**：整体清除 `plot_records`/`infra_lines`/`plot_zones`/`plot_change_logs`（含软删行与旧留痕）；重建 **13 块小田（1.25~3.85 亩）**、**7 条管线（151~501m：机耕道 2 / 灌溉 3 / 电力 1 / 通信 1）**、**2 个片区**（北坡梯田片 / 塘边东片）；面积按边界几何 `polygonAreaMu` 现算、长度 haversine 现算、编码校验位走 `buildPlotCode`；主键 `plot-demo-1xx` 形态 + `ON CONFLICT DO NOTHING`（database.md 演示数据约定）；类型四样（FIELD/GREENHOUSE/ORCHARD/AQUACULTURE）与状态四样（ACTIVE/FALLOW/ARCHIVED/DRAFT）齐备供筛选。
+- **业务引用改挂**：设备绑定/农事任务/财务/溯源/遥测/告警/处方/指令的历史行不删除，经会话级临时表按旧→新轮转映射改挂（处方同步更新 `plot_name`），八张表引用零悬空；平台审计日志不动。
+- **迁移 045**：清 `smoke-events` 旧版清理清单遗漏的哨兵编码 `P-SMOKE-EVENTS` 悬空残留（trace/control 两表）；脚本清理清单同步补齐这两表，防再犯。
+- **工具同步**：`seed-test-plots.mjs` 改为 044 数据集三块样例田的幂等维护（同名同边界就地 PUT），守护口径改为 13 块重置地块必须都在；`smoke-demo-data.mjs` 编码与阈值同步（片区 2 / 管线 7），账号节改自适应口径（页面改密/启用记 WARN 不判 FAIL）；`smoke-weather.mjs` 联动编码同步。单测不受影响（测试库为假客户端 + 内存模式，不走真实迁移）。
+- **验证**：`.runtime/verify-044.mjs` 18 项全 PASS（数量/面积/长度/类型/状态/片区归属/八表引用无悬空/设备绑定保留）；`smoke-demo-data` 37 项（33 PASS + 4 WARN，WARN 均为 11-12 页面运维演示账号所致，与重置无关）；`seed-test-plots` 幂等复跑通过。**无应用代码改动，不需重建镜像**（SQL 模式实时读库）。
+- **已知漂移**：演示账号口令 2026-11-12 被页面改过、temp01 被启用（auth 表非 044/045 所动），种子口令 demo123 已失效；如需恢复待用户点名。
+
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
 > 口径：A 类是不依赖外部条件、可在现有代码上补齐的功能缺口；B 类依赖现场硬件 / 第三方系统 / 算法服务，与「下一步」第 10 条既有口径一致；C 类是已文档化的刻意架构偏差，不是漏实现。每条均经代码核实，不臆造。
@@ -1080,3 +1091,6 @@
 | 2026-11-12 | 控制指令回执状态机（迁移 `031` + `control.repository.ts` 跃迁/乐观锁 + `/control/device/dispatch\|receipt` + 网关两条回调路由 + `Commands.vue` 生命周期列与回执弹窗 + `receipt.spec.ts`） | 当时**未跑验证**（按 2026-11-11 起的交付口径），迁移也未应用。静态核对项：`SENT/ACKED/DONE`  CHECK 与 `PENDING_STATUSES`/`TRANSITIONS` 一致、`create` 的两处调用方（`http.ts`/`consumer.ts`）都补了必填 `version: 1`、`canTransition` 对未知状态返回 false、`callbackPaths` 用扁平 `/device` 不与 `/commands` 构成前缀关系、`smoke-consumers`/`smoke-gateway` 仍断言 `QUEUED` 未受影响、超时分钟数按 `COALESCE(acked,sent,created)` 手算复核（40/2/30 与终态四条 → overdue 命中 `cmd-old`+`cmd-sent`）。~~风险点：SQL 侧 `transition` 的 `CASE`/`COALESCE` 参数序未经真实库执行~~（本轮已按「2 验证」跑全量并落库复验，见下面两行） |
 | 2026-11-12 | 本轮（现场硬件协议）批量验证：`pnpm run build` + `npx vitest run` 全量 + `vue-tsc -b --force` | **用户临时恢复验证**（长期口径仍是「不跑测试」，仅本批次有效）：`tsc -b` exit 0；全量 vitest **90 passed / 9 skipped 文件，651 passed / 18 skipped 用例，0 失败**（含 iot 网关 10 项、`http.spec.ts` 14 项、新增前端 `device-field-access.spec.ts` 6 项）；`vue-tsc -b --force` exit 0 |
 | 2026-11-12 | `node scripts/smoke-device-protocol.mjs`（新 `pnpm smoke:protocol`）+ 复跑 `smoke-command-receipt` / `smoke-events` / `smoke-consumers` | 现场协议冒烟 **SMOKE PASS**（8.3 秒，独立假从站 + 真实 TCP + 真实演示库八段闭环）；三条既有冒烟同轮全 PASS，回执链路未因网关闭环回归。**演示库零残留**：`devices` 无 `DZ-SMOKE%` 行、`P-SMOKE-PROTOCOL` 指令与 `control_outbox` 均为 0，基线未动（地块 23 / 1271.07 亩、事件 46、指令 28、任务 8）。未做：镜像重建与部署（长期口径保持不变） |
+| 2026-11-17 | 迁移 `044_reset_plots_lines.sql` + `045_smoke_residue_cleanup.sql` 应用（用户点名重置） | 已应用（118ms / 8ms）；旧地块域 27 行地块 / 16+ 管线 / 5 片区整体清除，重建 13 块小田 / 7 管线 / 2 片区 |
+| 2026-11-17 | `node .runtime/verify-044.mjs` | **18 项全 PASS**：13 块无软删、面积 ≤3.85 亩、管线 ≤500.58m、类型/状态四样齐备、片区归属完整、八张业务表引用零悬空、11 台设备绑定保留 |
+| 2026-11-17 | `node scripts/smoke-demo-data.mjs` + `node scripts/seed-test-plots.mjs` | 冒烟 **37 项通过**（33 PASS + 4 WARN：演示账号 11-12 页面改密/启用所致，与重置无关）；维护脚本幂等复跑「清理 0 块、3 块样例田就地更新、13 块重置数据完好」 |

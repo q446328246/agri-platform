@@ -1,5 +1,5 @@
 /**
- * 测试数据重置：清掉早期在地图上点出来的验证地块，再按「面积 = 边界几何」重建一组测试地块。
+ * 测试数据维护：对迁移 044 重置数据集中的三块样例田做幂等重断言（同名同边界就地 PUT）。
  *
  * 用法：
  *   pnpm seed:test-plots                                      # 默认 https://localhost
@@ -8,9 +8,10 @@
  * 约定：
  * 1. 只走网关真实接口，与前端建档/编辑是同一条路径，落库结果就是页面上看到的结果；
  * 2. 面积一律用 @agri/shared 的 polygonAreaMu 现算，不写死申报值（口径见 packages/shared/src/area.ts）；
- * 3. 可重复执行：同名测试地块就地更新，不再新建档。plot_records 的 parcel_code 唯一约束不区分软删行，
- *    删掉再用同一编码建档会撞约束，所以重跑走 PUT；只有首次建档才申请新的编码段；
- * 4. 只动测试地块，迁移 010 的示范数据（parcel 段 00001~00012）不碰；
+ * 3. 可重复执行：样例田与迁移 044 同名同边界，重跑走 PUT 幂等更新；plot_records 的 parcel_code
+ *    唯一约束不区分软删行，删掉再用同一编码建档会撞约束，所以重跑走 PUT；只有首次建档才申请新的编码段；
+ * 4. 守护口径：迁移 044 重置后的 13 块小田（parcel 段 00001~00013）必须都在，缺失即报错；
+ *    旧迁移 010 的大尺度示范数据已被 044 整体清除，不再守护；
  * 5. 清理走接口即软删，与页面「删除」按钮一致，不做物理清理。
  */
 import { polygonAreaMu, roundAreaMu } from "../packages/shared/dist/index.js";
@@ -24,67 +25,57 @@ if (BASE.startsWith("https:") && ["localhost", "127.0.0.1", "[::1]"].includes(ne
 
 const NAME_PREFIX = "测试地块";
 const FARM_ID = "farm-kaijiang-01";
-const REMARK = "测试数据，由 scripts/seed-test-plots.mjs 生成，面积按边界几何现算";
-/** 早期验证残留的名称无规律（测试 / 地块14 / 地块15），只能按编码点名清理 */
-const LEGACY_CODES = [
-  "511723-000001-01-54813-0000-A",
-  "511723-000001-01-04211-0000-I",
-  "511723-000001-01-09721-0000-M",
-];
-/** 迁移 010 的示范地块编码段，重置前后都必须还在 */
-const DEMO_PARCELS = Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(5, "0"));
+const REMARK = "测试数据：按 2026-11 卫星底图目视解译生成，面积按边界几何现算（迁移 044）";
+/** 迁移 044 已整体清除旧编码，此处不再点名清理；保留空清单维持清理逻辑形状 */
+const LEGACY_CODES = [];
+/** 迁移 044 重置地块编码段，重置前后都必须还在 */
+const RESET_PARCELS = Array.from({ length: 13 }, (_, index) => String(index + 1).padStart(5, "0"));
 
 /**
- * 三块形状各异的测试田，都落在示范田南侧的空白带（纬度 ≤ 30.9784），
- * 不与迁移 010 的边界重叠；顶点为 CGCS2000 [经度, 纬度]，首尾闭合。
+ * 三块样例田取自迁移 044 重置数据集（同名同边界），重跑即幂等重断言；
+ * 顶点为 CGCS2000 [经度, 纬度]，首尾闭合，与 044_reset_plots_lines.sql 保持一致。
  */
 const TEST_PLOTS = [
   {
-    parcelName: `${NAME_PREFIX}一号`,
-    soilType: "LOAM",
+    parcelName: "北坡梯田一号",
+    soilType: "CLAY",
     plotType: "FIELD",
     plotStatus: "ACTIVE",
     currentCrop: "水稻",
     ring: [
-      [107.4155, 30.9762],
-      [107.4169, 30.9756],
-      [107.4182, 30.9761],
-      [107.4184, 30.9775],
-      [107.417, 30.9782],
-      [107.4157, 30.9776],
-      [107.4155, 30.9762],
+      [107.42259, 30.98613],
+      [107.42298, 30.98616],
+      [107.42302, 30.98596],
+      [107.42263, 30.98593],
+      [107.42259, 30.98613],
     ],
   },
   {
-    parcelName: `${NAME_PREFIX}二号`,
+    parcelName: "塘边梯田一号",
     soilType: "CLAY",
     plotType: "FIELD",
     plotStatus: "ACTIVE",
-    currentCrop: "玉米",
+    currentCrop: "水稻",
     ring: [
-      [107.4205, 30.9764],
-      [107.425, 30.9762],
-      [107.4251, 30.9769],
-      [107.4206, 30.9771],
-      [107.4205, 30.9764],
+      [107.42561, 30.98630],
+      [107.42610, 30.98634],
+      [107.42615, 30.98610],
+      [107.42566, 30.98607],
+      [107.42561, 30.98630],
     ],
   },
   {
-    parcelName: `${NAME_PREFIX}三号`,
-    soilType: "SAND",
-    plotType: "ORCHARD",
-    plotStatus: "FALLOW",
-    currentCrop: "柑橘",
+    parcelName: "北坡台地一号",
+    soilType: "CLAY",
+    plotType: "FIELD",
+    plotStatus: "ACTIVE",
+    currentCrop: "水稻",
     ring: [
-      [107.4274, 30.9758],
-      [107.4284, 30.9753],
-      [107.4294, 30.9757],
-      [107.4297, 30.9765],
-      [107.4293, 30.9773],
-      [107.4283, 30.9776],
-      [107.4274, 30.9771],
-      [107.4271, 30.9764],
-      [107.4274, 30.9758],
+      [107.42221, 30.98838],
+      [107.42276, 30.98842],
+      [107.42280, 30.98813],
+      [107.42225, 30.98810],
+      [107.42221, 30.98838],
     ],
   },
 ];
@@ -120,8 +111,8 @@ async function listPlots() {
 }
 
 function assertDemoIntact(plots, label) {
-  const missing = DEMO_PARCELS.filter((parcel) => !plots.some((plot) => plot.parcelCode?.split("-")[3] === parcel));
-  if (missing.length) throw new Error(`${label}后示范地块缺失: ${missing.join(", ")}`);
+  const missing = RESET_PARCELS.filter((parcel) => !plots.some((plot) => plot.parcelCode?.split("-")[3] === parcel));
+  if (missing.length) throw new Error(`${label}后重置地块缺失: ${missing.join(", ")}`);
 }
 
 /** 建档 body：面积由边界现算，其余档案字段与前端编辑页一致 */
@@ -138,7 +129,7 @@ function plotBody(spec, areaMu) {
   };
 }
 
-/** 首次建档才需要编码段：取 90000 以上的高段，避开示范数据的 00001~00012 */
+/** 首次建档才需要编码段：取 90000 以上的高段，避开重置数据的 00001~00013 */
 async function register(spec, areaMu) {
   const start = 90000 + (Date.now() % 9000);
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -197,7 +188,7 @@ async function main() {
   if (after.some((plot) => LEGACY_CODES.includes(plot.parcelCode))) throw new Error("遗留测试地块未清理干净");
 
   const detail = results.map((item) => `${item.parcelName} ${item.vertices} 顶点 ${item.areaMu} 亩(${item.action})`).join("、");
-  console.log(`测试数据重置完成: 清理 ${stale.length} 块；${detail}；活地块 ${after.length} 块，示范数据 12 块完好`);
+  console.log(`测试数据维护完成: 清理 ${stale.length} 块；${detail}；活地块 ${after.length} 块，迁移 044 重置数据 13 块完好`);
 }
 
 main().catch((error) => {

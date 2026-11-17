@@ -80,6 +80,9 @@ async function cleanData() {
     await client.query("DELETE FROM decision_outbox WHERE payload_json->>'parcelId' = $1", [PLOT]);
     await client.query("DELETE FROM decision_prescription_outcomes WHERE plot_code = $1", [PLOT]);
     await client.query("DELETE FROM decision_prescriptions WHERE plot_code = $1", [PLOT]);
+    // 消费端联动写入的溯源/指令行也要清，否则留下悬空地块引用
+    await client.query("DELETE FROM trace_records WHERE plot_code = $1", [PLOT]);
+    await client.query("DELETE FROM control_commands WHERE plot_code = $1", [PLOT]);
     if (ruleId) await client.query("DELETE FROM decision_rules WHERE id = $1", [ruleId]);
   } catch (error) {
     say(`清理告警：${error.message}`);

@@ -129,7 +129,7 @@ async function main() {
   // 12. 决策联动：生成处方时不传 rainProbability，决策应从 weather 取
   const rx = await fetch(`${API}/decision/prescriptions`, {
     method: "POST", headers: headers(),
-    body: JSON.stringify({ plotCode: "511723-000001-01-00001-0000-5", plotName: "联动测试", soilMoisture: 18 }),
+    body: JSON.stringify({ plotCode: "511723-000001-02-00001-0000-0", plotName: "联动测试", soilMoisture: 18 }),
   });
   const rxBody = await rx.json();
   if (rxBody?.data?.inputs?.rainProbabilitySource !== "weather") {
