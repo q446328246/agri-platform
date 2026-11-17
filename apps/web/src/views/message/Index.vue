@@ -40,6 +40,9 @@
           />
         </el-form-item>
         <el-form-item>
+          <el-checkbox v-model="query.showIgnored" @change="reload">只看已忽略</el-checkbox>
+        </el-form-item>
+        <el-form-item>
           <el-button type="primary" @click="reload">查询</el-button>
           <el-button @click="reset">重置</el-button>
           <el-button type="success" @click="openDialog">新建通知</el-button>
@@ -84,17 +87,21 @@
         <el-table-column label="来源" width="90">
           <template #default="{ row }">{{ row.sourceEventId ? '事件' : '手工' }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="80">
+        <el-table-column label="状态" width="90">
           <template #default="{ row }">
-            <el-tag :type="row.read ? 'info' : 'warning'" size="small">{{ row.read ? '已读' : '未读' }}</el-tag>
+            <el-tag v-if="row.ignored" type="info" size="small" effect="plain">已忽略</el-tag>
+            <el-tag v-else :type="row.read ? 'info' : 'warning'" size="small">{{ row.read ? '已读' : '未读' }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="100" fixed="right">
+        <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
-            <el-button v-if="!row.read" link type="primary" @click="markRead(row)">标记已读</el-button>
+            <template v-if="!row.ignored">
+              <el-button v-if="!row.read" link type="primary" @click="markRead(row)">标记已读</el-button>
+              <el-button link type="warning" @click="ignore(row)">忽略</el-button>
+            </template>
             <span v-else class="message-done">—</span>
           </template>
         </el-table-column>
@@ -188,7 +195,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { messageApi } from '@/api'
 import type { MessageLevel, MessagePreference, MessageQuery } from '@/api'
 import { formatDateTime } from '@/utils'
@@ -200,6 +207,7 @@ interface MessageRow {
   content: string
   level: 'INFO' | 'WARNING' | 'CRITICAL'
   read: boolean
+  ignored?: boolean
   plotCode?: string
   sourceEventId?: string
   createdAt: string
@@ -222,6 +230,7 @@ const query = reactive({
   keyword: '',
   level: '' as '' | 'INFO' | 'WARNING' | 'CRITICAL',
   range: null as [string, string] | null,
+  showIgnored: false,
 })
 
 const form = reactive({
@@ -277,13 +286,15 @@ function levelType(level: string): 'danger' | 'warning' | 'info' {
 }
 
 function selectable(row: MessageRow): boolean {
-  return !row.read
+  return !row.read && !row.ignored
 }
 
 function buildParams(): MessageQuery {
   const params: MessageQuery = { page: query.page, size: query.size }
   if (query.type) params.type = query.type
   if (query.read === 'true' || query.read === 'false') params.read = query.read === 'true'
+  // 缺省列表排除已忽略；勾选后只回查已忽略，与服务端同一口径
+  if (query.showIgnored) params.ignored = true
   const plotCode = query.plotCode.trim()
   if (plotCode) params.plotCode = plotCode
   const keyword = query.keyword.trim()
@@ -328,6 +339,7 @@ function reset(): void {
   query.keyword = ''
   query.level = ''
   query.range = null
+  query.showIgnored = false
   reload()
 }
 
@@ -340,6 +352,21 @@ async function markRead(row: MessageRow): Promise<void> {
   row.read = true
   ElMessage.success('已标记为已读')
   await refreshUnread()
+}
+
+/** 忽略 = 确认无需处置：顺带标已读并从缺省列表拿掉，记录保留，勾「只看已忽略」可回查 */
+async function ignore(row: MessageRow): Promise<void> {
+  try {
+    await ElMessageBox.confirm(`确认忽略「${row.title}」？忽略后不再出现在待办列表，记录仍保留可回查`, '忽略消息', { type: 'warning' })
+  } catch { return }
+  try {
+    await messageApi.markIgnored(row.id)
+    ElMessage.success('消息已忽略')
+    await load()
+  } catch (error) {
+    console.error('忽略消息失败', error)
+    await load()
+  }
 }
 
 async function readSelected(): Promise<void> {

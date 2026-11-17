@@ -6,7 +6,7 @@ import type { ApiResponse } from "@agri/contracts";
 import { PERMISSION_CATALOG } from "@agri/contracts";
 import { authorizeRequest } from "@agri/shared";
 
-import { InMemoryAuditRepository, InMemoryRoleRepository, seedRoles } from "./role.repository.js";
+import { InMemoryAuditRepository, InMemoryRoleRepository, MIN_AUDIT_RETENTION_DAYS, resolveAuditRetentionDays, seedRoles } from "./role.repository.js";
 import type { AuditRecord, AuditRepository, RoleRecord, RoleRepository } from "./role.repository.js";
 import { backupArchive, listBackups, readBackup, readBackupPart, removeBackup, runBackup, runRestore } from "./backup.js";
 
@@ -36,7 +36,7 @@ const PLATFORM_POLICY = {
   write: "system:role",
   publicPaths: ["/api/v1/internal/platform/role-permissions"],
   sessionPaths: ["/api/v1/platform/tenant", "/api/v1/platform/permissions"],
-  pathPermissions: [{ prefix: "/api/v1/platform/audit-logs", permission: "system:audit" }, { prefix: "/api/v1/platform/backups", permission: "system:backup" }],
+  pathPermissions: [{ prefix: "/api/v1/platform/audit-logs", permission: "system:audit" }, { prefix: "/api/v1/platform/audit-retention", permission: "system:audit" }, { prefix: "/api/v1/platform/backups", permission: "system:backup" }],
 };
 
 /** 内部接口凭证：网关与管理脚本使用，不经公网暴露 */
@@ -153,6 +153,12 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
     if (request.method === "GET" && url.pathname === "/api/v1/platform/audit-logs") {
       const keyword = text(url.searchParams.get("keyword"));
       send(response, 200, await audits.page({ tenantId: tenantOf(request), ...(keyword ? { keyword } : {}), ...pageOf(url.searchParams) }), traceId);
+      return;
+    }
+    // 审计留存策略：前端审计页展示「留存 N 天、到期自动清理」，口径与后台清理任务同一个解析函数
+    if (request.method === "GET" && url.pathname === "/api/v1/platform/audit-retention") {
+      const retentionDays = resolveAuditRetentionDays();
+      send(response, 200, { retentionDays, minRetentionDays: MIN_AUDIT_RETENTION_DAYS, purge: "expired-auto", env: "AUDIT_RETENTION_DAYS" }, traceId);
       return;
     }
     // 系统备份：清单读取、触发备份/恢复脚本、详情与删除

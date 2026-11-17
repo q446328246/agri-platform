@@ -7,6 +7,9 @@ import type { TaskChangeLog, TaskChangeLogRepository } from "./task-change-log.r
 
 export const TASK_TYPES = ["TILLAGE", "SEEDING", "IRRIGATION", "WEEDING", "SPRAYING", "FERTILIZATION"] as const;
 export const TASK_STATUSES = ["PENDING", "RUNNING", "COMPLETED", "CANCELLED"] as const;
+/** 任务优先级：HIGH 紧急 / NORMAL 常规（缺省）/ LOW 可延后，与迁移 042 的 CHECK 同源 */
+export const TASK_PRIORITIES = ["HIGH", "NORMAL", "LOW"] as const;
+export type TaskPriority = typeof TASK_PRIORITIES[number];
 /** 归档筛选：NONE 只看在册（缺省）、ONLY 只看已归档、ALL 两者都看 */
 export const TASK_ARCHIVE_FILTERS = ["NONE", "ONLY", "ALL"] as const;
 export type TaskArchiveFilter = typeof TASK_ARCHIVE_FILTERS[number];
@@ -24,6 +27,8 @@ export interface Task {
   type: TaskType;
   name: string;
   status: TaskStatus;
+  /** 优先级，缺省 NORMAL；存量行由迁移 042 的默认值兜底 */
+  priority?: TaskPriority;
   scheduledAt?: string;
   scheduledEndAt?: string;
   assigneeName?: string;
@@ -42,6 +47,7 @@ export interface TaskQuery {
   keyword?: string;
   status?: TaskStatus;
   type?: TaskType;
+  priority?: TaskPriority;
   plotCode?: string;
   from?: string;
   to?: string;
@@ -58,6 +64,49 @@ export interface TaskRepository {
   remove(tenantId: string, id: string, deletedAt: string, actor?: string, traceId?: string): Promise<Task | null>;
   /** 任务变更历史（追加式留痕），归档任务也可回查 */
   history(tenantId: string, taskId: string): Promise<TaskChangeLog[]>;
+  /** 排程冲突提示：同地块或同负责人的在册任务计划时间重叠；只提示不阻断 */
+  conflicts(tenantId: string, probe: ConflictProbe): Promise<TaskConflict[]>;
+}
+/** 冲突探测入参：新建任务或回查既有任务都用它描述待检查的排程 */
+export interface ConflictProbe {
+  /** 回查既有任务时排除自身 */
+  id?: string;
+  plotCode: string;
+  assigneeName?: string;
+  scheduledAt?: string;
+  scheduledEndAt?: string;
+}
+/** 一条冲突：命中的在册任务与冲突缘由（同地块 / 同负责人） */
+export interface TaskConflict {
+  task: Task;
+  reasons: string[];
+}
+/**
+ * 冲突判定纯函数，两套仓储共用同一口径：
+ * 只看在册（未归档）且未结束（PENDING/RUNNING）的任务；双方都给了计划开始时间
+ * 才比较，时间窗按 [开始, 结束 ?? 开始] 闭区间判重叠。没排时间的任务无从判断
+ * 冲突，不猜；负责人为空也不参与「同人」判定。
+ */
+export function conflictsOf(probe: ConflictProbe, rows: Task[]): TaskConflict[] {
+  if (!probe.scheduledAt) return [];
+  const start = Date.parse(probe.scheduledAt);
+  const end = Date.parse(probe.scheduledEndAt ?? probe.scheduledAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+  const hits: TaskConflict[] = [];
+  for (const row of rows) {
+    if (row.id === probe.id || row.deletedAt !== undefined) continue;
+    if (row.status !== "PENDING" && row.status !== "RUNNING") continue;
+    if (!row.scheduledAt) continue;
+    const rowStart = Date.parse(row.scheduledAt);
+    const rowEnd = Date.parse(row.scheduledEndAt ?? row.scheduledAt);
+    if (!Number.isFinite(rowStart) || !Number.isFinite(rowEnd)) continue;
+    if (start > rowEnd || rowStart > end) continue;
+    const reasons: string[] = [];
+    if (row.plotCode === probe.plotCode) reasons.push("同地块计划时间重叠");
+    if (probe.assigneeName && row.assigneeName === probe.assigneeName) reasons.push("同负责人计划时间重叠");
+    if (reasons.length > 0) hits.push({ task: row, reasons });
+  }
+  return hits;
 }
 const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   PENDING: ["RUNNING", "CANCELLED"], RUNNING: ["COMPLETED", "CANCELLED"], COMPLETED: [], CANCELLED: [],
@@ -87,6 +136,7 @@ export class InMemoryTaskRepository implements TaskRepository {
       return task.tenantId === tenantId
         && (archived === "ALL" || (archived === "ONLY" ? isArchived : !isArchived))
         && (!query.status || task.status === query.status) && (!query.type || task.type === query.type)
+        && (!query.priority || (task.priority ?? "NORMAL") === query.priority)
         && (!query.plotCode || task.plotCode === query.plotCode)
         && (!query.keyword || keywordHits(query.keyword, [task.name, task.plotCode]))
         && (!query.from || at >= Date.parse(query.from)) && (!query.to || at <= Date.parse(query.to));
@@ -108,6 +158,7 @@ export class InMemoryTaskRepository implements TaskRepository {
       type: task.type,
       name: task.name,
       status: "PENDING",
+      priority: task.priority ?? "NORMAL",
       ...(task.scheduledAt === undefined ? {} : { scheduledAt: task.scheduledAt }),
       ...(task.scheduledEndAt === undefined ? {} : { scheduledEndAt: task.scheduledEndAt }),
       ...(task.assigneeName === undefined ? {} : { assigneeName: task.assigneeName }),
@@ -152,9 +203,14 @@ export class InMemoryTaskRepository implements TaskRepository {
   async history(tenantId: string, taskId: string): Promise<TaskChangeLog[]> {
     return this.changeLog.listByTask(tenantId, taskId);
   }
+  async conflicts(tenantId: string, probe: ConflictProbe): Promise<TaskConflict[]> {
+    const candidates = this.tasks.filter((task) => task.tenantId === tenantId
+      && (task.plotCode === probe.plotCode || (probe.assigneeName !== undefined && task.assigneeName === probe.assigneeName)));
+    return conflictsOf(probe, structuredClone(candidates));
+  }
 }
 function fromRow(row: Record<string, unknown>): Task {
-  const task: Task = { id: String(row.id), tenantId: String(row.tenant_id), plotCode: String(row.plot_code), type: row.type as TaskType, name: String(row.name), status: row.status as TaskStatus, createdAt: toIsoTimestamp(row.created_at), version: Number(row.version) };
+  const task: Task = { id: String(row.id), tenantId: String(row.tenant_id), plotCode: String(row.plot_code), type: row.type as TaskType, name: String(row.name), status: row.status as TaskStatus, priority: (row.priority as TaskPriority) ?? "NORMAL", createdAt: toIsoTimestamp(row.created_at), version: Number(row.version) };
   for (const [column, key] of [["scheduled_at", "scheduledAt"], ["scheduled_end_at", "scheduledEndAt"], ["started_at", "startedAt"], ["completed_at", "completedAt"], ["cancelled_at", "cancelledAt"], ["deleted_at", "deletedAt"]] as const) {
     if (row[column] != null) task[key] = toIsoTimestamp(row[column]);
   }
@@ -173,7 +229,7 @@ export class SqlTaskRepository implements TaskRepository {
     // 归档条件同时进 count 与分页查询，总数与页内行数才不会各算一套
     if (query.archived === "ONLY") where.push("deleted_at IS NOT NULL");
     else if (query.archived !== "ALL") where.push("deleted_at IS NULL");
-    for (const [column, value] of [["status", query.status], ["type", query.type], ["plot_code", query.plotCode]] as const) {
+    for (const [column, value] of [["status", query.status], ["type", query.type], ["priority", query.priority], ["plot_code", query.plotCode]] as const) {
       if (value) { values.push(value); where.push(`${column} = $${values.length}`); }
     }
     // 逐字段字面量匹配，与内存模式的 keywordHits 同一口径；拼接 name 和 plot_code 会造出跨字段假命中
@@ -208,12 +264,12 @@ export class SqlTaskRepository implements TaskRepository {
   async create(task: Task, actor = "system", traceId?: string): Promise<Task> {
     // 建档与建档留痕一条语句写完，避免出现「任务建了、历史没记」的审计缺口
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(`WITH ins AS (
-      INSERT INTO operation_tasks (id, tenant_id, plot_code, type, name, status, scheduled_at, scheduled_end_at, assignee_name, created_at, version)
-        VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8, $9, 1) RETURNING *
+      INSERT INTO operation_tasks (id, tenant_id, plot_code, type, name, status, priority, scheduled_at, scheduled_end_at, assignee_name, created_at, version)
+        VALUES ($1, $2, $3, $4, $5, 'PENDING', $13, $6, $7, $8, $9, 1) RETURNING *
     ), logged AS (
       INSERT INTO operation_task_change_logs (id, task_id, tenant_id, action, summary, actor, trace_id, created_at)
         SELECT $10, id, tenant_id, 'CREATE', '新建任务：' || name, $11, $12, $9::timestamptz FROM ins RETURNING id
-    ) SELECT * FROM ins`, task.id, task.tenantId, task.plotCode, task.type, task.name, task.scheduledAt ?? null, task.scheduledEndAt ?? null, task.assigneeName ?? null, task.createdAt, randomUUID(), actor, traceId ?? null);
+    ) SELECT * FROM ins`, task.id, task.tenantId, task.plotCode, task.type, task.name, task.scheduledAt ?? null, task.scheduledEndAt ?? null, task.assigneeName ?? null, task.createdAt, randomUUID(), actor, traceId ?? null, task.priority ?? "NORMAL");
     return fromRow(rows[0]!);
   }
   async transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult, actor = "system"): Promise<Task | null> {
@@ -240,5 +296,15 @@ export class SqlTaskRepository implements TaskRepository {
   }
   async history(tenantId: string, taskId: string): Promise<TaskChangeLog[]> {
     return this.changeLog.listByTask(tenantId, taskId);
+  }
+  async conflicts(tenantId: string, probe: ConflictProbe): Promise<TaskConflict[]> {
+    // 只捞可能命中的行（同地块或同负责人、在册未结束、排过时间），重叠判定与内存模式共用 conflictsOf
+    const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT * FROM operation_tasks
+       WHERE tenant_id = $1 AND deleted_at IS NULL AND status IN ('PENDING', 'RUNNING') AND scheduled_at IS NOT NULL
+         AND (plot_code = $2 OR ($3::text IS NOT NULL AND assignee_name = $3))`,
+      tenantId, probe.plotCode, probe.assigneeName ?? null,
+    );
+    return conflictsOf(probe, rows.map(fromRow));
   }
 }

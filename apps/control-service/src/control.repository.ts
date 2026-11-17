@@ -10,7 +10,8 @@ import { toIsoTimestamp } from "@agri/shared";
  * 重复投递，因此消费侧重放不会推出第二条指令。
  *
  * 生命周期由回执驱动：QUEUED 入队 → SENT 已下发到设备 → ACKED 设备已接收 →
- * DONE 执行到位，任一在途状态都可被 FAILED 收口。跃迁只允许沿 TRANSITIONS 走，
+ * DONE 执行到位，任一在途状态都可被 FAILED 收口；尚未领取的 QUEUED 还可被
+ * CANCELLED 撤回（墒情达上限自动停灌或人工取消）。跃迁只允许沿 TRANSITIONS 走，
  * 并以 version 乐观锁兜住「设备网关与人工回填同时到达」的并发。
  *
  * 指令按租户隔离（迁移 032）：读、写、跃迁都要带 tenantId，跨租户的 id 一律当作不存在，
@@ -20,8 +21,8 @@ import { toIsoTimestamp } from "@agri/shared";
 /** 指令类型；ESTOP 是急停，执行完成必须带到位确认 */
 export type ControlCommandType = "SEEDING" | "IRRIGATION" | "WEEDING" | "FERTILIZATION" | "ESTOP";
 
-/** 指令状态 */
-export const CONTROL_STATUSES = ["QUEUED", "SENT", "ACKED", "DONE", "FAILED"] as const;
+/** 指令状态；CANCELLED 是未执行先撤回（自动停灌/人工取消），与 FAILED 的执行失败分开记 */
+export const CONTROL_STATUSES = ["QUEUED", "SENT", "ACKED", "DONE", "FAILED", "CANCELLED"] as const;
 export type ControlCommandStatus = (typeof CONTROL_STATUSES)[number];
 
 /** 尚未收到最终回执的状态，超时看板只关心这些 */
@@ -30,13 +31,14 @@ export const PENDING_STATUSES: readonly ControlCommandStatus[] = ["QUEUED", "SEN
 /** 指令来源 */
 export type ControlOrigin = "MANUAL" | "EVENT";
 
-/** 合法跃迁表，终态没有出边 */
+/** 合法跃迁表，终态没有出边。CANCELLED 只从 QUEUED 出发：已被网关领取的指令撤回不了，只能急停 */
 const TRANSITIONS: Record<ControlCommandStatus, readonly ControlCommandStatus[]> = {
-  QUEUED: ["SENT", "FAILED"],
+  QUEUED: ["SENT", "FAILED", "CANCELLED"],
   SENT: ["ACKED", "DONE", "FAILED"],
   ACKED: ["DONE", "FAILED"],
   DONE: [],
   FAILED: [],
+  CANCELLED: [],
 };
 
 /**
@@ -295,7 +297,7 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
               version = version + 1,
               sent_at = CASE WHEN $4 = 'SENT' THEN $5::timestamptz ELSE sent_at END,
               acked_at = CASE WHEN $4 = 'ACKED' THEN $5::timestamptz ELSE acked_at END,
-              finished_at = CASE WHEN $4 IN ('DONE', 'FAILED') THEN $5::timestamptz ELSE finished_at END,
+              finished_at = CASE WHEN $4 IN ('DONE', 'FAILED', 'CANCELLED') THEN $5::timestamptz ELSE finished_at END,
               receipt_message = COALESCE($6::text, receipt_message),
               result_json = COALESCE($7::jsonb, result_json)
         WHERE tenant_id = $1 AND id = $2 AND version = $3
@@ -402,7 +404,7 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     row.version += 1;
     if (transition.status === "SENT") row.sentAt = transition.at;
     if (transition.status === "ACKED") row.ackedAt = transition.at;
-    if (transition.status === "DONE" || transition.status === "FAILED") row.finishedAt = transition.at;
+    if (transition.status === "DONE" || transition.status === "FAILED" || transition.status === "CANCELLED") row.finishedAt = transition.at;
     if (transition.message !== undefined) row.receiptMessage = transition.message;
     if (transition.result !== undefined) row.result = structuredClone(transition.result);
     return structuredClone(row);

@@ -60,6 +60,7 @@
           </el-button>
         </div>
         <div>
+          <el-button :disabled="!total" :loading="exporting" @click="exportRecords">导出 CSV</el-button>
           <el-tooltip content="刷新">
             <el-button circle :loading="loading" @click="load">
               <el-icon><Refresh /></el-icon>
@@ -133,6 +134,7 @@ import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { traceApi } from '@/api'
 import { useUserStore } from '@/stores'
 import { formatDateTime, getTraceEventText, getTraceEventType, manualTraceEventOptions, traceEventOptions } from '@/utils'
+import { exportCsv } from '@/utils/export'
 const userStore = useUserStore()
 const loading = ref(false)
 const records = ref<any[]>([])
@@ -156,22 +158,50 @@ const formRules: FormRules = {
   event: [{ required: true, message: '请选择事件类型', trigger: 'change' }],
   operator: [{ required: true, message: '请填写操作人', trigger: 'blur' }]
 }
+/** 列表与导出共用同一套筛选条件，导出的是筛选后的全量而非当前页 */
+function buildFilters() {
+  return {
+    ...(query.plotCode ? { plotCode: query.plotCode } : {}),
+    ...(query.event ? { event: query.event } : {}),
+    ...(query.batchCode ? { batchCode: query.batchCode } : {}),
+    ...(query.keyword ? { keyword: query.keyword } : {}),
+    ...(query.range?.[0] ? { from: query.range[0] } : {}),
+    ...(query.range?.[1] ? { to: query.range[1] } : {})
+  }
+}
 async function load() {
   loading.value = true
   try {
-    const result = await traceApi.getRecords({
-      ...(query.plotCode ? { plotCode: query.plotCode } : {}),
-      ...(query.event ? { event: query.event } : {}),
-      ...(query.batchCode ? { batchCode: query.batchCode } : {}),
-      ...(query.keyword ? { keyword: query.keyword } : {}),
-      ...(query.range?.[0] ? { from: query.range[0] } : {}),
-      ...(query.range?.[1] ? { to: query.range[1] } : {}),
-      page: page.page,
-      size: page.size
-    })
+    const result = await traceApi.getRecords({ ...buildFilters(), page: page.page, size: page.size })
     records.value = result.items
     total.value = result.total
   } finally { loading.value = false }
+}
+const exporting = ref(false)
+/** 服务端单页上限 200，逐页取全量；页数封顶防异常 total 导致死循环 */
+async function exportRecords() {
+  if (!total.value) { ElMessage.info('当前筛选条件下没有可导出的溯源记录'); return }
+  exporting.value = true
+  try {
+    const filters = buildFilters()
+    const all: any[] = []
+    let pageNo = 1
+    while (all.length < total.value && pageNo <= 100) {
+      const result = await traceApi.getRecords({ ...filters, page: pageNo, size: 200 })
+      all.push(...result.items)
+      if (!result.items.length) break
+      pageNo += 1
+    }
+    const headers = ['追溯码', '溯源码', '地块编码', '事件', '详情', '操作人', '时间']
+    const rows = all.map((row) => [
+      row.traceCode, row.batchCode || '', row.plotCode || '', getTraceEventText(row.event),
+      row.detail, row.operator, formatDateTime(row.createdAt)
+    ])
+    exportCsv(`溯源档案_${formatDateTime(new Date(), 'YYYYMMDD_HHmmss')}.csv`, headers, rows)
+    ElMessage.success(`已导出 ${rows.length} 条溯源记录`)
+  } catch (error) {
+    console.error('溯源导出失败', error)
+  } finally { exporting.value = false }
 }
 function search() { page.page = 1; void load() }
 function resetQuery() { query.plotCode = ''; query.event = ''; query.batchCode = ''; query.keyword = ''; query.range = null; search() }

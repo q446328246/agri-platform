@@ -64,6 +64,21 @@ export interface AuditQuery {
 export interface AuditRepository {
   page(query: AuditQuery): Promise<PageResult<AuditRecord>>;
   create(record: AuditRecord): Promise<AuditRecord>;
+  /** 留存清理：删除 created_at 早于 cutoff 的审计日志，返回清理条数；cutoff 由留存策略算出 */
+  purgeBefore(cutoff: string): Promise<number>;
+}
+
+/** 审计留存下限（天）：开发方案 14.4 要求留存 ≥6 个月，配置再短也不得低于这条线 */
+export const MIN_AUDIT_RETENTION_DAYS = 180;
+
+/**
+ * 审计留存天数：AUDIT_RETENTION_DAYS 可加长（如 365），缺省与非法值回落 180；
+ * 配得比 180 小一律抬到 180——留存策略不能让合规底线被一个环境变量击穿。
+ */
+export function resolveAuditRetentionDays(): number {
+  const raw = Number(process.env.AUDIT_RETENTION_DAYS ?? MIN_AUDIT_RETENTION_DAYS);
+  if (!Number.isFinite(raw) || raw < MIN_AUDIT_RETENTION_DAYS) return MIN_AUDIT_RETENTION_DAYS;
+  return Math.floor(raw);
 }
 
 /** 内置角色：无数据库时的默认角色集 */
@@ -324,6 +339,15 @@ export class InMemoryAuditRepository implements AuditRepository {
     return { ...row };
   }
 
+  async purgeBefore(cutoff: string): Promise<number> {
+    const before = this.rows.length;
+    // 与 SQL 的 created_at < cutoff 同一口径：按 ISO 字符串字典序比较
+    for (let index = this.rows.length - 1; index >= 0; index -= 1) {
+      if (this.rows[index]!.createdAt < cutoff) this.rows.splice(index, 1);
+    }
+    return before - this.rows.length;
+  }
+
   /** 全部记录，供测试断言 */
   all(): AuditRecord[] {
     return this.rows.map((row) => ({ ...row }));
@@ -370,5 +394,9 @@ export class SqlAuditRepository implements AuditRepository {
       record.createdAt,
     );
     return record;
+  }
+
+  async purgeBefore(cutoff: string): Promise<number> {
+    return this.client.$executeRawUnsafe("DELETE FROM platform_audit_logs WHERE created_at < $1::timestamptz", cutoff);
   }
 }

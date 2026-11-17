@@ -8,8 +8,8 @@ import type { NavPlan } from "./navigation.js";
 import { CoverageError, parseCoverageRequest, planCoverage } from "./coverage.js";
 import type { CoveragePlan } from "./coverage.js";
 
-import { canTransition, InMemoryTaskRepository, TASK_ARCHIVE_FILTERS, TASK_STATUSES, TASK_TYPES } from "./task.repository.js";
-import type { Task, TaskArchiveFilter, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType } from "./task.repository.js";
+import { canTransition, InMemoryTaskRepository, TASK_ARCHIVE_FILTERS, TASK_PRIORITIES, TASK_STATUSES, TASK_TYPES } from "./task.repository.js";
+import type { Task, TaskArchiveFilter, TaskPriority, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType } from "./task.repository.js";
 const hoursFromNow = (hours: number): string => new Date(Date.now() + hours * 3600000).toISOString();
 /** 操作人取网关注入的 x-user-id，与地块变更历史同一口径；缺省记为 system */
 const actorOf = (req: IncomingMessage): string => req.headers["x-user-id"]?.toString() || "system";
@@ -70,6 +70,8 @@ function queryOf(query: URLSearchParams): TaskQuery {
   const type = query.get("type");
   if (status) { if (!TASK_STATUSES.includes(status as TaskStatus)) throw new InputError("任务状态非法"); result.status = status as TaskStatus; }
   if (type) { if (!TASK_TYPES.includes(type as TaskType)) throw new InputError("任务类型非法"); result.type = type as TaskType; }
+  const priority = query.get("priority");
+  if (priority) { if (!TASK_PRIORITIES.includes(priority as TaskPriority)) throw new InputError("任务优先级非法"); result.priority = priority as TaskPriority; }
   if (query.get("keyword")) result.keyword = text(query.get("keyword"), "关键词", 200);
   if (query.get("plotCode")) result.plotCode = text(query.get("plotCode"), "地块编码", 100);
   const archived = query.get("archived");
@@ -114,11 +116,25 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
         if (end) task.scheduledEndAt = end;
         const assigneeName = text(body.assigneeName, "负责人", 100);
         if (assigneeName) task.assigneeName = assigneeName;
-        send(res, 201, await tasks.create(task, actorOf(req), traceId), traceId); return;
+        const priority = body.priority === undefined || body.priority === "" ? "NORMAL" : String(body.priority);
+        if (!TASK_PRIORITIES.includes(priority as TaskPriority)) throw new InputError("任务优先级非法");
+        task.priority = priority as TaskPriority;
+        const created = await tasks.create(task, actorOf(req), traceId);
+        // 冲突只提示不阻断：排程重叠由调度人权衡（抢排/改期），平台把命中的任务与缘由摆出来
+        const conflicts = await tasks.conflicts(tenantId, { id: created.id, plotCode: created.plotCode, ...(created.assigneeName === undefined ? {} : { assigneeName: created.assigneeName }), ...(created.scheduledAt === undefined ? {} : { scheduledAt: created.scheduledAt }), ...(created.scheduledEndAt === undefined ? {} : { scheduledEndAt: created.scheduledEndAt }) });
+        send(res, 201, { ...created, conflicts }, traceId); return;
       }
       const statusMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/status$/);
       const detailMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)$/);
       const historyMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/history$/);
+      const conflictsMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/conflicts$/);
+      if (conflictsMatch?.[1] && req.method === "GET") {
+        // 排程回查：任务改期或负责人调整后，前端可重新拉一次冲突提示
+        const task = await tasks.find(tenantId, decodeURIComponent(conflictsMatch[1]));
+        if (!task) { send(res, 404, null, traceId, "任务不存在"); return; }
+        const conflicts = await tasks.conflicts(tenantId, { id: task.id, plotCode: task.plotCode, ...(task.assigneeName === undefined ? {} : { assigneeName: task.assigneeName }), ...(task.scheduledAt === undefined ? {} : { scheduledAt: task.scheduledAt }), ...(task.scheduledEndAt === undefined ? {} : { scheduledEndAt: task.scheduledEndAt }) });
+        send(res, 200, conflicts, traceId); return;
+      }
       if (historyMatch?.[1] && req.method === "GET") {
         // 变更历史是审计对象，归档任务也要能回查（留痕表不随 deleted_at 过滤）
         const logs = await tasks.history(tenantId, decodeURIComponent(historyMatch[1]));

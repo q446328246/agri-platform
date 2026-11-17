@@ -10,6 +10,9 @@
           <el-button type="warning" @click="handleSplit">
             <el-icon><Scissor /></el-icon>拆分
           </el-button>
+          <el-button type="success" plain @click="openTransfer">
+            <el-icon><Switch /></el-icon>流转
+          </el-button>
           <el-button type="primary" @click="handleEdit">
             <el-icon><Edit /></el-icon>编辑
           </el-button>
@@ -97,11 +100,31 @@
         <el-button type="primary" @click="loadDetail">重新加载</el-button>
       </el-empty>
     </div>
+
+    <el-dialog v-model="transferVisible" title="地块流转（权属变更）" width="520px">
+      <p class="transfer-hint">流转只变更负责人与联系电话，地块档案其余字段不动；变更会写入下方变更历史，含原负责人、新负责人与事由。</p>
+      <el-form :model="transferForm" label-width="100px">
+        <el-form-item label="当前负责人"><span>{{ plotData?.ownerName || '未登记' }}</span></el-form-item>
+        <el-form-item label="新负责人" required>
+          <el-input v-model="transferForm.ownerName" maxlength="100" placeholder="流转后的负责人姓名" />
+        </el-form-item>
+        <el-form-item label="联系电话">
+          <el-input v-model="transferForm.ownerPhone" maxlength="30" placeholder="选填，留空表示清空原电话" />
+        </el-form-item>
+        <el-form-item label="流转事由">
+          <el-input v-model="transferForm.reason" type="textarea" :rows="2" maxlength="500" show-word-limit placeholder="选填，如：承包到期转包、继承、合作社调整" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="transferVisible = false">取消</el-button>
+        <el-button type="primary" :loading="transferring" @click="submitTransfer">确认流转</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import PlotBoundaryMap from '@/components/PlotBoundaryMap.vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -136,10 +159,10 @@ const changeLogs = ref<PlotChangeLog[]>([])
 
 const changeActionText = (action: PlotChangeAction): string =>
   action === 'CREATE' ? '建档' : action === 'UPDATE' ? '修改'
-    : action === 'MERGE' ? '合并生成' : action === 'SPLIT' ? '拆分生成' : '删除'
+    : action === 'MERGE' ? '合并生成' : action === 'SPLIT' ? '拆分生成' : action === 'TRANSFER' ? '流转' : '删除'
 const changeActionType = (action: PlotChangeAction): 'primary' | 'success' | 'warning' | 'danger' =>
   action === 'CREATE' ? 'primary' : action === 'UPDATE' ? 'warning'
-    : action === 'MERGE' ? 'success' : action === 'SPLIT' ? 'success' : 'danger'
+    : action === 'MERGE' ? 'success' : action === 'SPLIT' ? 'success' : action === 'TRANSFER' ? 'warning' : 'danger'
 
 async function loadDetail() {
   loading.value = true
@@ -191,9 +214,50 @@ function handleSplit() {
   router.push(`/plot/split/${plotData.value.parcelCode}`)
 }
 
+/* ---------------- 权属流转 ---------------- */
+
+const transferVisible = ref(false)
+const transferring = ref(false)
+const transferForm = reactive({ ownerName: '', ownerPhone: '', reason: '' })
+
+function openTransfer() {
+  if (!plotData.value) return
+  transferForm.ownerName = ''
+  transferForm.ownerPhone = plotData.value.ownerPhone ?? ''
+  transferForm.reason = ''
+  transferVisible.value = true
+}
+
+async function submitTransfer() {
+  if (!plotData.value) return
+  const ownerName = transferForm.ownerName.trim()
+  if (!ownerName) { ElMessage.warning('请填写流转后的负责人'); return }
+  transferring.value = true
+  try {
+    await plotApi.transfer(plotData.value.parcelCode, {
+      ownerName,
+      ownerPhone: transferForm.ownerPhone.trim(),
+      ...(transferForm.reason.trim() ? { reason: transferForm.reason.trim() } : {})
+    })
+    ElMessage.success('地块已流转，变更已留痕')
+    transferVisible.value = false
+    await loadDetail()
+  } catch (error) {
+    console.error('地块流转失败', error)
+  } finally {
+    transferring.value = false
+  }
+}
+
 // 同一路由记录换 id 时组件会复用，只靠 onMounted 会留在上一条地块
 watch(() => route.params.id, () => void loadDetail(), { immediate: true })
 </script>
 
 <style scoped>
+.transfer-hint {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
 </style>

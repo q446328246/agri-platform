@@ -77,6 +77,8 @@ function queryOf(params: URLSearchParams): MessageQuery {
   const read = params.get("read");
   if (read === "true") query.read = true;
   if (read === "false") query.read = false;
+  // ignored=true 只回查已忽略的消息；缺省列表排除已忽略（仓储层同一口径）
+  if (params.get("ignored") === "true") query.ignored = true;
   const plotCode = params.get("plotCode");
   if (plotCode) query.plotCode = plotCode;
   const keyword = params.get("keyword");
@@ -184,6 +186,19 @@ export function createMessageHttpServer(dependencies?: MessageDependencies): Ser
       const readId = readMatch?.[1] ? decodeURIComponent(readMatch[1]) : undefined;
       if (readId && req.method === "POST") {
         const message = await messages.markRead(readId, tenantId);
+        if (!message) {
+          send(res, 404, null, traceId, "消息不存在");
+          return;
+        }
+        send(res, 200, message, traceId);
+        return;
+      }
+
+      // 忽略处置：确认无需处置的告警从待办拿掉（顺带标已读），记录保留，ignored=true 可回查
+      const ignoreMatch = url.pathname.match(/^\/api\/v1\/messages\/([^/]+)\/ignore$/);
+      const ignoreId = ignoreMatch?.[1] ? decodeURIComponent(ignoreMatch[1]) : undefined;
+      if (ignoreId && req.method === "POST") {
+        const message = await messages.markIgnored(ignoreId, tenantId);
         if (!message) {
           send(res, 404, null, traceId, "消息不存在");
           return;

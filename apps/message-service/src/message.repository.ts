@@ -25,6 +25,8 @@ export interface MessageRecord {
   content: string;
   level: MessageLevel;
   read: boolean;
+  /** 已忽略处置：确认无需处置后从待办拿掉，记录保留可回查；缺省 false */
+  ignored?: boolean;
   createdAt: string;
   /** 关联地块编码，便于按地块过滤 */
   plotCode?: string;
@@ -42,6 +44,8 @@ export interface MessageQuery {
   level?: MessageLevel;
   /** true 仅看已读，false 仅看未读，缺省不过滤 */
   read?: boolean;
+  /** true 仅看已忽略；缺省与 false 都排除已忽略的消息 */
+  ignored?: boolean;
   plotCode?: string;
   keyword?: string;
   /** 创建时间区间，由 HTTP 层扩展为完整 ISO 后传入 */
@@ -57,6 +61,8 @@ export interface MessageRepository {
   page(query: MessageQuery): Promise<PageResult<MessageRecord>>;
   findById(id: string, tenantId?: string): Promise<MessageRecord | null>;
   markRead(id: string, tenantId?: string): Promise<MessageRecord | null>;
+  /** 忽略处置：置 ignored 并顺带标已读（忽略即确认无需处置），不存在返回 null */
+  markIgnored(id: string, tenantId?: string): Promise<MessageRecord | null>;
   unreadCount(tenantId?: string): Promise<number>;
 }
 
@@ -73,6 +79,7 @@ function toRecord(row: Record<string, unknown>): MessageRecord {
     content: String(row.content),
     level: row.level === "CRITICAL" ? "CRITICAL" : row.level === "WARNING" ? "WARNING" : "INFO",
     read: Boolean(row.is_read),
+    ignored: Boolean(row.ignored),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : new Date(String(row.created_at)).toISOString(),
   };
   if (row.plot_code !== null && row.plot_code !== undefined) record.plotCode = String(row.plot_code);
@@ -95,7 +102,7 @@ export class SqlMessageRepository implements MessageRepository {
       `INSERT INTO ops_messages (id, tenant_id, type, title, content, level, is_read, plot_code, source_event_id, dedupe_key, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9, $10)
        ON CONFLICT DO NOTHING
-       RETURNING id, tenant_id, type, title, content, level, is_read, plot_code, source_event_id, dedupe_key, created_at`,
+       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at`,
       input.id,
       input.tenantId,
       input.type,
@@ -137,6 +144,8 @@ export class SqlMessageRepository implements MessageRepository {
     if (query.read !== undefined) {
       conditions.push(`is_read = ${query.read ? "TRUE" : "FALSE"}`);
     }
+    // 缺省列表不显示已忽略的消息；ignored=true 时反过来只回查已忽略的
+    conditions.push(`ignored = ${query.ignored === true ? "TRUE" : "FALSE"}`);
     if (query.plotCode !== undefined && query.plotCode !== "") {
       values.push(query.plotCode);
       conditions.push(`plot_code = $${values.length}`);
@@ -150,7 +159,7 @@ export class SqlMessageRepository implements MessageRepository {
     const total = Number(totalRows[0]?.total ?? 0);
     values.push(query.size, (query.page - 1) * query.size);
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `SELECT id, tenant_id, type, title, content, level, is_read, plot_code, source_event_id, dedupe_key, created_at
+      `SELECT id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at
        FROM ops_messages ${where}
        ORDER BY created_at DESC, id DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
       ...values,
@@ -166,7 +175,7 @@ export class SqlMessageRepository implements MessageRepository {
       where += ` AND tenant_id = $${values.length}`;
     }
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `SELECT id, tenant_id, type, title, content, level, is_read, plot_code, source_event_id, dedupe_key, created_at
+      `SELECT id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at
        FROM ops_messages WHERE ${where} LIMIT 1`,
       ...values,
     );
@@ -183,7 +192,24 @@ export class SqlMessageRepository implements MessageRepository {
     }
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `UPDATE ops_messages SET is_read = TRUE WHERE ${where}
-       RETURNING id, tenant_id, type, title, content, level, is_read, plot_code, source_event_id, dedupe_key, created_at`,
+       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at`,
+      ...values,
+    );
+    const row = rows[0];
+    return row ? toRecord(row) : null;
+  }
+
+  async markIgnored(id: string, tenantId?: string): Promise<MessageRecord | null> {
+    const values: unknown[] = [id];
+    let where = "id = $1";
+    if (tenantId !== undefined && tenantId !== "") {
+      values.push(tenantId);
+      where += ` AND tenant_id = $${values.length}`;
+    }
+    // 忽略即确认无需处置：顺带标已读，未读角标不再为它计数
+    const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
+      `UPDATE ops_messages SET ignored = TRUE, is_read = TRUE WHERE ${where}
+       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at`,
       ...values,
     );
     const row = rows[0];
@@ -192,7 +218,7 @@ export class SqlMessageRepository implements MessageRepository {
 
   async unreadCount(tenantId?: string): Promise<number> {
     const values: unknown[] = [];
-    let where = "is_read = FALSE";
+    let where = "is_read = FALSE AND ignored = FALSE";
     if (tenantId !== undefined && tenantId !== "") {
       values.push(tenantId);
       where += ` AND tenant_id = $${values.length}`;
@@ -220,9 +246,9 @@ export class InMemoryMessageRepository implements MessageRepository {
     if (input.dedupeKey !== undefined && this.rows.some((row) => row.tenantId === input.tenantId && row.dedupeKey === input.dedupeKey)) {
       return null;
     }
-    // 新建的消息一律是未读，与 SQL 侧 INSERT 写死 FALSE 同一口径：
+    // 新建的消息一律是未读且未忽略，与 SQL 侧 INSERT 写死 FALSE 同一口径：
     // 「一入库就标已读」的入口没有业务含义，留着只会让两套模式给出不同的未读角标。
-    const record: MessageRecord = { ...input, read: false };
+    const record: MessageRecord = { ...input, read: false, ignored: false };
     this.rows.unshift(record);
     return structuredClone(record);
   }
@@ -234,6 +260,8 @@ export class InMemoryMessageRepository implements MessageRepository {
       .filter((row) => (query.type ? row.type === query.type : true))
       .filter((row) => (query.level ? row.level === query.level : true))
       .filter((row) => (query.read === undefined ? true : row.read === query.read))
+      // 与 SQL 侧同一口径：缺省排除已忽略，ignored=true 只回查已忽略
+      .filter((row) => (query.ignored === true ? row.ignored === true : row.ignored !== true))
       .filter((row) => (query.plotCode ? row.plotCode === query.plotCode : true))
       .filter((row) => (keyword ? keywordHits(keyword, [row.title, row.content]) : true))
       .filter((row) => (query.from ? row.createdAt >= query.from : true))
@@ -255,8 +283,16 @@ export class InMemoryMessageRepository implements MessageRepository {
     return structuredClone(row);
   }
 
+  async markIgnored(id: string, tenantId?: string): Promise<MessageRecord | null> {
+    const row = this.rows.find((item) => item.id === id && (tenantId ? item.tenantId === tenantId : true));
+    if (!row) return null;
+    row.ignored = true;
+    row.read = true;
+    return structuredClone(row);
+  }
+
   async unreadCount(tenantId?: string): Promise<number> {
-    return this.rows.filter((row) => !row.read && (tenantId ? row.tenantId === tenantId : true)).length;
+    return this.rows.filter((row) => !row.read && row.ignored !== true && (tenantId ? row.tenantId === tenantId : true)).length;
   }
 
   /** 全部消息，供测试断言 */

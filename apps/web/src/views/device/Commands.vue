@@ -26,6 +26,7 @@
             <el-option label="设备已接收" value="ACKED" />
             <el-option label="执行到位" value="DONE" />
             <el-option label="失败" value="FAILED" />
+            <el-option label="已取消" value="CANCELLED" />
           </el-select>
         </el-form-item>
         <el-form-item label="设备编号">
@@ -55,6 +56,7 @@
       <div class="command-hint">
         <span>自动指令由越限或处方事件生成，保留来源事件且重复投递不会重复入队；人工指令需二次确认后下达。</span>
         <span>指令按「已入队 → 已下发 → 设备已接收 → 执行到位」推进，任一在途状态都可被失败收单；急停指令的执行到位必须带设备侧到位确认。</span>
+        <span>未领取（已入队）的指令可人工取消；墒情超上限时系统自动取消该地块待执行的灌溉指令。已下发的指令平台远程关不了阀，请走急停。</span>
       </div>
 
       <el-table v-loading="loading" :data="commands" border stripe>
@@ -95,11 +97,16 @@
         <el-table-column label="下达时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
         </el-table-column>
-        <el-table-column v-if="canControl" label="操作" width="110" align="center" fixed="right">
+        <el-table-column v-if="canControl" label="操作" width="160" align="center" fixed="right">
           <template #default="{ row }">
-            <el-button v-if="row.status === 'QUEUED'" link type="primary" size="small" :loading="busyId === row.id" @click="dispatch(row)">
-              标记下发
-            </el-button>
+            <template v-if="row.status === 'QUEUED'">
+              <el-button link type="primary" size="small" :loading="busyId === row.id" @click="dispatch(row)">
+                标记下发
+              </el-button>
+              <el-button link type="danger" size="small" :loading="busyId === row.id" @click="cancel(row)">
+                取消
+              </el-button>
+            </template>
             <el-button v-else-if="row.status === 'SENT' || row.status === 'ACKED'" link type="warning" size="small" @click="openReceipt(row)">
               登记回执
             </el-button>
@@ -203,11 +210,12 @@ const canControl = computed(() => userStore.hasPermission('device:control'))
 
 /** 已走过的节点逐行铺开，未发生的阶段不占位 */
 function lifecycleText(row: any): string {
+  const endLabel = row.status === 'FAILED' ? '失败' : row.status === 'CANCELLED' ? '取消' : '到位'
   const marks: Array<[string, string | undefined]> = [
     ['入队', row.createdAt],
     ['下发', row.sentAt],
     ['接收', row.ackedAt],
-    [row.status === 'FAILED' ? '失败' : '到位', row.finishedAt]
+    [endLabel, row.finishedAt]
   ]
   return marks
     .filter(([, at]) => Boolean(at))
@@ -270,6 +278,38 @@ async function dispatch(row: any) {
     await load()
   } catch (error) {
     console.error('标记下发失败', error)
+  } finally {
+    busyId.value = ''
+  }
+}
+
+/** 取消只撤未领取的指令；若刚被网关领取，服务端回 409，刷新列表让最新状态呈现 */
+async function cancel(row: any) {
+  let reason = ''
+  try {
+    const result = await ElMessageBox.prompt(
+      `确认取消发往设备 ${row.deviceId} 的「${getControlTypeText(row.type)}」指令？取消后不再下发执行。`,
+      '取消指令',
+      {
+        type: 'warning',
+        confirmButtonText: '确认取消',
+        cancelButtonText: '再想想',
+        inputPlaceholder: '取消依据（选填），会记入指令回执说明',
+        inputValue: ''
+      }
+    )
+    reason = (result.value ?? '').trim()
+  } catch {
+    return
+  }
+  busyId.value = row.id
+  try {
+    await controlApi.cancelCommand(row.id, reason || undefined)
+    ElMessage.success('指令已取消')
+    await load()
+  } catch (error) {
+    console.error('取消指令失败', error)
+    await load()
   } finally {
     busyId.value = ''
   }

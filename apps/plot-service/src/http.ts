@@ -696,6 +696,30 @@ export function createPlotHttpServer(
         send(response, 200, await changeLogs.listByPlot(tenantOf(request), decodeURIComponent(historyCode)), requestTraceId);
         return;
       }
+      // 地块流转（权属/负责人变更）：与普通档案修改分开记 TRANSFER，摘要带「原负责人 → 新负责人」与事由
+      const transferMatch = url.pathname.match(new RegExp(`^${API_PREFIX}/plots/([^/]+)/transfer$`));
+      if (transferMatch?.[1] && request.method === "POST") {
+        const code = decodeURIComponent(transferMatch[1]);
+        const input = await readJson(request);
+        const ownerName = String(input.ownerName ?? "").trim();
+        if (ownerName === "") {
+          send(response, 400, null, requestTraceId, "流转后的负责人不能为空");
+          return;
+        }
+        const ownerPhone = typeof input.ownerPhone === "string" ? input.ownerPhone.trim() : "";
+        const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+        const before = await service.getByCode(code);
+        if (before.ownerName === ownerName && (before.ownerPhone ?? "") === ownerPhone) {
+          send(response, 400, null, requestTraceId, "负责人与联系电话均未变化，无需流转");
+          return;
+        }
+        const updated = await service.updatePlot(code, { ownerName, ownerPhone: ownerPhone === "" ? null : ownerPhone });
+        const phonePart = ownerPhone !== "" ? `（联系电话 ${ownerPhone}）` : "";
+        await logChange(request, code, "TRANSFER",
+          `流转：负责人由 ${before.ownerName ?? "未登记"} 变更为 ${ownerName}${phonePart}${reason !== "" ? `，事由：${reason}` : ""}`);
+        send(response, 200, updated, requestTraceId);
+        return;
+      }
       if (plotCode && request.method === "GET") {
         send(response, 200, await service.getByCode(decodeURIComponent(plotCode)), requestTraceId);
         return;

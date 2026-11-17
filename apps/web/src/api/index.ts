@@ -98,6 +98,10 @@ export const plotApi = {
   delete(id: string): Promise<void> {
     return del<void>(`/plots/${encodeURIComponent(id)}`)
   },
+  /** 权属流转：只改负责人与联系电话，服务端写 TRANSFER 变更留痕（含事由），档案其余字段不动 */
+  transfer(code: string, data: { ownerName: string; ownerPhone?: string; reason?: string }): Promise<Plot> {
+    return post<Plot>(`/plots/${encodeURIComponent(code)}/transfer`, data).then(normalizePlot)
+  },
   async batchDelete(parcelCodes: string[]): Promise<{ succeededCodes: string[]; failedCodes: string[] }> {
     // 等待全部请求结束再刷新；单个失败不能掩盖已删除的地块或提前结束整批。
     const results = await Promise.allSettled(parcelCodes.map((parcelCode) => plotApi.delete(parcelCode)))
@@ -728,11 +732,16 @@ export const weatherApi = {
 }
 
 export const operationApi = {
-  getTasks(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; status?: string | undefined; type?: string | undefined; plotCode?: string | undefined; from?: string | undefined; to?: string | undefined; archived?: 'NONE' | 'ONLY' | 'ALL' | undefined }): Promise<PageResult<any>> {
+  getTasks(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; status?: string | undefined; type?: string | undefined; plotCode?: string | undefined; priority?: string | undefined; from?: string | undefined; to?: string | undefined; archived?: 'NONE' | 'ONLY' | 'ALL' | undefined }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/farm-tasks', cleanParams(params))
   },
-  createTask(data: { plotCode: string; type: string; name: string; scheduledAt?: string; scheduledEndAt?: string; assigneeName?: string }): Promise<any> {
+  /** 创建返回任务本体 + conflicts：同地块/同负责人计划时间重叠的在册任务，只提示不阻断 */
+  createTask(data: { plotCode: string; type: string; name: string; scheduledAt?: string; scheduledEndAt?: string; assigneeName?: string; priority?: string }): Promise<any> {
     return post<any>('/farm-tasks', data)
+  },
+  /** 单条任务的排期冲突：与创建时同一套判定，供详情页复核 */
+  getTaskConflicts(id: string): Promise<Array<{ task: any; reasons: string[] }>> {
+    return get<Array<{ task: any; reasons: string[] }>>(`/farm-tasks/${encodeURIComponent(id)}/conflicts`)
   },
   /** 单条任务详情：含 startedAt/completedAt 实际作业时间，不存在时服务端返回 404；
    *  includeArchived 只放行归档行的回查，状态流转与删除仍按在册口径 */
@@ -862,6 +871,10 @@ export const controlApi = {
   /** 标记指令已下发到设备（QUEUED→SENT）；设备网关接入前由人工确认这一步真实发生 */
   dispatchCommand(commandId: string): Promise<any> {
     return post<any>('/control/device/dispatch', { commandId })
+  },
+  /** 取消未领取（QUEUED）的指令；已下发的指令平台远程关不了阀，服务端回 409 提示走急停 */
+  cancelCommand(commandId: string, reason?: string): Promise<any> {
+    return post<any>(`/control/commands/${encodeURIComponent(commandId)}/cancel`, reason ? { reason } : {})
   },
   /** 登记设备回执：ACKED 已接收、DONE 执行到位、FAILED 失败（急停的 DONE 必须带到位确认） */
   reportReceipt(data: { commandId: string; status: 'ACKED' | 'DONE' | 'FAILED'; message?: string; result?: Record<string, unknown> }): Promise<any> {
@@ -993,6 +1006,8 @@ export interface MessageQuery {
   type?: 'ALERT' | 'NOTICE'
   level?: MessageLevel
   read?: boolean
+  /** true 只回查已忽略的消息；缺省列表排除已忽略 */
+  ignored?: boolean
   plotCode?: string
   keyword?: string
   from?: string
@@ -1009,6 +1024,10 @@ export const messageApi = {
   },
   markRead(id: string): Promise<any> {
     return post<any>(`/messages/${encodeURIComponent(id)}/read`)
+  },
+  /** 忽略处置：确认无需处置的消息从待办拿掉（顺带标已读），记录保留可回查 */
+  markIgnored(id: string): Promise<any> {
+    return post<any>(`/messages/${encodeURIComponent(id)}/ignore`)
   },
   /** 订阅偏好：返回模板目录全量，未配置的主题按默认值展示 */
   getPreferences(): Promise<{ items: MessagePreference[] }> {

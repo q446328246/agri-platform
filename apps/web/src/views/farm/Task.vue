@@ -31,6 +31,13 @@
               />
             </el-select>
           </el-form-item>
+          <el-form-item label="优先级">
+            <el-select v-model="queryForm.priority" placeholder="全部" clearable style="width: 110px">
+              <el-option label="高" value="HIGH" />
+              <el-option label="普通" value="NORMAL" />
+              <el-option label="低" value="LOW" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="地块编码">
             <el-input v-model="queryForm.parcelCode" placeholder="地块编码" clearable style="width: 160px" />
           </el-form-item>
@@ -65,6 +72,11 @@
         <el-table-column prop="taskType" label="任务类型" width="120" align="center">
           <template #default="{ row }">
             <el-tag size="small">{{ getTaskTypeText(row.taskType) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="priority" label="优先级" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag :type="getPriorityType(row.priority)" size="small" effect="plain">{{ getPriorityText(row.priority) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="150" align="center">
@@ -117,6 +129,7 @@
         <el-form-item label="任务名称" required><el-input v-model="createForm.name" /></el-form-item>
         <el-form-item label="地块编码" required><el-input v-model="createForm.plotCode" /></el-form-item>
         <el-form-item label="任务类型"><el-select v-model="createForm.type" style="width: 100%"><el-option label="翻耕" value="TILLAGE" /><el-option label="播种" value="SEEDING" /><el-option label="灌溉" value="IRRIGATION" /><el-option label="除草" value="WEEDING" /><el-option label="植保" value="SPRAYING" /><el-option label="施肥" value="FERTILIZATION" /></el-select></el-form-item>
+        <el-form-item label="优先级"><el-select v-model="createForm.priority" style="width: 100%"><el-option label="高" value="HIGH" /><el-option label="普通" value="NORMAL" /><el-option label="低" value="LOW" /></el-select></el-form-item>
         <el-form-item label="计划开始"><el-date-picker v-model="createForm.scheduledAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" style="width: 100%" /></el-form-item>
         <el-form-item label="计划结束"><el-date-picker v-model="createForm.scheduledEndAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" style="width: 100%" /></el-form-item>
         <el-form-item label="负责人"><el-input v-model="createForm.assigneeName" maxlength="100" placeholder="选填" /></el-form-item>
@@ -147,6 +160,9 @@
         <el-descriptions v-if="taskDetail" :column="2" border>
           <el-descriptions-item label="任务名称">{{ taskDetail.name }}</el-descriptions-item>
           <el-descriptions-item label="任务类型">{{ getTaskTypeText(taskDetail.type) }}</el-descriptions-item>
+          <el-descriptions-item label="优先级">
+            <el-tag :type="getPriorityType(taskDetail.priority)" size="small" effect="plain">{{ getPriorityText(taskDetail.priority) }}</el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="状态">
             <el-tag :type="getTaskStatusType(displayStatus(taskDetail.status))" size="small">
               {{ getTaskStatusText(displayStatus(taskDetail.status)) }}
@@ -234,6 +250,16 @@ const getOutcomeText = (outcome: string) => {
   return map[outcome] || outcome
 }
 
+const getPriorityText = (priority?: string) => {
+  const map: Record<string, string> = { HIGH: '高', NORMAL: '普通', LOW: '低' }
+  return map[priority ?? 'NORMAL'] ?? '普通'
+}
+
+const getPriorityType = (priority?: string): 'danger' | '' | 'info' => {
+  if (priority === 'HIGH') return 'danger'
+  return priority === 'LOW' ? 'info' : ''
+}
+
 const getTaskChangeActionText = (action: string) => {
   const map: Record<string, string> = { CREATE: '新建', TRANSITION: '状态流转', ARCHIVE: '归档' }
   return map[action] || action
@@ -249,7 +275,7 @@ const tableData = ref<any[]>([])
 const total = ref(0)
 const createVisible = ref(false)
 const creating = ref(false)
-const createForm = reactive({ name: '', plotCode: '', type: 'IRRIGATION', scheduledAt: '', scheduledEndAt: '', assigneeName: '' })
+const createForm = reactive({ name: '', plotCode: '', type: 'IRRIGATION', priority: 'NORMAL', scheduledAt: '', scheduledEndAt: '', assigneeName: '' })
 
 const queryForm = reactive<FarmTaskQuery>({
   page: 1,
@@ -257,6 +283,7 @@ const queryForm = reactive<FarmTaskQuery>({
   keyword: '',
   status: undefined,
   taskType: undefined,
+  priority: undefined,
   parcelCode: '',
   archived: 'NONE'
 })
@@ -282,6 +309,7 @@ async function fetchList() {
       keyword: queryForm.keyword,
       status: queryForm.status,
       type: queryForm.taskType,
+      priority: queryForm.priority,
       plotCode: queryForm.parcelCode,
       archived: queryForm.archived,
       from: planRange.value?.[0],
@@ -313,6 +341,7 @@ function handleReset() {
   queryForm.keyword = ''
   queryForm.status = undefined
   queryForm.taskType = undefined
+  queryForm.priority = undefined
   queryForm.parcelCode = ''
   queryForm.archived = 'NONE'
   planRange.value = null
@@ -321,7 +350,7 @@ function handleReset() {
 }
 
 function handleCreate() {
-  Object.assign(createForm, { name: '', plotCode: '', type: 'IRRIGATION', scheduledAt: '', scheduledEndAt: '', assigneeName: '' })
+  Object.assign(createForm, { name: '', plotCode: '', type: 'IRRIGATION', priority: 'NORMAL', scheduledAt: '', scheduledEndAt: '', assigneeName: '' })
   createVisible.value = true
 }
 
@@ -329,7 +358,19 @@ async function submitCreate() {
   if (!createForm.name.trim() || !createForm.plotCode.trim()) { ElMessage.warning('请填写任务名称和地块编码'); return }
   if (createForm.scheduledEndAt && (!createForm.scheduledAt || createForm.scheduledEndAt <= createForm.scheduledAt)) { ElMessage.warning('计划结束时间必须晚于开始时间'); return }
   creating.value = true
-  try { await operationApi.createTask(createForm); ElMessage.success('任务已创建'); createVisible.value = false; await fetchList() } catch (error) { console.error('任务创建失败', error) } finally { creating.value = false }
+  try {
+    const created = await operationApi.createTask(createForm)
+    createVisible.value = false
+    await fetchList()
+    // 冲突只提示不阻断：把命中的任务与缘由摆出来，由调度人权衡抢排或改期
+    const conflicts: Array<{ task: any; reasons: string[] }> = created?.conflicts ?? []
+    if (conflicts.length) {
+      const lines = conflicts.map((c) => `「${c.task.name}」（${c.task.plotCode}${c.task.assigneeName ? ` · ${c.task.assigneeName}` : ''}）：${c.reasons.join('、')}`)
+      ElMessageBox.alert(lines.join('；'), '任务已创建，但存在排期冲突', { type: 'warning', confirmButtonText: '知道了' }).catch(() => {})
+    } else {
+      ElMessage.success('任务已创建')
+    }
+  } catch (error) { console.error('任务创建失败', error) } finally { creating.value = false }
 }
 
 /* ---------------- 任务详情 ---------------- */

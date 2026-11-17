@@ -270,6 +270,30 @@ export function createControlHttpServer(
         return;
       }
 
+      // 人工取消：只撤尚未被网关领取的 QUEUED 指令，与墒情上限自动停灌同一跃迁。
+      // 已领取的指令平台远程关不了阀，取消不了就明说，让操作人走急停而不是以为撤回了。
+      const cancelMatch = url.pathname.match(/^\/api\/v1\/control\/commands\/([^/]+)\/cancel$/);
+      if (cancelMatch?.[1] && req.method === "POST") {
+        const operatorId = req.headers["x-user-id"]?.toString();
+        if (!operatorId) { send(res, 409, null, traceId, "取消指令需要操作人身份"); return; }
+        const body = await json(req);
+        const tenantId = tenantOf(req);
+        const target = await repository.find(tenantId, decodeURIComponent(cancelMatch[1]));
+        if (!target) { send(res, 404, null, traceId, "指令不存在"); return; }
+        if (target.status !== "QUEUED") { send(res, 409, null, traceId, `指令当前状态为 ${target.status}，只有未领取（QUEUED）的指令可以取消，在途指令请走急停`); return; }
+        const reason = receiptText(body.reason, "reason");
+        const updated = await repository.transition(tenantId, {
+          id: target.id,
+          status: "CANCELLED",
+          at: new Date().toISOString(),
+          version: target.version,
+          message: `${operatorId} 人工取消${reason ? `：${reason}` : ""}`,
+        });
+        if (!updated) { send(res, 409, null, traceId, "指令已被网关领取或状态已变化，请刷新后重试"); return; }
+        send(res, 200, toView(updated, timeoutMin, Date.now()), traceId);
+        return;
+      }
+
       // 设备通道 ①：网关轮询本机还在途的指令。领取接口只认 commandId，而现场网关手里
       // 只有设备编号和回调令牌——没有它就只能靠人告诉它「该干活了」。
       // 返回 QUEUED/SENT/ACKED 三态：崩在两次轮询之间的网关要能接着把已领取、

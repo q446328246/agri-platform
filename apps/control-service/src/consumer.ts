@@ -24,7 +24,8 @@ import type { IrrigationZone } from "./command-spec.js";
  * 阈值确定，控制侧只负责落成立即执行的动作。
  *
  * 只有能直接由水肥设备执行的场景才生成指令；植保作业与其它指标越限仍由
- * 消息中心提醒人工处置，避免自动下发与作业计划冲突。
+ * 消息中心提醒人工处置，避免自动下发与作业计划冲突。反向的保护同样自动：
+ * 墒情高于上限时撤回未领取的灌溉指令（自动停灌），见 stopIrrigation。
  */
 
 /** 处方类型对应的水肥指令类型 */
@@ -127,13 +128,18 @@ export class ControlCommandConsumer {
   constructor(private readonly commands: ControlCommandRepository) {}
 
   /**
-   * 遥测越限：只有土壤含水率低于下限才自动补灌。
+   * 遥测越限：土壤含水率低于下限自动补灌，高于上限自动停灌。
    * 其它指标（温度、风速、降雨等）无法由水肥设备处置，交给消息中心提醒。
    */
   @registerHandler(EventTopic.TelemetryThresholdBreached)
   async onThresholdBreached(event: DomainEvent<ThresholdBreachedPayload>): Promise<void> {
     const payload = event.payload;
-    if (payload.metric !== "soilMoisture" || payload.direction !== "below") return;
+    if (payload.metric !== "soilMoisture") return;
+    if (payload.direction === "above") {
+      await this.stopIrrigation(event, payload);
+      return;
+    }
+    if (payload.direction !== "below") return;
     if (!isNonNegativeNumber(payload.value) || !isNonNegativeNumber(payload.threshold) || payload.value >= payload.threshold) {
       throw new Error("自动补灌越限事件数值非法");
     }
@@ -148,6 +154,34 @@ export class ControlCommandConsumer {
         envelopeBlocked: "越限自动补灌只带含水率与阈值，没有灌水定额的权威值，需人工确认作业量后下发",
       }),
     );
+  }
+
+  /**
+   * 墒情高于上限：自动停灌。
+   *
+   * 只撤回尚未被现场网关领取的 QUEUED 灌溉指令（CANCELLED 终态，缘由落在回执说明）；
+   * 已领取（SENT/ACKED）的指令平台无法远程关阀，越限事件本身已由消息中心生成告警，
+   * 由人工确认后走急停，不在这里假装「已停」。上限阈值来自遥测规则配置，没有配
+   * above 规则的地块不会触发停灌——宁可不联动，也不拿一个猜的上限去撤指令。
+   */
+  private async stopIrrigation(event: DomainEvent<ThresholdBreachedPayload>, payload: ThresholdBreachedPayload): Promise<void> {
+    if (!isNonNegativeNumber(payload.value) || !isNonNegativeNumber(payload.threshold) || payload.value <= payload.threshold) {
+      throw new Error("自动停灌越限事件数值非法");
+    }
+    const plotCode = requireParcelId(payload.parcelId);
+    const reason = `土壤含水率 ${payload.value} 高于上限 ${payload.threshold}，自动停灌`;
+    const queued = await this.commands.page(event.tenantId, { plotCode, type: "IRRIGATION", status: "QUEUED", page: 1, size: 200 });
+    for (const command of queued.items) {
+      // 版本不匹配说明网关恰好领走了这条指令：撤不回就不撤，交给在途告警与急停处置
+      await this.commands.transition(event.tenantId, {
+        id: command.id,
+        status: "CANCELLED",
+        at: event.occurredAt,
+        version: command.version,
+        message: reason,
+        result: { source: "threshold", metric: payload.metric, value: payload.value, threshold: payload.threshold, sourceEventId: event.eventId },
+      });
+    }
   }
 
   /** 处方生成：灌溉与施肥处方转成对应水肥指令，植保处方不在此下发 */

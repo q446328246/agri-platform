@@ -64,6 +64,7 @@
           </el-button>
         </div>
         <div>
+          <el-button :disabled="!entries.length" @click="exportEntries">导出 CSV</el-button>
           <el-tooltip content="刷新">
             <el-button circle :loading="loading" @click="load">
               <el-icon><Refresh /></el-icon>
@@ -142,6 +143,7 @@ import { financeApi } from '@/api'
 import type { FinanceQuery, FinanceReport } from '@/api'
 import { useUserStore } from '@/stores'
 import { formatDateTime } from '@/utils'
+import { exportCsv } from '@/utils/export'
 use([CanvasRenderer, BarChart, LineChart, PieChart, TooltipComponent, LegendComponent, GridComponent])
 const userStore = useUserStore()
 const loading = ref(false)
@@ -222,6 +224,17 @@ const plotChartOption = computed(() => ({
   }],
 }))
 function search() { page.page = 1; void load() }
+/** 导出当前筛选条件下的全部收支（后端返回全量，分页只是前端切片），与列表口径一致 */
+function exportEntries() {
+  if (!entries.value.length) { ElMessage.info('当前筛选条件下没有可导出的收支记录'); return }
+  const headers = ['地块编码', '类型', '类别', '金额', '单位', '产季', '备注', '登记时间']
+  const rows = entries.value.map((row) => [
+    row.plotCode || '', row.kind === 'INPUT' ? '投入' : '产出', row.category,
+    row.amount, row.unit, row.season, row.note, formatDateTime(row.createdAt)
+  ])
+  exportCsv(`投入产出_${formatDateTime(new Date(), 'YYYYMMDD_HHmmss')}.csv`, headers, rows)
+  ElMessage.success(`已导出 ${rows.length} 条收支记录`)
+}
 function reset() {
   query.plotCode = ''
   query.kind = ''

@@ -141,7 +141,7 @@ export type InfraLineType = 'IRRIGATION_PIPE' | 'FERTILIZATION_PIPE' | 'ELECTRIC
 export type CropSeasonStatus = 'planned' | 'growing' | 'harvested';
 
 /** 地块变更动作：建档 / 更新 / 删除 / 合并生成 / 拆分生成 */
-export type PlotChangeAction = 'CREATE' | 'UPDATE' | 'DELETE' | 'MERGE' | 'SPLIT';
+export type PlotChangeAction = 'CREATE' | 'UPDATE' | 'DELETE' | 'MERGE' | 'SPLIT' | 'TRANSFER';
 
 /** 地块变更历史条目（追加式留痕） */
 export interface PlotChangeLog {
@@ -285,6 +285,8 @@ export interface FarmTask {
   parcelCode: string;
   parcelName: string;
   status: FarmTaskStatus;
+  /** 优先级：HIGH 高 / NORMAL 普通（缺省）/ LOW 低 */
+  priority?: 'HIGH' | 'NORMAL' | 'LOW';
   assigneeId?: string;
   assigneeName?: string;
   planStartDate: string;
@@ -312,6 +314,7 @@ export interface FarmTaskQuery {
   parcelCode?: string | undefined;
   status?: FarmTaskStatus | undefined;
   taskType?: string | undefined;
+  priority?: 'HIGH' | 'NORMAL' | 'LOW' | undefined;
   startDate?: string;
   endDate?: string;
   /** 归档筛选：NONE 只看在册（缺省）、ONLY 只看已归档、ALL 两者都看 */
