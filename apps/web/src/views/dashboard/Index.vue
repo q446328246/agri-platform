@@ -88,6 +88,19 @@
       </div>
     </div>
 
+    <!-- 底部居中：底图切换（天地图影像 / Esri 高清影像 / 矢量），选择持久化 -->
+    <div v-if="!panelOpen" class="basemap-switch">
+      <button
+        v-for="opt in baseMapOptions"
+        :key="opt.key"
+        class="basemap-chip"
+        :class="{ active: baseMapKey === opt.key }"
+        type="button"
+        :title="opt.hint"
+        @click="switchBaseMap(opt.key)"
+      >{{ opt.label }}</button>
+    </div>
+
     <!-- 地图绘制/改边界卡片：管线、地块、片区共用，单击地图落点，拖动顶点微调 -->
     <MapShapeEditor
       ref="shapeEditor"
@@ -152,7 +165,7 @@
     </div>
 
     <!-- 左下状态条 -->
-    <div class="map-status"><span class="status-dot"></span><span>天地图影像</span><i></i><span>{{ mapMessage }}</span></div>
+    <div class="map-status"><span class="status-dot"></span><span>{{ baseMapLabel }}</span><i></i><span>{{ mapMessage }}</span></div>
   </div>
 </template>
 
@@ -179,18 +192,34 @@ const userStore = useUserStore()
 const tiandituKey = import.meta.env.VITE_TIANDITU_KEY
 
 // ---------- 图层与底图状态 ----------
-type LayerKey = 'imagery' | 'devices' | 'fields' | 'zones'
-const visibleLayers = reactive<Record<LayerKey, boolean>>({ imagery: true, devices: true, fields: true, zones: true })
+type LayerKey = 'devices' | 'fields' | 'zones'
+const visibleLayers = reactive<Record<LayerKey, boolean>>({ devices: true, fields: true, zones: true })
 const lineState = reactive<Record<LineCat, boolean>>({ WATER: true, ELECTRIC: true, NET: true })
 const layerOpen = ref(false)
 const menuCollapsed = ref(false)
 
 const baseLayerOptions: Array<{ key: LayerKey; label: string }> = [
-  { key: 'imagery', label: '影像 / 矢量底图' },
   { key: 'devices', label: '设备点位' },
   { key: 'fields', label: '地块边界' },
   { key: 'zones', label: '片区范围' },
 ]
+
+// ---------- 底图切换：天地图影像 / Esri 高清影像 / 天地图矢量 ----------
+// 天地图影像在乡村区域分辨率有限，Esri World Imagery 通常更清晰且同为 WGS84 无偏移；
+// 高清影像上叠加天地图中文注记（cia），地名可读性不丢。选择存 localStorage，刷新后保持。
+type BaseMapKey = 'tdt-img' | 'esri-img' | 'tdt-vec'
+const baseMapOptions: Array<{ key: BaseMapKey; label: string; hint: string }> = [
+  { key: 'tdt-img', label: '天地图影像', hint: '天地图卫星影像 + 中文注记' },
+  { key: 'esri-img', label: '高清影像', hint: 'Esri World Imagery 卫星影像（乡村区域通常更清晰）+ 天地图中文注记' },
+  { key: 'tdt-vec', label: '矢量地图', hint: '天地图矢量底图 + 中文注记' },
+]
+const BASEMAP_STORAGE_KEY = 'agri-basemap'
+function readStoredBaseMap(): BaseMapKey {
+  const stored = localStorage.getItem(BASEMAP_STORAGE_KEY)
+  return baseMapOptions.some((opt) => opt.key === stored) ? (stored as BaseMapKey) : 'tdt-img'
+}
+const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
+const baseMapLabel = computed(() => baseMapOptions.find((opt) => opt.key === baseMapKey.value)?.label ?? '天地图影像')
 
 // ---------- 左侧功能菜单（地图内浮层面板） ----------
 interface MenuItem { label: string; panel?: string; layer?: LineCat; draw?: MapShapeKind; perm?: string }
@@ -403,26 +432,31 @@ async function loadWeather() {
 // ---------- 地图 ----------
 const mapMessage = ref('地块边界加载中')
 let map: any = null
-let baseLayers: { vector: any; imagery: any } | null = null
+let baseLayers: Record<BaseMapKey, any> | null = null
 let deviceLayer: any = null
 let fieldLayer: any = null
 let zoneLayer: any = null
 const lineLayers: Record<LineCat | 'ROAD', any> = { WATER: null, ELECTRIC: null, NET: null, ROAD: null }
-let baseKey: 'imagery' | 'vector' = 'imagery'
-const tileOptions = { subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'], maxZoom: 18 }
+// 瓦片原生最高 18 级，地图允许放到 20 级（18 级以上放大渲染），便于精确对齐地块边界顶点
+const tileOptions = { subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'], maxZoom: 20, maxNativeZoom: 18 }
 const parcelCenter = new Map<string, [number, number]>()
 
 function createTiles(layer: string) {
   return L.tileLayer(`https://t{s}.tianditu.gov.cn/${layer}_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${layer}&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=${tiandituKey}`, { ...tileOptions })
 }
 
+function createEsriTiles() {
+  return L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20, maxNativeZoom: 18 })
+}
+
 function initMap() {
-  map = L.map('tianditu-map', { center: [30.982425, 107.421325], zoom: 15, zoomControl: true, attributionControl: false })
-  const vector = L.layerGroup([createTiles('vec'), createTiles('cva')])
-  const imagery = L.layerGroup([createTiles('img'), createTiles('cia')])
-  baseKey = visibleLayers.imagery ? 'imagery' : 'vector'
-  baseLayers = { vector, imagery }
-  baseLayers[baseKey].addTo(map)
+  map = L.map('tianditu-map', { center: [30.982425, 107.421325], zoom: 15, maxZoom: 20, zoomControl: true, attributionControl: false })
+  baseLayers = {
+    'tdt-img': L.layerGroup([createTiles('img'), createTiles('cia')]),
+    'esri-img': L.layerGroup([createEsriTiles(), createTiles('cia')]),
+    'tdt-vec': L.layerGroup([createTiles('vec'), createTiles('cva')]),
+  }
+  baseLayers[baseMapKey.value].addTo(map)
   // 片区放在地块下方：片区淡填充可点开编辑，又不会盖住地块的点击
   map.createPane('zonePane')
   map.getPane('zonePane').style.zIndex = '380'
@@ -436,15 +470,20 @@ function initMap() {
 function toggleLayer(key: LayerKey) {
   visibleLayers[key] = !visibleLayers[key]
   if (!map) return
-  if (key === 'imagery' && baseLayers) {
-    const next: 'imagery' | 'vector' = visibleLayers.imagery ? 'imagery' : 'vector'
-    map.removeLayer(baseLayers[baseKey])
-    baseKey = next
-    baseLayers[baseKey].addTo(map)
-  }
   if (key === 'devices' && deviceLayer) visibleLayers.devices ? deviceLayer.addTo(map) : map.removeLayer(deviceLayer)
   if (key === 'fields' && fieldLayer) visibleLayers.fields ? fieldLayer.addTo(map) : map.removeLayer(fieldLayer)
   if (key === 'zones' && zoneLayer) visibleLayers.zones ? zoneLayer.addTo(map) : map.removeLayer(zoneLayer)
+}
+
+/** 底图热切换：只换底图组，业务图层与当前视野不动；选择持久化供刷新后恢复 */
+function switchBaseMap(key: BaseMapKey) {
+  if (key === baseMapKey.value) return
+  if (map && baseLayers) {
+    map.removeLayer(baseLayers[baseMapKey.value])
+    baseLayers[key].addTo(map)
+  }
+  baseMapKey.value = key
+  localStorage.setItem(BASEMAP_STORAGE_KEY, key)
 }
 
 function toggleLine(cat: LineCat) {
@@ -1009,6 +1048,12 @@ onUnmounted(() => {
 .legend-chip i { width: 14px; height: 3px; border-radius: 2px; }
 .legend-chip.off { opacity: .4; }
 
+/* 底部居中底图切换 */
+.basemap-switch { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 500; display: flex; gap: 6px; padding: 5px 6px; background: rgba(7,25,48,.82); border: 1px solid rgba(0,212,255,.24); border-radius: 4px; backdrop-filter: blur(10px); }
+.basemap-chip { padding: 5px 12px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: #9fc3d3; cursor: pointer; font-size: 12px; }
+.basemap-chip:hover { color: #cdeeff; }
+.basemap-chip.active { background: rgba(0,212,255,.16); border-color: rgba(0,212,255,.5); color: #7fe7ff; font-weight: 600; }
+
 /* 右下天气卡片 */
 .weather-card { position: absolute; right: 16px; bottom: 16px; z-index: 500; display: flex; align-items: center; gap: 16px; padding: 14px 18px; background: rgba(6,22,42,.86); border: 1px solid rgba(0,212,255,.28); border-radius: 4px; backdrop-filter: blur(10px); }
 .wx-main { text-align: center; min-width: 96px; }
@@ -1096,6 +1141,7 @@ onUnmounted(() => {
 @media (max-width: 900px) {
   .func-menu { width: 180px; }
   .map-status { left: 200px; }
+  .basemap-switch { bottom: 52px; }
   .wx-strip { display: none; }
   .map-panel { width: auto; left: 210px; }
   .map-panel.max { left: 200px; }
@@ -1106,6 +1152,7 @@ onUnmounted(() => {
   .func-menu.collapsed { width: 42px; }
   .layer-panel { top: 10px; right: 10px; }
   .weather-card { right: 10px; bottom: 10px; left: 10px; justify-content: space-between; }
+  .basemap-switch { bottom: 122px; }
   .map-status { display: none; }
   .cockpit.drawing .weather-card { display: none; }
   .map-panel { top: 48px; left: 172px; right: 8px; bottom: 8px; width: auto; }
