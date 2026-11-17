@@ -728,6 +728,8 @@
 - **第三方对接**（12.3）：区域监管平台上报、农机调度平台、农产品追溯平台下游（加工/物流/质检）、保险金融脱敏共享。
 - **验收流程项**：500 用户 / 5000 设备性能压测（2.4）、现场验收、双人复核（`DUAL_REVIEW_RECORD.md` 为流程记录，系统内无敏感操作双人复核流）。
 
+**2026-11-17 复核确认**：逐条代码取证，B 类口径无漂移、无可降级 A 类项——①设备/农机：`MODBUS_PROFILES` 农机档案与 field-gateway 轮询/下发/回执闭环在位，compose `FIELD_GATEWAY_ENABLED` 默认关待现场凭证，dispatch/receipt 回调鉴权就绪；②模型/RAG：全仓无 .py 工程与 LLM/embedding 依赖，决策 `/ask` 为规则式可追溯建议，视频 ai-events 仅收 pest 事件契约；③④GB/T 28181/SRS/ZLMediaKit 与 MQTT/EMQX/paho 全仓零命中（视频现 HLS 直拉、物联现 HTTP 上报 + Modbus TCP 轮询）；⑤`infra/edge` 仅 nginx.conf；⑥追溯页明示加工/仓储/物流/质检/销售外部未接入，平台侧链条时间线就绪；⑦无 k6/artillery/autocannon 等压测工具链，属环境与流程项。外部条件到位即可按既有契约接入，平台侧无需再改。
+
 ### C. 已文档化的架构偏差（刻意简化，非漏实现）
 
 - **时序库 / 缓存 / 消息队列**：方案选型 TDengine/Redis/Kafka，实际以 PostgreSQL `event_log` + 各服务 `*_outbox` + 消费位点替代（README「关键约定」：时序数据不在 `@agri/db` 范围，缓存由各服务自行接入）。
