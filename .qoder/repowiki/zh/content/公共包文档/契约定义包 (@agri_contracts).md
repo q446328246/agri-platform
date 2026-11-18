@@ -10,6 +10,7 @@
 - [packages/contracts/src/dto/geo.dto.ts](file://packages/contracts/src/dto/geo.dto.ts)
 - [packages/contracts/src/dto/plot.dto.ts](file://packages/contracts/src/dto/plot.dto.ts)
 - [packages/contracts/src/dto/season.dto.ts](file://packages/contracts/src/dto/season.dto.ts)
+- [packages/contracts/src/enums/domain.enum.ts](file://packages/contracts/src/enums/domain.enum.ts)
 - [packages/contracts/src/messages/message-template.ts](file://packages/contracts/src/messages/message-template.ts)
 - [packages/contracts/src/messages/index.ts](file://packages/contracts/src/messages/index.ts)
 - [packages/contracts/src/events/topic.ts](file://packages/contracts/src/events/topic.ts)
@@ -19,11 +20,12 @@
 
 ## 更新摘要
 **已进行的更改**   
-- 新增施肥完成事件载荷接口 FertilizationFinishedPayload 的详细说明
-- 扩展控制服务完成事件主题枚举，包含 ControlFertilizationFinished
-- 更新消息模板系统，添加施肥执行完成的模板处理逻辑
-- 完善灌溉与施肥完成事件的对比分析
-- 更新使用示例，展示施肥完成事件的处理流程
+- 新增 AI 事件类型枚举 AiEventType，支持七种视频识别事件（虫情、人员闯入、农机状态、涝情、倒伏、火情、烟雾）
+- 新增机器类型枚举 MachineType，定义线路适用机型白名单（拖拉机、收割机、无人机、施肥机、运输车、其他）
+- 扩展事件载荷结构，新增 AiDetectedPayload 接口支持非虫情类 AI 识别事件
+- 完善消息模板系统，添加 AI 识别告警模板和对应的中文标签映射
+- 更新数据库迁移 048，同步 AI 事件类型约束和消息派单处置字段
+- 增强水肥一体化作业的事件体系，完善灌溉与施肥完成事件的对比分析
 
 ## 目录
 1. [简介](#简介)
@@ -41,7 +43,7 @@
 ## 简介
 @agri/contracts 是平台微服务间通信的"接口真相来源"，仅定义、不实现。它通过 TypeScript 类型、Zod 校验模式与枚举，统一了 REST 响应信封、分页参数、领域 DTO、错误码、事件以及**消息模板**等跨服务契约，确保各微服务在请求/响应格式、字段语义、错误处理和消息生成上保持一致。该包以多导出分区形式暴露能力，便于按需引用并降低耦合。
 
-**新增功能**：引入了集中式的消息模板系统，标准化事件到消息的转换过程，提供去重逻辑和统一的文案管理。**特别新增了施肥完成事件支持，完善了水肥一体化作业的事件体系**。
+**新增功能**：引入了集中式的消息模板系统，标准化事件到消息的转换过程，提供去重逻辑和统一的文案管理。**特别新增了 AI 事件类型枚举和机器类型枚举，完善了视频识别事件体系和农业作业设备管理能力**。
 
 ## 项目结构
 该包采用按职责分层的目录组织方式：common（通用常量与响应）、dto（领域数据传输对象）、enums（共享枚举）、errors（错误码与错误体）、events（领域事件）、**messages（消息模板）**。主入口 index.ts 汇总六个导出分区，package.json 定义了模块导出路径与构建脚本。
@@ -50,7 +52,7 @@
 graph TB
 A["packages/contracts<br/>主入口 index.ts"] --> B["common<br/>api-constant.ts / api-response.ts"]
 A --> C["dto<br/>device.dto.ts / geo.dto.ts / plot.dto.ts / season.dto.ts"]
-A --> D["enums"]
+A --> D["enums<br/>domain.enum.ts"]
 A --> E["errors"]
 A --> F["events<br/>topic.ts / payload.ts"]
 A --> G["messages<br/>message-template.ts"]
@@ -71,6 +73,7 @@ H["package.json<br/>exports 分区"] --> A
 - **Zod 分页校验 pageQuerySchema**：提供默认值与上限约束，供各服务复用。
 - **领域 DTO**：设备 DeviceBrief、坐标 Coordinate、几何 GeoPolygon、地块 PlotBrief、网格 GridRef、作物季 CropSeasonBrief。
 - **通用常量**：API 前缀 API_PREFIX、请求头 HEADER_REQUEST_ID、HEADER_TENANT_ID。
+- **领域枚举**：PlotStatus、DeviceCategory、SeasonStatus、TelemetryMetric、**AiEventType**、**MachineType**。
 - **消息模板系统**：MessageTemplate、MessageDraft、MessageType、MessageLevel，用于标准化事件到消息的转换。
 - **控制完成事件**：IrrigationFinishedPayload 与 FertilizationFinishedPayload，分别表示灌溉与施肥作业的完成状态。
 
@@ -81,11 +84,12 @@ H["package.json<br/>exports 分区"] --> A
 - [packages/contracts/src/dto/geo.dto.ts:1-18](file://packages/contracts/src/dto/geo.dto.ts#L1-L18)
 - [packages/contracts/src/dto/plot.dto.ts:1-23](file://packages/contracts/src/dto/plot.dto.ts#L1-L23)
 - [packages/contracts/src/dto/season.dto.ts:1-15](file://packages/contracts/src/dto/season.dto.ts#L1-L15)
+- [packages/contracts/src/enums/domain.enum.ts:55-85](file://packages/contracts/src/enums/domain.enum.ts#L55-L85)
 - [packages/contracts/src/messages/message-template.ts:1-161](file://packages/contracts/src/messages/message-template.ts#L1-L161)
 - [packages/contracts/src/events/payload.ts:104-148](file://packages/contracts/src/events/payload.ts#L104-L148)
 
 ## 架构总览
-@agri/contracts 作为契约层，被网关与各微服务共同消费。网关依据 API_PREFIX 路由，透传 x-request-id 与 x-tenant-id；各服务遵循 ApiResponse 与 PageQuery/PageResult 规范进行入参校验与出参封装；DTO 与枚举保证领域语义一致。**新增的消息模板系统将事件消费生成的消息文案与去重规则标准化为平台级契约，同时完善了水肥一体化作业的事件处理体系**。
+@agri/contracts 作为契约层，被网关与各微服务共同消费。网关依据 API_PREFIX 路由，透传 x-request-id 与 x-tenant-id；各服务遵循 ApiResponse 与 PageQuery/PageResult 规范进行入参校验与出参封装；DTO 与枚举保证领域语义一致。**新增的 AI 事件类型和机器类型枚举为视频识别系统和农业作业设备管理提供了标准化的数据类型支持，同时完善了水肥一体化作业的事件处理体系**。
 
 ```mermaid
 graph TB
@@ -97,6 +101,7 @@ subgraph "契约层 @agri/contracts"
 C_API["ApiResponse / PageQuery / PageResult"]
 C_CONST["API_PREFIX / 请求头常量"]
 C_DTO["领域 DTO"]
+C_ENUMS["领域枚举<br/>AiEventType / MachineType"]
 C_EVENTS["领域事件"]
 C_MESSAGES["消息模板系统"]
 end
@@ -105,6 +110,9 @@ S1["业务服务A"]
 S2["业务服务B"]
 CS["控制服务"]
 MS["消息服务"]
+VS["视频服务"]
+TS["遥测服务"]
+PS["地块服务"]
 end
 FE --> GW
 GW --> |REST /api/v1/*| S1
@@ -113,10 +121,15 @@ S1 --> C_API
 S2 --> C_API
 S1 --> C_DTO
 S2 --> C_DTO
+S1 --> C_ENUMS
+S2 --> C_ENUMS
 S1 --> C_EVENTS
 S2 --> C_EVENTS
 CS --> C_EVENTS
 MS --> C_MESSAGES
+VS --> C_ENUMS
+TS --> C_EVENTS
+PS --> C_ENUMS
 GW --> C_CONST
 FE --> C_CONST
 ```
@@ -220,9 +233,69 @@ class CropSeasonBrief {
 - [packages/contracts/src/dto/plot.dto.ts:1-23](file://packages/contracts/src/dto/plot.dto.ts#L1-L23)
 - [packages/contracts/src/dto/season.dto.ts:1-15](file://packages/contracts/src/dto/season.dto.ts#L1-L15)
 
-### 控制完成事件载荷
+### 领域枚举
 
-#### 灌溉完成载荷 IrrigationFinishedPayload
+#### AI 事件类型枚举 AiEventType
+视频 AI 识别事件类型，与数据库迁移 048 的 video_ai_events.event_type CHECK 白名单同步：
+- Pest：虫情识别，沿用原有 pestType 必填机制
+- PersonIntrusion：人员闯入检测
+- MachineStatus：农机状态监控
+- Flood：涝情识别
+- Lodging：倒伏检测
+- Fire：火情识别
+- Smoke：烟雾检测
+
+#### 机器类型枚举 MachineType
+线路适用机型白名单，与数据库迁移 047 的 applicable_machines 数组元素取值同步：
+- Tractor：拖拉机
+- Harvester：收割机
+- Drone：无人机
+- FertilizerMachine：施肥机
+- Transport：运输车
+- Other：其他类型
+
+```mermaid
+classDiagram
+class AiEventType {
++Pest : "PEST"
++PersonIntrusion : "PERSON_INTRUSION"
++MachineStatus : "MACHINE_STATUS"
++Flood : "FLOOD"
++Lodging : "LODGING"
++Fire : "FIRE"
++Smoke : "SMOKE"
+}
+class MachineType {
++Tractor : "TRACTOR"
++Harvester : "HARVESTER"
++Drone : "DRONE"
++FertilizerMachine : "FERTILIZER_MACHINE"
++Transport : "TRANSPORT"
++Other : "OTHER"
+}
+```
+
+**图表来源**
+- [packages/contracts/src/enums/domain.enum.ts:55-85](file://packages/contracts/src/enums/domain.enum.ts#L55-L85)
+
+**章节来源**
+- [packages/contracts/src/enums/domain.enum.ts:55-85](file://packages/contracts/src/enums/domain.enum.ts#L55-L85)
+
+### 事件载荷结构
+
+#### AI 识别事件载荷 AiDetectedPayload
+表示非虫情类的视频 AI 识别确认事件，支持多种识别场景：
+- parcelId：地块标识，用于事件关联和去重
+- cameraId：识别摄像头标识，用于现场定位和去重
+- eventType：事件类型，取值来自 AiEventType 枚举（PEST 不走本载荷，沿用 PestDetectedPayload）
+- level：发生等级，1 轻微、2 中等、3 严重
+- confidence：识别置信度，取值 0 到 1
+- imageFileId：现场影像文件标识，访问地址由文件服务解析
+- detectedAt：识别时间，ISO 8601 UTC
+
+#### 控制完成事件载荷
+
+##### 灌溉完成载荷 IrrigationFinishedPayload
 表示灌溉作业执行的完成状态，包含用水量、持续时间等关键指标：
 - commandId：结单的指令标识，用于重复投递的去重处理
 - parcelId：指令归属地块，未绑定地块时为空串
@@ -234,7 +307,7 @@ class CropSeasonBrief {
 - finishedAt：完成时间戳
 - prescriptionId：来源处方标识，人工指令可能缺失
 
-#### 施肥完成载荷 FertilizationFinishedPayload
+##### 施肥完成载荷 FertilizationFinishedPayload
 表示施肥作业执行的完成状态，包含施肥量、持续时间等关键指标：
 - commandId：结单的指令标识，用于重复投递的去重处理
 - parcelId：指令归属地块，未绑定地块时为空串
@@ -248,6 +321,15 @@ class CropSeasonBrief {
 
 ```mermaid
 classDiagram
+class AiDetectedPayload {
++string parcelId
++string cameraId
++"PEST"|"PERSON_INTRUSION"|"MACHINE_STATUS"|"FLOOD"|"LODGING"|"FIRE"|"SMOKE" eventType
++number level
++number confidence
++string imageFileId?
++string detectedAt
+}
 class IrrigationFinishedPayload {
 +string commandId
 +string parcelId
@@ -273,10 +355,12 @@ class FertilizationFinishedPayload {
 ```
 
 **图表来源**
-- [packages/contracts/src/events/payload.ts:104-148](file://packages/contracts/src/events/payload.ts#L104-L148)
+- [packages/contracts/src/events/payload.ts:67-82](file://packages/contracts/src/events/payload.ts#L67-L82)
+- [packages/contracts/src/events/payload.ts:128-172](file://packages/contracts/src/events/payload.ts#L128-L172)
 
 **章节来源**
-- [packages/contracts/src/events/payload.ts:104-148](file://packages/contracts/src/events/payload.ts#L104-L148)
+- [packages/contracts/src/events/payload.ts:67-82](file://packages/contracts/src/events/payload.ts#L67-L82)
+- [packages/contracts/src/events/payload.ts:128-172](file://packages/contracts/src/events/payload.ts#L128-L172)
 
 ## 消息模板系统
 
@@ -308,7 +392,7 @@ Deduplication --> Storage["消息服务存储"]
 ```
 
 **图表来源**
-- [packages/contracts/src/messages/message-template.ts:147-161](file://packages/contracts/src/messages/message-template.ts#L147-L161)
+- [packages/contracts/src/messages/message-template.ts:371-381](file://packages/contracts/src/messages/message-template.ts#L371-L381)
 
 ### 内置模板
 
@@ -323,6 +407,18 @@ Deduplication --> Storage["消息服务存储"]
 - 自动识别处方类型中文名（灌溉、施肥、植保）
 - 提取首项建议作为详情摘要
 - 按事件ID唯一去重，确保每份处方都有独立通知
+
+#### 虫情识别告警模板
+针对 telemetry.pest.detected 事件，提供标准化的告警消息生成：
+- 自动识别虫害等级中文名（轻微、中等、严重）
+- 根据等级动态设置消息类型和级别
+- 按「地块 + 虫害类型 + 等级 + 小时」聚合去重
+
+#### AI 识别告警模板
+针对 telemetry.ai.detected 事件，提供标准化的 AI 识别消息生成：
+- 自动识别事件类型中文名（虫情、人员闯入、农机状态、涝情、倒伏、火情、烟雾）
+- 智能处理不同事件类型的级别策略（农机状态为 NOTICE，火情烟雾严重级为 CRITICAL）
+- 按「地块 + 摄像头 + 类型 + 小时」聚合去重，抑制同一现场一小时内刷屏
 
 #### 灌溉执行完成模板
 针对 control.irrigation.finished 事件，提供标准化的完成通知：
@@ -340,14 +436,13 @@ Deduplication --> Storage["消息服务存储"]
 
 ### 去重策略
 消息模板系统实现了多种去重策略：
-1. **聚合去重**：对于越限告警，按「事件主题:地块:指标:方向:小时」生成去重键，有效抑制重复告警。
-2. **唯一去重**：对于处方通知和控制完成事件，按「事件主题:事件ID」生成去重键，确保每条通知的唯一性。
+1. **聚合去重**：对于越限告警和 AI 识别事件，按「事件主题:地块:指标:方向:小时」或「事件主题:地块:摄像头:类型:小时」生成去重键，有效抑制重复告警。
+2. **唯一去重**：对于处方通知、控制完成事件和指令超时，按「事件主题:事件ID」或「事件主题:指令ID」生成去重键，确保每条通知的唯一性。
 
 **章节来源**
-- [packages/contracts/src/messages/message-template.ts:1-161](file://packages/contracts/src/messages/message-template.ts#L1-L161)
-- [packages/contracts/src/messages/message-template.ts:272-292](file://packages/contracts/src/messages/message-template.ts#L272-L292)
-- [packages/contracts/src/events/topic.ts:1-25](file://packages/contracts/src/events/topic.ts#L1-L25)
-- [packages/contracts/src/events/payload.ts:104-148](file://packages/contracts/src/events/payload.ts#L104-L148)
+- [packages/contracts/src/messages/message-template.ts:1-382](file://packages/contracts/src/messages/message-template.ts#L1-L382)
+- [packages/contracts/src/events/topic.ts:1-26](file://packages/contracts/src/events/topic.ts#L1-L26)
+- [packages/contracts/src/events/payload.ts:67-82](file://packages/contracts/src/events/payload.ts#L67-L82)
 
 ## 依赖关系分析
 - **运行时依赖**：zod 用于运行时校验（如分页参数），提升契约一致性。
@@ -355,6 +450,9 @@ Deduplication --> Storage["消息服务存储"]
 - **模块导出**：package.json 将 common、dto、enums、errors、events、**messages**、authz 分别暴露为独立分区，便于按需引入。
 - **消息模板依赖**：消息模板系统依赖于 events 模块中的 EventTopic 常量和 Payload 类型定义。
 - **控制服务依赖**：控制服务引用 FertilizationFinishedPayload 和 IrrigationFinishedPayload 类型来构建完成事件。
+- **视频服务依赖**：视频服务引用 AiEventTypeValue 类型来处理 AI 事件。
+- **遥测服务依赖**：遥测服务引用 AiEventTypeValue 和 AiDetectedPayload 类型来处理 AI 识别事件。
+- **地块服务依赖**：地块服务引用 MachineTypeValue 类型来处理线路适用机型。
 
 ```mermaid
 graph LR
@@ -372,6 +470,10 @@ IDX --> AUTHZ["authz"]
 MSG --> EVT
 CS["control-service"] --> EVT
 CS --> MSG
+VS["video-service"] --> ENUMS
+TS["telemetry-service"] --> EVT
+TS --> ENUMS
+PS["plot-service"] --> ENUMS
 ```
 
 **图表来源**
@@ -392,6 +494,8 @@ CS --> MSG
 - **类型即契约**：TS 类型与 Zod 模式双重保障，编译期与运行期双重校验，降低集成成本。
 - **消息模板优化**：纯函数渲染无外部依赖，模板匹配使用 switch 语句保证 O(1) 查找性能，去重键生成避免字符串拼接开销。
 - **控制事件优化**：灌溉与施肥完成事件采用相同的结构设计，便于统一处理和批量操作。
+- **AI 事件优化**：AiEventType 枚举提供类型安全的 AI 事件分类，避免硬编码字符串导致的维护问题。
+- **机器类型优化**：MachineType 枚举统一管理农业设备类型，支持线路适用机型的标准化配置。
 
 ## 故障排查指南
 - **分页异常**：检查 pageQuerySchema 是否被正确应用，确认 sortBy 是否在接口文档白名单内，size 是否超过 200。
@@ -402,16 +506,20 @@ CS --> MSG
 - **消息去重异常**：验证 dedupeKey 生成逻辑是否符合预期，检查事件时间和地块标识是否正确传递。
 - **施肥完成事件异常**：检查 FertilizationFinishedPayload 字段完整性，确认 fertilizerKg 和 fertilizerSource 字段的取值逻辑。
 - **控制命令完成事件缺失**：确认 FINISHED_TOPIC_BY_TYPE 映射中包含 FERTILIZATION 类型，检查 buildFinishedEvent 函数的执行流程。
+- **AI 事件类型错误**：检查 AiEventType 枚举值是否与数据库约束一致，确认 eventType 字段取值合法。
+- **机器类型验证失败**：检查 MachineType 枚举值是否与线路配置匹配，确认 applicableMachines 数组元素取值正确。
+- **AI 识别事件处理异常**：检查 AiDetectedPayload 结构完整性，确认 cameraId、eventType、level 等关键字段正确传递。
 
 **章节来源**
 - [packages/contracts/src/common/api-response.ts:1-61](file://packages/contracts/src/common/api-response.ts#L1-L61)
 - [packages/contracts/src/common/api-constant.ts:1-9](file://packages/contracts/src/common/api-constant.ts#L1-L9)
 - [packages/contracts/src/messages/message-template.ts:124-161](file://packages/contracts/src/messages/message-template.ts#L124-L161)
-- [packages/contracts/src/messages/message-template.ts:272-292](file://packages/contracts/src/messages/message-template.ts#L272-L292)
+- [packages/contracts/src/messages/message-template.ts:371-381](file://packages/contracts/src/messages/message-template.ts#L371-L381)
 - [apps/control-service/src/command-finished.ts:25-29](file://apps/control-service/src/command-finished.ts#L25-L29)
+- [packages/contracts/src/enums/domain.enum.ts:55-85](file://packages/contracts/src/enums/domain.enum.ts#L55-L85)
 
 ## 结论
-@agri/contracts 通过统一的响应信封、分页模型、领域 DTO、常量以及**集中式消息模板系统**，为平台微服务提供了稳定、可演进、可验证的契约基座。配合 Zod 校验与 TS 类型系统，可在编译期与运行期同时保障一致性，显著降低跨服务协作成本，并为版本治理与向后兼容提供坚实基础。**新增的施肥完成事件支持和完善的水肥一体化事件体系进一步增强了平台的农业作业管理能力，确保了灌溉与施肥作业数据的完整性和一致性**。
+@agri/contracts 通过统一的响应信封、分页模型、领域 DTO、常量、**领域枚举**以及**集中式消息模板系统**，为平台微服务提供了稳定、可演进、可验证的契约基座。配合 Zod 校验与 TS 类型系统，可在编译期与运行期同时保障一致性，显著降低跨服务协作成本，并为版本治理与向后兼容提供坚实基础。**新增的 AI 事件类型枚举、机器类型枚举和完善的水肥一体化事件体系进一步增强了平台的智能化作业管理能力，确保了视频识别事件和农业作业数据的完整性和一致性**。
 
 ## 附录：使用示例与最佳实践
 
@@ -421,8 +529,10 @@ CS --> MSG
   - 导入 ApiResponse、PageQuery、PageResult、pageQuerySchema 用于请求校验与响应封装。
   - 导入 API_PREFIX、HEADER_REQUEST_ID、HEADER_TENANT_ID 用于网关路由与请求头处理。
   - 按需导入 DTO（DeviceBrief、Coordinate、GeoPolygon、PlotBrief、GridRef、CropSeasonBrief）用于接口入参与出参。
+  - **导入领域枚举**：AiEventType、MachineType 及其 Value 类型用于事件分类和设备类型管理。
   - **导入消息模板相关类型**：MessageTemplate、MessageDraft、MessageType、MessageLevel、buildMessageDraft。
   - **导入控制完成事件类型**：FertilizationFinishedPayload、IrrigationFinishedPayload 用于处理水肥作业完成事件。
+  - **导入 AI 事件类型**：AiEventTypeValue、AiDetectedPayload 用于处理视频识别事件。
 
 参考路径：
 - [packages/contracts/src/common/api-response.ts:1-61](file://packages/contracts/src/common/api-response.ts#L1-L61)
@@ -431,8 +541,10 @@ CS --> MSG
 - [packages/contracts/src/dto/geo.dto.ts:1-18](file://packages/contracts/src/dto/geo.dto.ts#L1-L18)
 - [packages/contracts/src/dto/plot.dto.ts:1-23](file://packages/contracts/src/dto/plot.dto.ts#L1-L23)
 - [packages/contracts/src/dto/season.dto.ts:1-15](file://packages/contracts/src/dto/season.dto.ts#L1-L15)
+- [packages/contracts/src/enums/domain.enum.ts:55-85](file://packages/contracts/src/enums/domain.enum.ts#L55-L85)
 - [packages/contracts/src/messages/message-template.ts:1-161](file://packages/contracts/src/messages/message-template.ts#L1-L161)
-- [packages/contracts/src/events/payload.ts:104-148](file://packages/contracts/src/events/payload.ts#L104-L148)
+- [packages/contracts/src/events/payload.ts:67-82](file://packages/contracts/src/events/payload.ts#L67-L82)
+- [packages/contracts/src/events/payload.ts:128-172](file://packages/contracts/src/events/payload.ts#L128-L172)
 
 ### 契约驱动开发流程
 - **设计阶段**：先在 @agri/contracts 中定义 DTO、枚举与响应信封，明确字段含义与取值范围。
@@ -445,6 +557,18 @@ CS --> MSG
 - **去重键设计**：根据业务场景选择合适的去重策略，避免过度聚合导致重要消息丢失。
 - **级别配置**：合理设置消息级别，确保关键告警不会被用户偏好过滤掉。
 - **文案管理**：使用中文标签和描述，便于前端展示和运维监控。
+
+### AI 事件处理最佳实践
+- **事件类型验证**：使用 AiEventType 枚举确保事件类型合法性，避免硬编码字符串。
+- **差异化处理**：针对不同事件类型采用不同的处理策略（如农机状态为通知，火情烟雾为严重告警）。
+- **去重策略**：按「地块 + 摄像头 + 类型 + 小时」聚合去重，抑制同一现场一小时内刷屏。
+- **置信度阈值**：合理设置识别置信度阈值，平衡误报率和漏报率。
+
+### 机器类型管理最佳实践
+- **类型白名单**：使用 MachineType 枚举统一管理农业设备类型，确保数据一致性。
+- **线路配置**：在线路适用机型配置中使用枚举值，支持多机型适配。
+- **容错处理**：消费侧对未知机型取值保持容错，支持未来扩展。
+- **前端展示**：利用枚举值映射中文标签，提升用户体验。
 
 ### 控制完成事件处理最佳实践
 - **事件类型映射**：在 FINISHED_TOPIC_BY_TYPE 中登记新的可计量指令类型。
@@ -463,4 +587,5 @@ CS --> MSG
 - [packages/contracts/package.json:1-50](file://packages/contracts/package.json#L1-L50)
 - [packages/contracts/src/index.ts:1-14](file://packages/contracts/src/index.ts#L1-L14)
 - [packages/contracts/src/messages/message-template.ts:124-138](file://packages/contracts/src/messages/message-template.ts#L124-L138)
+- [packages/contracts/src/enums/domain.enum.ts:55-85](file://packages/contracts/src/enums/domain.enum.ts#L55-L85)
 - [apps/control-service/src/command-finished.ts:25-29](file://apps/control-service/src/command-finished.ts#L25-L29)
