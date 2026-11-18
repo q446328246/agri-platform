@@ -83,12 +83,18 @@ async function main() {
   if (d2.length !== 2) fail("days=2", `期望 2, 实际${d2.length}`);
   pass("days=2 预报", `${d2.length} 天`);
 
-  // 5. 气象预警
+  // 5. 气象预警：种子预警的失效时间是落库时刻的相对窗口（012 迁移 now()+22h 等），
+  // 部署库运行多日后自然全部过期——生效中 0 条是诚实状态不算 FAIL；
+  // 改验双向口径：active=false 能回查全量历史，且历史非空（种子仍在案）。
   const alerts = await call("/weather/alerts?page=1&size=20");
   if (alerts.status !== 200) fail("气象预警", `status=${alerts.status}`);
   const alertItems = alerts.data?.items ?? [];
-  if (alertItems.length < 1) fail("预警条数", "至少应有 1 条活跃预警");
-  pass("气象预警", `${alerts.data?.total ?? 0} 条`);
+  const allAlerts = await call("/weather/alerts?page=1&size=20&active=false");
+  if (allAlerts.status !== 200) fail("预警全量回查", `status=${allAlerts.status}`);
+  const historyItems = allAlerts.data?.items ?? [];
+  if (historyItems.length < 1) fail("预警历史条数", "active=false 应能回查到种子预警历史");
+  if (alertItems.length > historyItems.length) fail("预警口径", "生效中条数不应超过全量历史");
+  pass("气象预警", `生效 ${alertItems.length} / 历史 ${historyItems.length} 条`);
 
   // 6. 非法枚举 400
   const badLevel = await call("/weather/alerts?level=SEVERE");
@@ -144,4 +150,6 @@ async function main() {
   console.log(`\n共 ${results.length} 项，全 PASS`);
 }
 
-main().catch((err) => { console.error(err.message); results.forEach((r) => console.log(r)); process.exit(1); });
+// 不用 process.exit(1)：Windows 下 fetch 句柄尚在关闭时强退会触发 libuv 断言崩溃
+// （src\win\async.c UV_HANDLE_CLOSING），置 exitCode 让事件循环自然排空退出。
+main().catch((err) => { console.error(err.message); results.forEach((r) => console.log(r)); process.exitCode = 1; });

@@ -826,6 +826,17 @@
 - **并行争抢治理（如实记录）**：默认吃满核数（20 线程）并行时 Windows 下连接级 fetch failed / 首用例超时漂移于各 HTTP 用例（单文件跑均绿）→ vitest.config 限 `maxForks: 4` + `retry: 1` 兑底（均带注释说明）；终次全量跑全绿且 0 次重试。
 - **交付口径**：`tsc -b` 类型预检过；本批无前端 src 改动（vue-tsc 不在范围）；无业务码变更无需重建镜像；浏览器目视仍未做。
 
+### 2026-11-18（续十一）：全量冒烟执行与清史态适配收口（14 脚本全绿）
+
+- **执行**：14 个冒烟脚本全部通过。外部网关型 4 个直接打已运行部署（filters 32 项 / demo 37 项 / zones 全段 / weather 13 项）；自拉起型 10 个先 `pnpm run build` 刷新 dist 再逐个执行（gateway / services / authz / identity / events / consumers / decision-telemetry / protocol / receipt / messages，identity 显式 DB_URL）。
+- **首跑 6 失败修复（只改冒烟脚本，未动业务码）**：
+  - **filters 适配 046 清史态**：任务/指令/财务/溯源/遥测告警五域基数为 0 时不再强求命中条数，新增 `checkClearedDomain` 验「筛选端点仍 200 且诚实返回空」（空列表可用态本身就是清史后的验收口径）；类型/状态/事件/kind 断言改从全量首条取实际值（不再写死 IRRIGATION/SENT/FARM_OPERATION/INPUT，冒烟自身联动会写入 QUEUED 指令与 PRESCRIPTION_ISSUED 溯源）；财务汇总改与全量条目求和比对，不预设产出>0。
+  - **weather 预警口径**：012 种子预警失效时间是落库时刻相对窗口（now()+22h 等），部署库运行多日后自然全部过期——生效中 0 条是诚实状态不算 FAIL，改验 active=false 全量历史回查非空；另 `process.exit(1)` 改置 `exitCode`，避开 Windows 下 fetch 句柄尚在关闭时强退触发 libuv 断言崩溃（src\win\async.c UV_HANDLE_CLOSING）。
+  - **三个自拉起脚本端口 EACCES**：本机安全软件对 3213/3606/3651 回环绑定拦截（端口空闲也拒，实测邻近端口正常，非 Hyper-V 排除范围）——services file 改 3215、events decision 改 3608、device-protocol control 改 3655，均带注释。
+  - **message-preferences 目录口径过时**：偏好目录断言从写死 2 主题改引契约 `MESSAGE_TEMPLATE_TOPICS`（P2 新增 AI 识别主题后已扩至 8 项，逐主题在场校验，后续新增主题不再过时）。
+- **副产物清理（保持部署清史态）**：weather 决策联动与消息冒烟自动指令在部署库留下处方 1 / 指令 6 / 溯源 2 / 消息 5 / decision_outbox 1，单事务外科清除（辅表 executions/outcomes 本就 0 行）；zones 冒烟地块与续九核验任务保持软删归档（与归档语义一致，列表不可见）；自拉起脚本自建 P-SMOKE 前缀数据各自 cleanData 已清（设备/读数/事件日志复查均 0）。清理后复跑只读 filters **32 项全 PASS**，app 容器仍 Healthy。
+- **交付口径**：无业务码变更无需重建镜像；单测续十全绿后本批未改业务码不重跑；浏览器目视仍未做。至此 A 类 18 项缺口的交付、部署、单测、冒烟四层验证全部收口。
+
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
 > 口径：A 类是不依赖外部条件、可在现有代码上补齐的功能缺口；B 类依赖现场硬件 / 第三方系统 / 算法服务，与「下一步」第 10 条既有口径一致；C 类是已文档化的刻意架构偏差，不是漏实现。每条均经代码核实，不臆造。
@@ -1268,3 +1279,5 @@
 | 2026-11-18 | `node scripts/migrate-postgres.mjs` + `docker compose --profile app up -d --build` + `node .runtime/verify-p4.mjs`（P4 部署 + 056 遥测种子，用户点名） | 迁移 054–056 应用成功（12/18/180ms，种子 7504 条读数/8 台演示采样节点）；双镜像重建 app Healthy；首轮核验 10/13 暴露铺带方向断言写反（实际自东向西）修正后 **12 项全 PASS**；页面默认自动选向与梯度平行致逐带几乎无差异 → Navigation 补调方向提示，vue-tsc 过后 edge 单目标重建换装，复跑仍 12/12；浏览器目视因 IDE 视图隐藏受阻，页面等价核验（真实编排+默认参数）已证热力 15 格可出图与逐带差异 |
 | 2026-11-18 | P5 交付（A13 分屏+录像留档 + A17 移动端 H5，迁移 057 编写） | 本地 `tsc -b`（全部后端）+ `vue-tsc`（web + mobile）三项类型预检全过（exit 0）；单测（recording-archive.spec 六用例已写）/冒烟/浏览器未跑；迁移 057 未应用、镜像未重建（P5 部署未被点名）；新后端 SQL 引用新表，部署前须先应用 057（待点名）；pnpm-lock.yaml 已收录 @agri/mobile，Dockerfile/nginx /m/ 接线随下次部署生效 |
 | 2026-11-18 | `node scripts/migrate-postgres.mjs` + `docker build --target app/edge` + `compose --profile app up -d` + `node .runtime/verify-p5.mjs`（P5 部署，用户点名「下一步」） | 迁移 057 应用成功（7ms）；双目标分别构建后不带 --build 换装（postgres/minio 未重启），app Healthy/edge Up；只读核验 **15 项全 PASS**（留档端点校验/补登落库/容器内内部回填 401·400·404·200/ONLINE===3 回归/桌面 38 chunk 三标记/移动端 /m/ 可达与 5 chunk 三标记）；副产物仅一条 MANUAL 演示档案回填 FAILED；单测仍未跑，浏览器目视待用户验收 |
+| 2026-11-18 | 全量单测 `pnpm exec vitest run`（续十，用户点名「下一步」） | **726 用例全绿**（708 过 + 18 跳过 + 0 败 + 0 重试）；首跑 37 失败两类修复（31 例 harness 补桩 + 6 例断言口径随业务更新，只改测试未动业务码）；vitest.config 限 maxForks:4 + retry:1 治 Windows 满核并行环回抖动；tsc -b 过 |
+| 2026-11-18 | 全量冒烟 14 脚本（续十一，用户点名「下一步」）：外部网关型 4 打已运行部署 + `pnpm run build` 后自拉起型 10 | **14 脚本全绿**（filters 32 / demo 37 / zones / weather 13 + 自拉起 10）；首跑 6 失败只改冒烟脚本修复：filters 五清史空域诚实返回空口径 + 枚举断言随数据态自适应、weather 种子预警自然过期改双向口径 + exitCode 避 libuv 崩溃、三脚本端口避本机 EACCES 拦截（3213/3606/3651→3215/3608/3655）、偏好目录改引 MESSAGE_TEMPLATE_TOPICS；冒烟副产物（处方 1/指令 6/溯源 2/消息 5/outbox 1）单事务清除恢复清史态，清理后 filters 复跑 32 项全 PASS |

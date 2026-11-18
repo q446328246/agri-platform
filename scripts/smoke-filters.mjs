@@ -51,6 +51,16 @@ async function check(label, path, predicate, { min = 1, max = Infinity } = {}) {
   return items;
 }
 
+/** 清史空域（迁移 046 点名清空的任务/指令/财务/溯源）：基数为 0 时不再强求命中条数，
+ *  改为验证筛选端点仍 200 且诚实返回空——空列表可用态本身就是清史后的验收口径。 */
+async function checkClearedDomain(label, basePath, filterQuery) {
+  const filtered = await call(`${basePath}${filterQuery}`);
+  if (filtered.status !== 200) throw new Error(`${label} 空域筛选端点异常: status=${filtered.status} message=${filtered.message}`);
+  const items = Array.isArray(filtered.data) ? filtered.data : (filtered.data?.items ?? []);
+  if (items.length !== 0) throw new Error(`${label} 空域筛选应返回 0 条，实际 ${items.length}`);
+  results.push(`PASS ${label.padEnd(18, " ")}     0 条  GET ${basePath}${filterQuery}（清史空域）`);
+}
+
 async function main() {
   const login = await fetch(`${API}/auth/login`, {
     method: "POST",
@@ -96,34 +106,70 @@ async function main() {
   const FROM = "2000-01-01";
   const TO = "2999-12-31";
   const allTasks = await itemsOf("/farm-tasks?page=1&size=100");
-  await check("任务·类型", `/farm-tasks?page=1&size=100&type=IRRIGATION`, (t) => t.type === "IRRIGATION", { max: allTasks.length });
-  await check("任务·状态", `/farm-tasks?page=1&size=100&status=PENDING&from=${FROM}&to=${TO}`, (t) => t.status === "PENDING", { max: allTasks.length });
-  const plotTask = allTasks.find((t) => t.plotCode);
-  await check("任务·地块", `/farm-tasks?page=1&size=100&plotCode=${encodeURIComponent(plotTask.plotCode)}`, (t) => t.plotCode === plotTask.plotCode, { max: allTasks.length });
-  await check("任务·时间区间", `/farm-tasks?page=1&size=100&from=${FROM}&to=${TO}`, (t) => (t.scheduledAt ?? t.createdAt) >= FROM && (t.scheduledAt ?? t.createdAt) <= `${TO}T23:59:59.999Z`, { max: allTasks.length });
+  if (allTasks.length === 0) {
+    await checkClearedDomain("任务·类型(空域)", "/farm-tasks?page=1&size=100", "&type=IRRIGATION");
+    await checkClearedDomain("任务·状态(空域)", "/farm-tasks?page=1&size=100", `&status=PENDING&from=${FROM}&to=${TO}`);
+  } else {
+    // 类型不写死 IRRIGATION：从全量里挑实际存在的类型验筛选语义，口径随数据态自适应
+    const taskType = allTasks[0].type;
+    await check("任务·类型", `/farm-tasks?page=1&size=100&type=${encodeURIComponent(taskType)}`, (t) => t.type === taskType, { max: allTasks.length });
+    const taskStatus = allTasks[0].status;
+    await check("任务·状态", `/farm-tasks?page=1&size=100&status=${encodeURIComponent(taskStatus)}&from=${FROM}&to=${TO}`, (t) => t.status === taskStatus, { max: allTasks.length });
+    const plotTask = allTasks.find((t) => t.plotCode);
+    await check("任务·地块", `/farm-tasks?page=1&size=100&plotCode=${encodeURIComponent(plotTask.plotCode)}`, (t) => t.plotCode === plotTask.plotCode, { max: allTasks.length });
+    await check("任务·时间区间", `/farm-tasks?page=1&size=100&from=${FROM}&to=${TO}`, (t) => (t.scheduledAt ?? t.createdAt) >= FROM && (t.scheduledAt ?? t.createdAt) <= `${TO}T23:59:59.999Z`, { max: allTasks.length });
+  }
 
   // ── 控制指令：类型/状态/时间区间 ──
   const allCommands = await itemsOf("/control/commands?page=1&size=100");
-  await check("指令·类型", `/control/commands?page=1&size=100&type=IRRIGATION`, (c) => c.type === "IRRIGATION", { max: allCommands.length });
-  await check("指令·状态", `/control/commands?page=1&size=100&status=SENT`, (c) => c.status === "SENT", { max: allCommands.length });
-  await check("指令·时间区间", `/control/commands?page=1&size=100&from=${FROM}&to=${TO}`, (c) => c.createdAt >= FROM && c.createdAt <= `${TO}T23:59:59.999Z`, { max: allCommands.length });
+  if (allCommands.length === 0) {
+    await checkClearedDomain("指令·类型(空域)", "/control/commands?page=1&size=100", "&type=IRRIGATION");
+    await checkClearedDomain("指令·状态(空域)", "/control/commands?page=1&size=100", "&status=SENT");
+  } else {
+    await check("指令·类型", `/control/commands?page=1&size=100&type=IRRIGATION`, (c) => c.type === "IRRIGATION", { max: allCommands.length });
+    // 状态不写死 SENT：清史后库里可能只有事件联动刚生成的 QUEUED 指令，
+    // 从全量里挑一个实际存在的状态验筛选语义，口径随数据态自适应。
+    const cmdStatus = allCommands[0].status;
+    await check("指令·状态", `/control/commands?page=1&size=100&status=${encodeURIComponent(cmdStatus)}`, (c) => c.status === cmdStatus, { max: allCommands.length });
+    await check("指令·时间区间", `/control/commands?page=1&size=100&from=${FROM}&to=${TO}`, (c) => c.createdAt >= FROM && c.createdAt <= `${TO}T23:59:59.999Z`, { max: allCommands.length });
+  }
 
   // ── 投入产出：kind/category/keyword/时间区间 + summary 联动 ──
   const allEntries = await itemsOf("/finance/entries");
-  await check("核算·投入", "/finance/entries?kind=INPUT", (e) => e.kind === "INPUT", { max: allEntries.length });
-  const categoryEntry = allEntries.find((e) => e.kind === "INPUT");
-  await check("核算·类别", `/finance/entries?category=${encodeURIComponent(categoryEntry.category)}`, (e) => e.category === categoryEntry.category, { max: allEntries.length });
-  await check("核算·时间区间", `/finance/entries?from=${FROM}&to=${TO}`, (e) => e.createdAt >= FROM && e.createdAt <= `${TO}T23:59:59.999Z`, { max: allEntries.length });
-  const outputSummary = await call("/finance/summary?kind=OUTPUT");
-  if (outputSummary.status !== 200) throw new Error(`核算汇总联动失败 status=${outputSummary.status}`);
-  if (!(outputSummary.data?.input === 0) || !(outputSummary.data?.output > 0)) throw new Error(`汇总未按 kind=OUTPUT 联动：${JSON.stringify(outputSummary.data)}`);
-  results.push(`PASS 核算·汇总联动        产出 ${outputSummary.data.output.toFixed(2)}  GET /finance/summary?kind=OUTPUT`);
+  if (allEntries.length === 0) {
+    await checkClearedDomain("核算·投入(空域)", "/finance/entries", "?kind=INPUT");
+    const emptySummary = await call("/finance/summary?kind=OUTPUT");
+    if (emptySummary.status !== 200) throw new Error(`核算汇总(空域)端点异常 status=${emptySummary.status}`);
+    if (!(emptySummary.data?.input === 0) || !(emptySummary.data?.output === 0)) throw new Error(`空域汇总应双零：${JSON.stringify(emptySummary.data)}`);
+    results.push("PASS 核算·汇总(空域)        收支双零  GET /finance/summary?kind=OUTPUT（清史空域）");
+  } else {
+    // kind/category 同样从全量首条取实际值，不预设库里必有 INPUT 条目
+    const kindEntry = allEntries[0];
+    await check("核算·收支", `/finance/entries?kind=${encodeURIComponent(kindEntry.kind)}`, (e) => e.kind === kindEntry.kind, { max: allEntries.length });
+    await check("核算·类别", `/finance/entries?category=${encodeURIComponent(kindEntry.category)}`, (e) => e.category === kindEntry.category, { max: allEntries.length });
+    await check("核算·时间区间", `/finance/entries?from=${FROM}&to=${TO}`, (e) => e.createdAt >= FROM && e.createdAt <= `${TO}T23:59:59.999Z`, { max: allEntries.length });
+    const outputSummary = await call("/finance/summary?kind=OUTPUT");
+    if (outputSummary.status !== 200) throw new Error(`核算汇总联动失败 status=${outputSummary.status}`);
+    // 不预设产出>0：汇总与全量条目求和比对，验 kind 联动语义本身
+    const expectedOutput = allEntries.filter((e) => e.kind === "OUTPUT").reduce((sum, e) => sum + Number(e.amount ?? 0), 0);
+    if (!(outputSummary.data?.input === 0) || Math.abs(Number(outputSummary.data?.output ?? 0) - expectedOutput) > 0.01) {
+      throw new Error(`汇总未按 kind=OUTPUT 联动：期望产出${expectedOutput.toFixed(2)}，实际${JSON.stringify(outputSummary.data)}`);
+    }
+    results.push(`PASS 核算·汇总联动        产出 ${Number(outputSummary.data.output).toFixed(2)}  GET /finance/summary?kind=OUTPUT`);
+  }
 
   // ── 溯源：事件/关键词/时间区间 ──
   const allTraces = await itemsOf("/trace/records?page=1&size=100");
-  await check("溯源·事件", "/trace/records?page=1&size=100&event=FARM_OPERATION", (r) => r.event === "FARM_OPERATION", { max: allTraces.length });
-  await check("溯源·操作人", `/trace/records?page=1&size=100&keyword=${encodeURIComponent(allTraces[0].operator)}`, (r) => JSON.stringify(r).includes(allTraces[0].operator), { max: allTraces.length });
-  await check("溯源·时间区间", `/trace/records?page=1&size=100&from=${FROM}&to=${TO}`, (r) => r.createdAt >= FROM && r.createdAt <= `${TO}T23:59:59.999Z`, { max: allTraces.length });
+  if (allTraces.length === 0) {
+    await checkClearedDomain("溯源·事件(空域)", "/trace/records?page=1&size=100", "&event=FARM_OPERATION");
+    await checkClearedDomain("溯源·时间(空域)", "/trace/records?page=1&size=100", `&from=${FROM}&to=${TO}`);
+  } else {
+    // 事件不写死 FARM_OPERATION：清史后首条可能是决策联动的 PRESCRIPTION_ISSUED，取实际值验筛选
+    const traceEvent = allTraces[0].event;
+    await check("溯源·事件", `/trace/records?page=1&size=100&event=${encodeURIComponent(traceEvent)}`, (r) => r.event === traceEvent, { max: allTraces.length });
+    await check("溯源·操作人", `/trace/records?page=1&size=100&keyword=${encodeURIComponent(allTraces[0].operator)}`, (r) => JSON.stringify(r).includes(allTraces[0].operator), { max: allTraces.length });
+    await check("溯源·时间区间", `/trace/records?page=1&size=100&from=${FROM}&to=${TO}`, (r) => r.createdAt >= FROM && r.createdAt <= `${TO}T23:59:59.999Z`, { max: allTraces.length });
+  }
 
   // ── 视频：状态/关键词 ──
   const allCameras = await itemsOf("/video/cameras?page=1&size=50");
@@ -138,11 +184,17 @@ async function main() {
   const plotLatest = allLatest.find((r) => r.plotCode);
   await check("遥测·地块", `/telemetry/latest?plotCode=${encodeURIComponent(plotLatest.plotCode)}`, (r) => r.plotCode === plotLatest.plotCode, { max: allLatest.length });
   const allAlerts = await itemsOf("/telemetry/alerts");
-  const alertLevel = allAlerts[0]?.level;
-  await check("告警·级别", `/telemetry/alerts?level=${encodeURIComponent(alertLevel)}`, (a) => String(a.level) === String(alertLevel), { max: allAlerts.length });
+  if (allAlerts.length === 0) {
+    // 遥测告警同属 046 清史域：空表时只验筛选端点诚实返回空
+    await checkClearedDomain("告警·级别(空域)", "/telemetry/alerts", "?level=WARNING");
+  } else {
+    const alertLevel = allAlerts[0]?.level;
+    await check("告警·级别", `/telemetry/alerts?level=${encodeURIComponent(alertLevel)}`, (a) => String(a.level) === String(alertLevel), { max: allAlerts.length });
+  }
   const allPests = await itemsOf("/telemetry/pests");
   await check("虫情·类型", `/telemetry/pests?pestType=${encodeURIComponent(allPests[0].pestType)}`, (p) => p.pestType === allPests[0].pestType, { max: allPests.length });
-  await check("虫情·等级", "/telemetry/pests?level=3", (p) => Number(p.level) === 3, { max: allPests.length });
+  const pestLevel = allPests[0].level;
+  await check("虫情·等级", `/telemetry/pests?level=${encodeURIComponent(pestLevel)}`, (p) => Number(p.level) === Number(pestLevel), { max: allPests.length });
   const filteredOverview = await call(`/telemetry/overview?metric=${encodeURIComponent(metric)}`);
   if (filteredOverview.status !== 200) throw new Error(`四情总览筛选失败 status=${filteredOverview.status}`);
   if (!filteredOverview.data.latest.every((r) => r.metric === metric)) throw new Error("四情总览 latest 段未按 metric 过滤");

@@ -14,7 +14,8 @@ import { Client } from "pg";
 const root = process.cwd();
 const DB = process.env.DB_URL ?? "postgresql://agri:agri@127.0.0.1:5432/agri";
 const TEL = 3604;
-const DEC = 3606;
+// DEC 避开 3606：本机安全软件对该端口回环绑定拦 EACCES（端口空闲也拒），改 3608
+const DEC = 3608;
 const MSG = 3612;
 const PLOT = "P-SMOKE-EVENTS";
 const DEVICE = `device-smoke-events-${Date.now()}`;

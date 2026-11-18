@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { writeSync } from "node:fs";
 import path from "node:path";
 import { Client } from "pg";
+import { MESSAGE_TEMPLATE_TOPICS } from "../packages/contracts/dist/index.js";
 
 /**
  * 消息中心冒烟：订阅偏好过滤 + 来源主题去重 + 偏好接口校验。
@@ -138,11 +139,15 @@ try {
   await client.connect();
   await cleanData();
 
-  // 1. 偏好目录：未配置时按模板登记的两个主题返回默认值
+  // 1. 偏好目录：未配置时按契约模板目录全量主题返回默认值（数量随 MESSAGE_TEMPLATE_TOPICS 自适应，
+  // 不再写死早期两主题口径，P2 新增 AI 识别主题后目录已扩至八项）
   const initial = await request(`http://127.0.0.1:${MSG}/api/v1/messages/preferences`);
   assert(initial.status === 200, `读取偏好失败：${JSON.stringify(initial)}`);
   const items = initial.body.data?.items ?? [];
-  assert(items.length === 2, `偏好目录数量异常：${JSON.stringify(items)}`);
+  assert(items.length === MESSAGE_TEMPLATE_TOPICS.length, `偏好目录数量异常：期望${MESSAGE_TEMPLATE_TOPICS.length}，实际${items.length}`);
+  for (const topic of MESSAGE_TEMPLATE_TOPICS) {
+    assert(items.some((item) => item.topic === topic), `偏好目录缺主题：${topic}`);
+  }
   const thresholdItem = items.find((item) => item.topic === THRESHOLD);
   assert(thresholdItem?.label === "遥测越限告警", `偏好展示名异常：${JSON.stringify(thresholdItem)}`);
   assert(thresholdItem?.type === "ALERT" && thresholdItem?.enabled === true && thresholdItem?.minLevel === "INFO", "偏好默认值异常");

@@ -24,7 +24,8 @@ import { getModbusProfile } from "../apps/iot-service/dist/device-binding.js";
 
 const root = process.cwd();
 const DB = process.env.DB_URL ?? "postgresql://agri:agri@127.0.0.1:5432/agri";
-const CTRL = 3651;
+// CTRL 避开 3651：本机安全软件对该端口回环绑定拦 EACCES（端口空闲也拒），改 3655
+const CTRL = 3655;
 const IOT = 3652;
 const SLAVE_PORT = 3653;
 const PLOT = "P-SMOKE-PROTOCOL";

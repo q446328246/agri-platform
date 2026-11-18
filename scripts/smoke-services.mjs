@@ -5,7 +5,8 @@ import path from "node:path";
 import { getServices } from "./service-registry.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ports = { auth: 3201, plot: 3202, iot: 3203, telemetry: 3204, weather: 3205, decision: 3206, operation: 3207, control: 3208, video: 3209, finance: 3210, trace: 3211, message: 3212, file: 3213, platform: 3214, gateway: 8280 };
+// file 端口避开 3213：本机安全软件对该端口回环绑定拦 EACCES（端口空闲也拒），改 3215
+const ports = { auth: 3201, plot: 3202, iot: 3203, telemetry: 3204, weather: 3205, decision: 3206, operation: 3207, control: 3208, video: 3209, finance: 3210, trace: 3211, message: 3212, file: 3215, platform: 3214, gateway: 8280 };
 const env = { ...process.env, ...Object.fromEntries(Object.entries(ports).map(([name, port]) => [`AGRI_${name.toUpperCase()}_PORT`, String(port)])) };
 const services = getServices(env);
 const children = [];
