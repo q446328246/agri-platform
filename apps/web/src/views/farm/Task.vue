@@ -64,6 +64,7 @@
         <el-button type="primary" @click="handleCreate">
           <el-icon><Plus /></el-icon>新建任务
         </el-button>
+        <el-button @click="openQueue">设备任务队列</el-button>
       </div>
 
       <el-table v-loading="loading" :data="tableData" border stripe>
@@ -88,6 +89,9 @@
           </template>
         </el-table-column>
         <el-table-column prop="assigneeName" label="负责人" width="120" />
+        <el-table-column prop="deviceId" label="执行设备" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.deviceId || '—' }}</template>
+        </el-table-column>
         <el-table-column prop="planStartDate" label="计划开始时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.planStartDate) }}</template>
         </el-table-column>
@@ -133,6 +137,7 @@
         <el-form-item label="计划开始"><el-date-picker v-model="createForm.scheduledAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" style="width: 100%" /></el-form-item>
         <el-form-item label="计划结束"><el-date-picker v-model="createForm.scheduledEndAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" style="width: 100%" /></el-form-item>
         <el-form-item label="负责人"><el-input v-model="createForm.assigneeName" maxlength="100" placeholder="选填" /></el-form-item>
+        <el-form-item label="执行设备"><el-input v-model="createForm.deviceId" maxlength="100" placeholder="选填，设备 ID；同设备重叠任务按队列顺序执行" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="createVisible = false">取消</el-button><el-button type="primary" :loading="creating" @click="submitCreate">创建</el-button></template>
     </el-dialog>
@@ -173,6 +178,7 @@
           <el-descriptions-item label="计划开始">{{ formatDateTime(taskDetail.scheduledAt) }}</el-descriptions-item>
           <el-descriptions-item label="计划结束">{{ formatDateTime(taskDetail.scheduledEndAt) }}</el-descriptions-item>
           <el-descriptions-item label="负责人">{{ taskDetail.assigneeName || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="执行设备">{{ taskDetail.deviceId || '-' }}</el-descriptions-item>
           <el-descriptions-item label="开始作业">{{ formatDateTime(taskDetail.startedAt) }}</el-descriptions-item>
           <el-descriptions-item label="完成作业">{{ formatDateTime(taskDetail.completedAt) }}</el-descriptions-item>
           <el-descriptions-item label="取消时间">{{ formatDateTime(taskDetail.cancelledAt) }}</el-descriptions-item>
@@ -221,6 +227,35 @@
         <el-button v-if="taskDetail && taskDetail.plotCode" @click="goCommands">查看全部指令</el-button>
         <el-button type="primary" @click="detailVisible = false">关闭</el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog v-model="queueVisible" title="设备任务队列" width="760px">
+      <div class="queue-controls">
+        <el-input v-model="queueDeviceId" placeholder="设备 ID" clearable style="width: 260px" @keyup.enter="loadQueue" />
+        <el-button type="primary" :loading="queueLoading" @click="loadQueue">查询队列</el-button>
+      </div>
+      <p class="queue-hint">在册未结束（待执行/进行中）的任务按 优先级 → 计划开始 → 建档时间 排序，同设备重叠不阻断、按位次依次执行。</p>
+      <el-table v-loading="queueLoading" :data="queueItems" size="small" border empty-text="该设备暂无排队任务">
+        <el-table-column prop="position" label="位次" width="70" align="center" />
+        <el-table-column prop="name" label="任务名称" min-width="160" show-overflow-tooltip />
+        <el-table-column label="类型" width="90" align="center">
+          <template #default="{ row }">{{ getTaskTypeText(row.type) }}</template>
+        </el-table-column>
+        <el-table-column label="优先级" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag :type="getPriorityType(row.priority)" size="small" effect="plain">{{ getPriorityText(row.priority) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag :type="getTaskStatusType(displayStatus(row.status))" size="small">{{ getTaskStatusText(displayStatus(row.status)) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="计划开始" width="170">
+          <template #default="{ row }">{{ row.scheduledAt ? formatDateTime(row.scheduledAt) : '未排时间' }}</template>
+        </el-table-column>
+      </el-table>
+      <template #footer><el-button type="primary" @click="queueVisible = false">关闭</el-button></template>
     </el-dialog>
   </div>
 </template>
@@ -275,7 +310,7 @@ const tableData = ref<any[]>([])
 const total = ref(0)
 const createVisible = ref(false)
 const creating = ref(false)
-const createForm = reactive({ name: '', plotCode: '', type: 'IRRIGATION', priority: 'NORMAL', scheduledAt: '', scheduledEndAt: '', assigneeName: '' })
+const createForm = reactive({ name: '', plotCode: '', type: 'IRRIGATION', priority: 'NORMAL', scheduledAt: '', scheduledEndAt: '', assigneeName: '', deviceId: '' })
 
 const queryForm = reactive<FarmTaskQuery>({
   page: 1,
@@ -350,7 +385,7 @@ function handleReset() {
 }
 
 function handleCreate() {
-  Object.assign(createForm, { name: '', plotCode: '', type: 'IRRIGATION', priority: 'NORMAL', scheduledAt: '', scheduledEndAt: '', assigneeName: '' })
+  Object.assign(createForm, { name: '', plotCode: '', type: 'IRRIGATION', priority: 'NORMAL', scheduledAt: '', scheduledEndAt: '', assigneeName: '', deviceId: '' })
   createVisible.value = true
 }
 
@@ -359,13 +394,17 @@ async function submitCreate() {
   if (createForm.scheduledEndAt && (!createForm.scheduledAt || createForm.scheduledEndAt <= createForm.scheduledAt)) { ElMessage.warning('计划结束时间必须晚于开始时间'); return }
   creating.value = true
   try {
-    const created = await operationApi.createTask(createForm)
+    const created = await operationApi.createTask({
+      ...createForm,
+      // 空串是「不绑设备」，不能发给后端（服务端按选填非空串校验）
+      deviceId: createForm.deviceId.trim() || undefined
+    })
     createVisible.value = false
     await fetchList()
     // 冲突只提示不阻断：把命中的任务与缘由摆出来，由调度人权衡抢排或改期
     const conflicts: Array<{ task: any; reasons: string[] }> = created?.conflicts ?? []
     if (conflicts.length) {
-      const lines = conflicts.map((c) => `「${c.task.name}」（${c.task.plotCode}${c.task.assigneeName ? ` · ${c.task.assigneeName}` : ''}）：${c.reasons.join('、')}`)
+      const lines = conflicts.map((c) => `「${c.task.name}」（${c.task.plotCode}${c.task.assigneeName ? ` · ${c.task.assigneeName}` : ''}${c.task.deviceId ? ` · ${c.task.deviceId}` : ''}）：${c.reasons.join('、')}`)
       ElMessageBox.alert(lines.join('；'), '任务已创建，但存在排期冲突', { type: 'warning', confirmButtonText: '知道了' }).catch(() => {})
     } else {
       ElMessage.success('任务已创建')
@@ -494,6 +533,33 @@ async function submitComplete() {
 onMounted(() => {
   fetchList()
 })
+
+/* ---------------- 设备任务队列（A5 自动排队） ---------------- */
+
+const queueVisible = ref(false)
+const queueLoading = ref(false)
+const queueDeviceId = ref('')
+const queueItems = ref<Array<any & { position: number }>>([])
+
+function openQueue() {
+  queueVisible.value = true
+  if (queueDeviceId.value.trim()) void loadQueue()
+}
+
+async function loadQueue() {
+  const deviceId = queueDeviceId.value.trim()
+  if (!deviceId) { ElMessage.warning('请输入设备 ID'); return }
+  queueLoading.value = true
+  try {
+    const result = await operationApi.getTaskQueue(deviceId)
+    queueItems.value = result.items
+  } catch (error) {
+    console.error('设备任务队列加载失败', error)
+    queueItems.value = []
+  } finally {
+    queueLoading.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -528,5 +594,16 @@ onMounted(() => {
   margin-left: auto;
   color: #909399;
   white-space: nowrap;
+}
+.queue-controls {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.queue-hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.6;
 }
 </style>

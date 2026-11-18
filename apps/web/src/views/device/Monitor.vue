@@ -79,6 +79,8 @@ use([CanvasRenderer, LineChart, TooltipComponent, LegendComponent, GridComponent
 
 const metricOptions = [
   { label: '土壤湿度 (%)', value: 'soilMoisture' },
+  { label: '土壤EC (μS/cm)', value: 'soilEc' },
+  { label: '土壤pH值', value: 'soilPh' },
   { label: '空气温度 (°C)', value: 'airTemperature' },
   { label: '空气湿度 (%)', value: 'airHumidity' },
   { label: '风速 (m/s)', value: 'windSpeed' },
@@ -90,6 +92,7 @@ const monitorData = ref<Array<{ name: string; value: string | number; unit: stri
   { name: '空气湿度', value: '-', unit: '%', status: 'normal' },
   { name: '土壤湿度', value: '-', unit: '%', status: 'normal' },
   { name: '土壤pH值', value: '-', unit: '', status: 'normal' },
+  { name: '土壤EC', value: '-', unit: 'μS/cm', status: 'normal' },
   { name: '光照强度', value: '-', unit: 'lux', status: 'normal' },
   { name: 'CO₂浓度', value: '-', unit: 'ppm', status: 'normal' },
   { name: '风速', value: '-', unit: 'm/s', status: 'normal' },
@@ -119,7 +122,7 @@ async function updateLatest() {
     const values = new Map(readings.map((reading: { metric: string; value: number }) => [reading.metric, reading.value]))
     // 最新值接口已剔除可疑读数；若后端仍回传标记则防御性标异常
     const flagged = new Set(readings.filter((reading: { qualityFlags?: string[] }) => (reading.qualityFlags ?? []).length > 0).map((reading: { metric: string }) => reading.metric))
-    const metricMap = ['airTemperature', 'airHumidity', 'soilMoisture', 'soilPh', 'lightIntensity', 'co2Concentration', 'windSpeed', 'rainfall']
+    const metricMap = ['airTemperature', 'airHumidity', 'soilMoisture', 'soilPh', 'soilEc', 'lightIntensity', 'co2Concentration', 'windSpeed', 'rainfall']
     metricMap.forEach((metric, index) => {
       const value = values.get(metric)
       if (value !== undefined) monitorData.value[index]!.value = value

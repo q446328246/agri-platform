@@ -76,10 +76,13 @@ async function bootstrap(): Promise<void> {
     setDefaultPublisher(publisher);
     const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, outbox, publisher, tenantId, fetchRainProbability, fetchPlotArea, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
-    // 消费控制服务的结单事件，把处方实际执行的水肥用量回流到 decision_prescription_executions
+    // 消费控制服务的结单事件，把处方实际执行的水肥用量回流到 decision_prescription_executions；
+    // 同时消费遥测越限事件（A18）：EC/pH 偏离生成保守配比调整处方，复用同一条消息表中继发布
     const { consumer } = createDecisionEventConsumer(executions, prescriptions, store, {
       group: process.env.DECISION_CONSUMER_GROUP ?? "decision-service",
       pollIntervalMs: Number(process.env.DECISION_POLL_INTERVAL_MS ?? 1000),
+      outbox: relay,
+      withTransaction: (run) => client.$transaction(run),
       onError: (topic, eventId, error, attempt) => {
         logger.warn("decision-service 事件处理失败", { topic, eventId, attempt, message: error.message });
       },

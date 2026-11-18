@@ -25,6 +25,8 @@ export const METRIC_RANGES: Record<string, [number, number]> = {
   pestCount: [0, 100_000],
   diseaseIndex: [0, 100],
   soilPh: [0, 14],
+  // 肥液/土壤 EC（μS/cm）：超 20000 大概率是单位错报或探头故障（A18 配套量程）
+  soilEc: [0, 20_000],
   lightIntensity: [0, 200_000],
   co2Concentration: [0, 5000],
 };

@@ -74,6 +74,7 @@ function queryOf(query: URLSearchParams): TaskQuery {
   if (priority) { if (!TASK_PRIORITIES.includes(priority as TaskPriority)) throw new InputError("任务优先级非法"); result.priority = priority as TaskPriority; }
   if (query.get("keyword")) result.keyword = text(query.get("keyword"), "关键词", 200);
   if (query.get("plotCode")) result.plotCode = text(query.get("plotCode"), "地块编码", 100);
+  if (query.get("deviceId")) result.deviceId = text(query.get("deviceId"), "设备标识", 100);
   const archived = query.get("archived");
   if (archived) {
     if (!TASK_ARCHIVE_FILTERS.includes(archived as TaskArchiveFilter)) throw new InputError("归档筛选非法");
@@ -116,13 +117,23 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
         if (end) task.scheduledEndAt = end;
         const assigneeName = text(body.assigneeName, "负责人", 100);
         if (assigneeName) task.assigneeName = assigneeName;
+        // 执行设备选填（A5）：绑了设备的任务才进设备队列，人工任务不强制
+        const deviceId = text(body.deviceId, "执行设备", 100);
+        if (deviceId) task.deviceId = deviceId;
         const priority = body.priority === undefined || body.priority === "" ? "NORMAL" : String(body.priority);
         if (!TASK_PRIORITIES.includes(priority as TaskPriority)) throw new InputError("任务优先级非法");
         task.priority = priority as TaskPriority;
         const created = await tasks.create(task, actorOf(req), traceId);
         // 冲突只提示不阻断：排程重叠由调度人权衡（抢排/改期），平台把命中的任务与缘由摆出来
-        const conflicts = await tasks.conflicts(tenantId, { id: created.id, plotCode: created.plotCode, ...(created.assigneeName === undefined ? {} : { assigneeName: created.assigneeName }), ...(created.scheduledAt === undefined ? {} : { scheduledAt: created.scheduledAt }), ...(created.scheduledEndAt === undefined ? {} : { scheduledEndAt: created.scheduledEndAt }) });
+        const conflicts = await tasks.conflicts(tenantId, { id: created.id, plotCode: created.plotCode, ...(created.assigneeName === undefined ? {} : { assigneeName: created.assigneeName }), ...(created.deviceId === undefined ? {} : { deviceId: created.deviceId }), ...(created.scheduledAt === undefined ? {} : { scheduledAt: created.scheduledAt }), ...(created.scheduledEndAt === undefined ? {} : { scheduledEndAt: created.scheduledEndAt }) });
         send(res, 201, { ...created, conflicts }, traceId); return;
+      }
+      // 设备任务队列（A5，方案 8.7 自动排队）：同一设备的在册未结束任务按
+      // 优先级 → 计划开始 → 建档时间 给出位次；必须放在 detailMatch 之前，免得 queue 被当成任务 id
+      if (req.method === "GET" && url.pathname === "/api/v1/farm-tasks/queue") {
+        const deviceId = text(url.searchParams.get("deviceId"), "设备标识", 100, true);
+        const items = await tasks.queue(tenantId, deviceId);
+        send(res, 200, { deviceId, items: items.map((task, index) => ({ ...task, position: index + 1 })) }, traceId); return;
       }
       const statusMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/status$/);
       const detailMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)$/);
@@ -132,7 +143,7 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
         // 排程回查：任务改期或负责人调整后，前端可重新拉一次冲突提示
         const task = await tasks.find(tenantId, decodeURIComponent(conflictsMatch[1]));
         if (!task) { send(res, 404, null, traceId, "任务不存在"); return; }
-        const conflicts = await tasks.conflicts(tenantId, { id: task.id, plotCode: task.plotCode, ...(task.assigneeName === undefined ? {} : { assigneeName: task.assigneeName }), ...(task.scheduledAt === undefined ? {} : { scheduledAt: task.scheduledAt }), ...(task.scheduledEndAt === undefined ? {} : { scheduledEndAt: task.scheduledEndAt }) });
+        const conflicts = await tasks.conflicts(tenantId, { id: task.id, plotCode: task.plotCode, ...(task.assigneeName === undefined ? {} : { assigneeName: task.assigneeName }), ...(task.deviceId === undefined ? {} : { deviceId: task.deviceId }), ...(task.scheduledAt === undefined ? {} : { scheduledAt: task.scheduledAt }), ...(task.scheduledEndAt === undefined ? {} : { scheduledEndAt: task.scheduledEndAt }) });
         send(res, 200, conflicts, traceId); return;
       }
       if (historyMatch?.[1] && req.method === "GET") {

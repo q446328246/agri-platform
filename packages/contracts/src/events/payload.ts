@@ -177,8 +177,10 @@ export interface CommandTimeoutPayload {
   /** 指令归属地块，未绑定地块的指令为空串 */
   parcelId: string;
   deviceId: string;
-  /** 指令类型，与下发时的 ControlCommandType 同一口径 */
-  commandType: "SEEDING" | "IRRIGATION" | "WEEDING" | "FERTILIZATION" | "ESTOP";
+  /** 指令类型，与下发时的 ControlCommandType 同一口径（迁移 050 扩到十一码） */
+  commandType:
+    | "SEEDING" | "IRRIGATION" | "WEEDING" | "FERTILIZATION" | "ESTOP"
+    | "PAUSE" | "RESUME" | "RETURN_HOME" | "POWER_OFF" | "TOOL_SWITCH" | "TILLAGE";
   /** 从最后一次状态推进到收口的等待时长，单位：分钟（现算，不写死） */
   pendingMin: number;
   /** 判定超时所用的阈值，单位：分钟 */

@@ -5,6 +5,8 @@ import { EventLogPublisher, InMemoryEventLogStore, OutboxService, PgEventLogStor
 import type { EventLogStore } from "@agri/mq";
 
 import { createControlEventConsumer } from "./consumer.js";
+import { InMemoryControlAuthorizationRepository, SqlControlAuthorizationRepository } from "./authorization.repository.js";
+import type { ControlAuthorizationRepository } from "./authorization.repository.js";
 import { InMemoryControlCommandRepository, SqlControlCommandRepository } from "./control.repository.js";
 import type { ControlCommandRepository } from "./control.repository.js";
 import { createControlHttpServer, DEFAULT_TENANT, resolveReceiptTimeoutMin } from "./http.js";
@@ -41,14 +43,17 @@ async function bootstrap(): Promise<void> {
 
   let client: PgClientAdapter | undefined;
   let commands: ControlCommandRepository;
+  let authorizations: ControlAuthorizationRepository;
   let store: EventLogStore;
   if (mode === "sql") {
     client = PgClientAdapter.fromUrl(resolveDatabaseUrl(process.env.DB_URL));
     await client.$connect();
     commands = new SqlControlCommandRepository(client);
+    authorizations = new SqlControlAuthorizationRepository(client);
     store = new PgEventLogStore(client);
   } else {
     commands = new InMemoryControlCommandRepository();
+    authorizations = new InMemoryControlAuthorizationRepository();
     store = new InMemoryEventLogStore();
   }
 
@@ -82,7 +87,7 @@ async function bootstrap(): Promise<void> {
     },
   });
 
-  const server = createControlHttpServer(commands, { receiptTimeoutMin: timeoutMin, ...eventDeps });
+  const server = createControlHttpServer(commands, { receiptTimeoutMin: timeoutMin, authorizations, ...eventDeps });
   server.listen(port, "127.0.0.1", () =>
     console.log(
       `control-service HTTP started on ${port}（${mode === "sql" ? "SQL 持久化" : "内存实现"}，超时阈值 ${timeoutMin} 分钟，收口间隔 ${sweepIntervalMs} 毫秒）`,

@@ -10,6 +10,7 @@ import { authorizeRequest } from "@agri/shared";
 import { buildFinishedEvent } from "./command-finished.js";
 import { buildIrrigationPlan, executionPlanOf, validateCommandParameters } from "./command-spec.js";
 import type { IrrigationPlanInput } from "./command-spec.js";
+import type { ControlAuthorization, ControlAuthorizationRepository } from "./authorization.repository.js";
 import { CONTROL_STATUSES, canTransition, pendingMinutesOf } from "./control.repository.js";
 import { InMemoryControlCommandRepository } from "./control.repository.js";
 import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, ControlCommandType, ControlOrigin } from "./control.repository.js";
@@ -31,10 +32,16 @@ import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, Co
  * 状态照常结单——内存模式的事件出不了本进程，不值得为它假装一条闭环。
  */
 
-const COMMAND_TYPES: ControlCommandType[] = ["SEEDING", "IRRIGATION", "WEEDING", "FERTILIZATION", "ESTOP"];
+const COMMAND_TYPES: ControlCommandType[] = [
+  "SEEDING", "IRRIGATION", "WEEDING", "FERTILIZATION", "ESTOP",
+  "PAUSE", "RESUME", "RETURN_HOME", "POWER_OFF", "TOOL_SWITCH", "TILLAGE",
+];
 
-/** 回执可上报的目标状态；SENT 由 dispatch 负责，不算回执 */
-const RECEIPT_STATUSES: ControlCommandStatus[] = ["ACKED", "DONE", "FAILED"];
+/** 回执可上报的目标状态；SENT 由 dispatch 负责，不算回执；PAUSED 是设备自主暂停上报 */
+const RECEIPT_STATUSES: ControlCommandStatus[] = ["ACKED", "PAUSED", "DONE", "FAILED"];
+
+/** 结单必须带设备侧到位确认的指令类型：急停与断电都是「没人确认就不知道真停没停」的高危动作 */
+const CONFIRM_REQUIRED_TYPES: readonly ControlCommandType[] = ["ESTOP", "POWER_OFF"];
 
 /** 超时未回执的默认阈值（分钟），可用 CONTROL_RECEIPT_TIMEOUT_MIN 调整 */
 export const DEFAULT_RECEIPT_TIMEOUT_MIN = 15;
@@ -114,9 +121,9 @@ function receiptAt(value: unknown): string {
  */
 function assertReceiptOrder(command: ControlCommand, status: ControlCommandStatus, at: string): void {
   const previous = command.ackedAt ?? command.sentAt;
-  const label = status === "DONE" ? "结单" : "失败收口";
-  if (status === "ACKED" && command.sentAt !== undefined && Date.parse(at) < Date.parse(command.sentAt)) {
-    throw new Error(`接收回执的时刻（${at}）早于下发时刻（${command.sentAt}）`);
+  const label = status === "DONE" ? "结单" : status === "PAUSED" ? "暂停" : "失败收口";
+  if ((status === "ACKED" || status === "PAUSED") && command.sentAt !== undefined && Date.parse(at) < Date.parse(command.sentAt)) {
+    throw new Error(`${status === "PAUSED" ? "暂停" : "接收"}回执的时刻（${at}）早于下发时刻（${command.sentAt}）`);
   }
   if ((status === "DONE" || status === "FAILED") && previous !== undefined && Date.parse(at) < Date.parse(previous)) {
     throw new Error(`${label}回执的时刻（${at}）早于上一次状态推进（${previous}）`);
@@ -188,6 +195,8 @@ export interface ControlHttpOptions {
   outbox?: OutboxService;
   /** 事务句柄；配了消息表就必须给，否则状态改了事件却没落库 */
   withTransaction?: PrismaClientLike["$transaction"];
+  /** 作业授权仓储（A8 范围管控）；不装配则不做范围校验，空表同样放行 */
+  authorizations?: ControlAuthorizationRepository;
 }
 
 export function createControlHttpServer(
@@ -200,6 +209,7 @@ export function createControlHttpServer(
   const timeoutMin = resolveReceiptTimeoutMin(options.receiptTimeoutMin);
   const outbox = options.outbox;
   const withTransaction = options.withTransaction;
+  const authorizations = options.authorizations;
   return createServer(async (req, res) => {
     const traceId = trace(req);
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -243,6 +253,19 @@ export function createControlHttpServer(
           send(res, 400, null, traceId, parameterErrors.join("；"));
           return;
         }
+        // 定时执行（方案 8.1 定时浇水）：可选的未来时刻，到点前设备网关领不走这条指令
+        let scheduledAt: string | undefined;
+        if (body.scheduledAt !== undefined && body.scheduledAt !== null && body.scheduledAt !== "") {
+          if (typeof body.scheduledAt !== "string" || !Number.isFinite(Date.parse(body.scheduledAt))) {
+            send(res, 400, null, traceId, "scheduledAt 需为 ISO 时间字符串");
+            return;
+          }
+          if (Date.parse(body.scheduledAt) <= Date.now()) {
+            send(res, 400, null, traceId, "定时执行时刻必须晚于当前时间，立即执行请不要传 scheduledAt");
+            return;
+          }
+          scheduledAt = new Date(body.scheduledAt).toISOString();
+        }
         // 把执行包络随指令一起入队：现场网关据此判断开多久、开到多少，不必自己重算方案
         const plan = executionPlanOf(type, parameters);
         const command: ControlCommand = {
@@ -258,12 +281,42 @@ export function createControlHttpServer(
           status: "QUEUED",
           origin: "MANUAL",
           reason: typeof body.reason === "string" && body.reason !== "" ? body.reason : "人工确认执行",
+          ...(scheduledAt === undefined ? {} : { scheduledAt }),
           version: 1,
           createdAt: new Date().toISOString(),
         };
         if (!command.deviceId) {
           send(res, 400, null, traceId, "控制指令需要设备标识");
           return;
+        }
+        // PAUSE/RESUME 是指向另一条指令的联动指令：目标必须存在、同设备、且处在可暂停/可恢复的状态，
+        // 否则入队一条永远联动不上的孤儿指令，现场设备也不知道该停谁
+        if (type === "PAUSE" || type === "RESUME") {
+          const targetId = typeof parameters.targetCommandId === "string" ? parameters.targetCommandId.trim() : "";
+          if (!targetId) {
+            send(res, 400, null, traceId, `${type} 指令需要 parameters.targetCommandId 指向目标指令`);
+            return;
+          }
+          const linkedTarget = await repository.find(command.tenantId, targetId);
+          if (!linkedTarget) { send(res, 404, null, traceId, "目标指令不存在"); return; }
+          if (linkedTarget.deviceId !== command.deviceId) {
+            send(res, 400, null, traceId, "目标指令不属于该设备，不能跨设备暂停/恢复");
+            return;
+          }
+          const allowed: readonly ControlCommandStatus[] = type === "PAUSE" ? ["SENT", "ACKED"] : ["PAUSED"];
+          if (!allowed.includes(linkedTarget.status)) {
+            send(res, 409, null, traceId, `目标指令当前状态为 ${linkedTarget.status}，${type === "PAUSE" ? "只有已下发/设备已接收的指令可以暂停" : "只有已暂停的指令可以恢复"}`);
+            return;
+          }
+        }
+        // 范围管控（方案 14.3）：启用后人工下发必须命中「设备 + 地块 + 当前时刻」的授权窗口。
+        // 空表 = 未启用（放行）；事件自动指令不走这条入口，不受此约束
+        if (authorizations && (await authorizations.count(command.tenantId)) > 0) {
+          const covered = await authorizations.covers(command.tenantId, command.deviceId, command.plotCode, new Date().toISOString());
+          if (!covered) {
+            send(res, 403, null, traceId, "超出作业授权范围：该设备/地块当前时刻没有有效授权，请先在「作业授权」里建档或改期执行");
+            return;
+          }
         }
         await repository.create(command);
         send(res, 202, toView(command, timeoutMin, Date.now()), traceId);
@@ -296,8 +349,9 @@ export function createControlHttpServer(
 
       // 设备通道 ①：网关轮询本机还在途的指令。领取接口只认 commandId，而现场网关手里
       // 只有设备编号和回调令牌——没有它就只能靠人告诉它「该干活了」。
-      // 返回 QUEUED/SENT/ACKED 三态：崩在两次轮询之间的网关要能接着把已领取、
-      // 已写入但未结单的指令做完，而不是干等到超时被收口。
+      // 返回 QUEUED/SENT/ACKED/PAUSED 四态：崩在两次轮询之间的网关要能接着把已领取、
+      // 已写入但未结单的指令做完，而不是干等到超时被收口。定时指令未到点不可领取（dueOnly），
+      // 到点后自然进入轮询结果，不需要独立的定时下发器。
       if (req.method === "GET" && url.pathname === "/api/v1/control/device/pending") {
         const deviceId = url.searchParams.get("deviceId")?.trim();
         if (!deviceId) { send(res, 400, null, traceId, "轮询待执行指令需要设备标识 deviceId"); return; }
@@ -305,6 +359,7 @@ export function createControlHttpServer(
         const page: PageResult<ControlCommand> = await repository.page(tenantOf(req), {
           deviceId,
           pending: true,
+          dueOnly: true,
           // 按下发先后执行：倒序翻页会让最早的指令永远排在下一页
           ascending: true,
           page: Math.max(1, Number(url.searchParams.get("page") || 1)),
@@ -353,12 +408,30 @@ export function createControlHttpServer(
         if (status === "FAILED" && message === undefined) throw new Error("FAILED 回执必须说明失败原因（message）");
         const target = await repository.find(tenantId, requiredText(body.commandId, "commandId"));
         if (!target) { send(res, 404, null, traceId, "指令不存在"); return; }
-        // 急停的 DONE 必须有到位确认，否则等于「没人确认设备真的停了」就结单
-        if (target.type === "ESTOP" && status === "DONE" && result?.confirmed !== true) {
-          send(res, 400, null, traceId, "急停指令的执行完成回执必须带到位确认（result.confirmed=true）");
+        // 急停/断电的 DONE 必须有到位确认，否则等于「没人确认设备真的停了」就结单
+        if (CONFIRM_REQUIRED_TYPES.includes(target.type) && status === "DONE" && result?.confirmed !== true) {
+          send(res, 400, null, traceId, `${target.type === "ESTOP" ? "急停" : "断电"}指令的执行完成回执必须带到位确认（result.confirmed=true）`);
           return;
         }
+        // 同态回执幂等返回先于联动校验：重复投递的 DONE 不该因目标状态已推进而被误报 409
         if (target.status === status) { send(res, 200, toView(target, timeoutMin, Date.now()), traceId); return; }
+        // PAUSE/RESUME 结单联动目标指令：目标必须仍处在可暂停/可恢复的状态，
+        // 联动与本体结单同事务提交，要么两条一起推进要么都不动，不留「暂停指令已完成但目标还在跑」的分家状态
+        let linked: { id: string; status: ControlCommandStatus; version: number } | undefined;
+        if (status === "DONE" && (target.type === "PAUSE" || target.type === "RESUME")) {
+          const targetId = typeof target.parameters.targetCommandId === "string" ? target.parameters.targetCommandId : "";
+          const linkedTarget = targetId ? await repository.find(tenantId, targetId) : null;
+          if (!linkedTarget) { send(res, 409, null, traceId, "目标指令不存在，无法联动结单，请核实后改报 FAILED"); return; }
+          const desired: ControlCommandStatus = target.type === "PAUSE" ? "PAUSED" : "ACKED";
+          // 目标已处在期望状态（重复回执/设备自主上报先到）时跳过联动，不空转推高版本
+          if (linkedTarget.status !== desired) {
+            if (!canTransition(linkedTarget.status, desired)) {
+              send(res, 409, null, traceId, `目标指令当前状态为 ${linkedTarget.status}，不接受联动${desired === "PAUSED" ? "暂停" : "恢复"}，请刷新后重试`);
+              return;
+            }
+            linked = { id: linkedTarget.id, status: desired, version: linkedTarget.version };
+          }
+        }
         if (!canTransition(target.status, status)) {
           send(res, 409, null, traceId, `指令当前状态为 ${target.status}，不接受 ${status} 回执`);
           return;
@@ -379,6 +452,17 @@ export function createControlHttpServer(
           // 先跃迁再入队：跃迁被版本拦住时不留一条没人结单的事件
           const updated = await repository.transition(tenantId, transition, tx);
           if (!updated) return null;
+          // 联动跃迁失败（目标被其它回执抢先推进）时整体回滚，本体结单也不落，设备重试回执即可
+          if (linked) {
+            const linkedUpdated = await repository.transition(tenantId, {
+              id: linked.id,
+              status: linked.status,
+              at,
+              version: linked.version,
+              message: `由 ${target.type} 指令 ${target.id} 结单联动${linked.status === "PAUSED" ? "暂停" : "恢复"}`,
+            }, tx);
+            if (!linkedUpdated) return null;
+          }
           if (finished && outbox) {
             await outbox.enqueue(tx, finished.topic, finished.payload, {
               tenantId,
@@ -416,6 +500,56 @@ export function createControlHttpServer(
           ...(body.stir && typeof body.stir === "object" ? { stir: body.stir as NonNullable<IrrigationPlanInput["stir"]> } : {}),
         };
         send(res, 200, buildIrrigationPlan(input), traceId);
+        return;
+      }
+
+      // 作业授权管理（A8）：列表/建档/删除。网关按 /api/v1/control 前缀映射 device:read/device:control，
+      // 无需新增权限码。未装配仓储时回 501，避免前端以为管控已启用却实际没有校验
+      if (url.pathname === "/api/v1/control/authorizations" && req.method === "GET") {
+        if (!authorizations) { send(res, 501, null, traceId, "作业授权仓储未装配"); return; }
+        send(res, 200, await authorizations.list(tenantOf(req)), traceId);
+        return;
+      }
+      if (url.pathname === "/api/v1/control/authorizations" && req.method === "POST") {
+        if (!authorizations) { send(res, 501, null, traceId, "作业授权仓储未装配"); return; }
+        const operatorId = req.headers["x-user-id"]?.toString();
+        if (!operatorId) { send(res, 409, null, traceId, "建档作业授权需要操作人身份"); return; }
+        const body = await json(req);
+        const validFrom = receiptText(body.validFrom, "validFrom");
+        const validTo = receiptText(body.validTo, "validTo");
+        if (!validFrom || !validTo || !Number.isFinite(Date.parse(validFrom)) || !Number.isFinite(Date.parse(validTo))) {
+          send(res, 400, null, traceId, "授权窗口需给出 validFrom/validTo 两个 ISO 时间");
+          return;
+        }
+        if (Date.parse(validTo) <= Date.parse(validFrom)) {
+          send(res, 400, null, traceId, "授权结束时刻必须晚于开始时刻");
+          return;
+        }
+        const deviceId = receiptText(body.deviceId, "deviceId");
+        const plotCode = receiptText(body.plotCode, "plotCode");
+        const note = receiptText(body.note, "note");
+        if (note !== undefined && note.length > 200) { send(res, 400, null, traceId, "授权依据不能超过 200 字"); return; }
+        const record: ControlAuthorization = {
+          id: randomUUID(),
+          tenantId: tenantOf(req),
+          ...(deviceId ? { deviceId } : {}),
+          ...(plotCode ? { plotCode } : {}),
+          validFrom: new Date(validFrom).toISOString(),
+          validTo: new Date(validTo).toISOString(),
+          ...(note ? { note } : {}),
+          createdBy: operatorId,
+          createdAt: new Date().toISOString(),
+        };
+        send(res, 201, await authorizations.create(record), traceId);
+        return;
+      }
+      const authorizationMatch = url.pathname.match(/^\/api\/v1\/control\/authorizations\/([^/]+)$/);
+      if (authorizationMatch?.[1] && req.method === "DELETE") {
+        if (!authorizations) { send(res, 501, null, traceId, "作业授权仓储未装配"); return; }
+        const operatorId = req.headers["x-user-id"]?.toString();
+        if (!operatorId) { send(res, 409, null, traceId, "删除作业授权需要操作人身份"); return; }
+        const removed = await authorizations.remove(tenantOf(req), decodeURIComponent(authorizationMatch[1]));
+        send(res, removed ? 200 : 404, null, traceId, removed ? "" : "授权不存在");
         return;
       }
 

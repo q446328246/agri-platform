@@ -18,24 +18,30 @@ import { toIsoTimestamp } from "@agri/shared";
  * 与 operation_tasks / video_ptz_commands 同一口径。
  */
 
-/** 指令类型；ESTOP 是急停，执行完成必须带到位确认 */
-export type ControlCommandType = "SEEDING" | "IRRIGATION" | "WEEDING" | "FERTILIZATION" | "ESTOP";
+/** 指令类型；ESTOP/POWER_OFF 是急停/断电，执行完成必须带到位确认；
+ *  PAUSE/RESUME 通过 parameters.targetCommandId 指向目标指令，结单时联动目标状态（迁移 050） */
+export type ControlCommandType =
+  | "SEEDING" | "IRRIGATION" | "WEEDING" | "FERTILIZATION" | "ESTOP"
+  | "PAUSE" | "RESUME" | "RETURN_HOME" | "POWER_OFF" | "TOOL_SWITCH" | "TILLAGE";
 
-/** 指令状态；CANCELLED 是未执行先撤回（自动停灌/人工取消），与 FAILED 的执行失败分开记 */
-export const CONTROL_STATUSES = ["QUEUED", "SENT", "ACKED", "DONE", "FAILED", "CANCELLED"] as const;
+/** 指令状态；CANCELLED 是未执行先撤回（自动停灌/人工取消），与 FAILED 的执行失败分开记；
+ *  PAUSED 是作业中断（方案 8.8 续作补作的前半段），仍属在途，可恢复/结单/失败收口 */
+export const CONTROL_STATUSES = ["QUEUED", "SENT", "ACKED", "PAUSED", "DONE", "FAILED", "CANCELLED"] as const;
 export type ControlCommandStatus = (typeof CONTROL_STATUSES)[number];
 
-/** 尚未收到最终回执的状态，超时看板只关心这些 */
-export const PENDING_STATUSES: readonly ControlCommandStatus[] = ["QUEUED", "SENT", "ACKED"];
+/** 尚未收到最终回执的状态，超时看板只关心这些；暂停不是结单，没人恢复的指令仍要被收口告知 */
+export const PENDING_STATUSES: readonly ControlCommandStatus[] = ["QUEUED", "SENT", "ACKED", "PAUSED"];
 
 /** 指令来源 */
 export type ControlOrigin = "MANUAL" | "EVENT";
 
-/** 合法跃迁表，终态没有出边。CANCELLED 只从 QUEUED 出发：已被网关领取的指令撤回不了，只能急停 */
+/** 合法跃迁表，终态没有出边。CANCELLED 只从 QUEUED 出发：已被网关领取的指令撤回不了，只能急停；
+ *  PAUSED 从 SENT/ACKED 出发（设备自主上报或 PAUSE 指令结单联动），恢复后回到 ACKED 继续推进 */
 const TRANSITIONS: Record<ControlCommandStatus, readonly ControlCommandStatus[]> = {
   QUEUED: ["SENT", "FAILED", "CANCELLED"],
-  SENT: ["ACKED", "DONE", "FAILED"],
-  ACKED: ["DONE", "FAILED"],
+  SENT: ["ACKED", "PAUSED", "DONE", "FAILED"],
+  ACKED: ["PAUSED", "DONE", "FAILED"],
+  PAUSED: ["ACKED", "DONE", "FAILED"],
   DONE: [],
   FAILED: [],
   CANCELLED: [],
@@ -67,6 +73,8 @@ export interface ControlCommand {
   sourceEventId?: string;
   /** 指令缘由，用于列表展示与追溯 */
   reason: string;
+  /** 定时执行时刻（迁移 050）：设备网关只领取已到期的指令，缺省入队即可执行 */
+  scheduledAt?: string;
   /** 下发到设备的时间 */
   sentAt?: string;
   /** 设备回执「已接收」的时间 */
@@ -106,6 +114,8 @@ export interface ControlCommandQuery {
   to?: string;
   /** 只看未收到最终回执的指令 */
   pending?: boolean;
+  /** 只看到期可领取的指令（scheduled_at 为空或已到点），设备轮询专用 */
+  dueOnly?: boolean;
   /** 在途时长下限（分钟），配合 pending 筛超时未回执 */
   pendingOverMin?: number;
   /** 按创建时间正序返回（默认倒序）：设备侧要按下发先后执行，倒序翻页会把最早的指令饿死 */
@@ -130,9 +140,14 @@ function toPage(items: ControlCommand[], total: number, page: number, size: numb
   return { items, total, page, size, pages: Math.ceil(total / size) };
 }
 
-/** 指令在途起点：最后一次状态推进时间，没有推进过就是入队时间 */
+/** 指令在途起点：最后一次状态推进时间；没有推进过就是入队时间，
+ *  定时指令取入队与预约时刻的较晚者——预约明早执行的指令不该今晚就被算成超时 */
 function overdueSinceMs(command: ControlCommand): number {
-  return Date.parse(command.ackedAt ?? command.sentAt ?? command.createdAt);
+  const progressed = command.ackedAt ?? command.sentAt;
+  if (progressed !== undefined) return Date.parse(progressed);
+  const created = Date.parse(command.createdAt);
+  const scheduled = command.scheduledAt === undefined ? NaN : Date.parse(command.scheduledAt);
+  return Number.isFinite(scheduled) ? Math.max(created, scheduled) : created;
 }
 
 /** 在途时长（分钟），从最后一次状态推进时间起算；已结束的指令返回 undefined */
@@ -158,7 +173,7 @@ function isOverdue(command: ControlCommand, nowMs: number, timeoutMin: number | 
 }
 
 const COLUMNS =
-  "id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, sent_at, acked_at, finished_at, receipt_message, result_json, version, created_at";
+  "id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, scheduled_at, sent_at, acked_at, finished_at, receipt_message, result_json, version, created_at";
 
 function toRecord(row: Record<string, unknown>): ControlCommand {
   const record: ControlCommand = {
@@ -177,6 +192,7 @@ function toRecord(row: Record<string, unknown>): ControlCommand {
   };
   for (const [column, key] of [
     ["confirmed_at", "confirmedAt"],
+    ["scheduled_at", "scheduledAt"],
     ["sent_at", "sentAt"],
     ["acked_at", "ackedAt"],
     ["finished_at", "finishedAt"],
@@ -189,15 +205,15 @@ function toRecord(row: Record<string, unknown>): ControlCommand {
   return record;
 }
 
-/** PostgreSQL 实现，表结构由迁移 005 建立、031 扩展回执列、032 补租户归属 */
+/** PostgreSQL 实现，表结构由迁移 005 建立、031 扩展回执列、032 补租户归属、050 扩类型/暂停态/定时列 */
 export class SqlControlCommandRepository implements ControlCommandRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
   async create(command: ControlCommand): Promise<ControlCommand | null> {
     // 唯一索引冲突说明同一来源事件已生成指令，返回空表示无需重复写入
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `INSERT INTO control_commands (id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13)
+      `INSERT INTO control_commands (id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, scheduled_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)
        ON CONFLICT DO NOTHING
        RETURNING ${COLUMNS}`,
       command.id,
@@ -212,6 +228,7 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
       command.origin,
       command.sourceEventId ?? null,
       command.reason,
+      command.scheduledAt ?? null,
       command.createdAt,
     );
     const row = rows[0];
@@ -251,11 +268,15 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     }
     // 超时口径必须连带排掉终态行：终态没有在途时长，只看时间差会把历史指令也算成「未回执」。
     if (query.pending || query.pendingOverMin !== undefined) {
-      conditions.push("status IN ('QUEUED', 'SENT', 'ACKED')");
+      conditions.push("status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED')");
+    }
+    // 定时指令未到点不可领取；GREATEST 忽略 NULL，未预约的指令起点仍是入队时间
+    if (query.dueOnly) {
+      conditions.push("(scheduled_at IS NULL OR scheduled_at <= now())");
     }
     if (query.pendingOverMin !== undefined) {
       values.push(query.pendingOverMin);
-      conditions.push(`now() - COALESCE(acked_at, sent_at, created_at) > make_interval(mins => $${values.length}::int)`);
+      conditions.push(`now() - COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)) > make_interval(mins => $${values.length}::int)`);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const totalRows = await this.client.$queryRawUnsafe<Array<{ total: number }>>(
@@ -329,9 +350,9 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `SELECT ${COLUMNS}
        FROM control_commands
-       WHERE status IN ('QUEUED', 'SENT', 'ACKED')
-         AND now() - COALESCE(acked_at, sent_at, created_at) > make_interval(mins => $1::int)
-       ORDER BY COALESCE(acked_at, sent_at, created_at), id
+       WHERE status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED')
+         AND now() - COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)) > make_interval(mins => $1::int)
+       ORDER BY COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)), id
        LIMIT $2`,
       timeoutMin,
       limit,
@@ -383,6 +404,7 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
       .filter((row) => (query.from ? row.createdAt >= query.from : true))
       .filter((row) => (query.to ? row.createdAt <= query.to : true))
       .filter((row) => (query.pending ? PENDING_STATUSES.includes(row.status) : true))
+      .filter((row) => (query.dueOnly ? row.scheduledAt === undefined || Date.parse(row.scheduledAt) <= nowMs : true))
       .filter((row) => isOverdue(row, nowMs, query.pendingOverMin));
     // 排序与 SQL 侧一致（created_at/id 同向，默认 DESC）：内存里靠插入顺序，一旦有回填的
     // 历史指令就会翻页，同一页两套模式拿到不同的行。

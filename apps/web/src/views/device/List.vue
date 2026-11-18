@@ -249,6 +249,32 @@
           </el-select>
         </el-form-item>
 
+        <!-- PAUSE/RESUME 是指向另一条指令的联动指令：目标限本机在途指令，与服务端校验同口径 -->
+        <el-form-item v-if="isLinkedCommand" label="目标指令" prop="targetCommandId">
+          <el-select v-model="commandForm.targetCommandId" placeholder="选择要暂停/恢复的指令" filterable style="width: 100%" :loading="targetLoading">
+            <el-option
+              v-for="item in targetOptions"
+              :key="item.id"
+              :label="`${getControlTypeText(item.type)} · ${getControlStatusText(item.status)} · ${formatDateTime(item.createdAt)}`"
+              :value="item.id"
+            />
+          </el-select>
+          <span class="form-hint">{{ commandForm.type === 'PAUSE' ? '只有已下发/设备已接收的指令可暂停' : '只有已暂停的指令可恢复' }}</span>
+        </el-form-item>
+
+        <el-form-item label="定时执行">
+          <el-date-picker
+            v-model="commandForm.scheduledAt"
+            type="datetime"
+            placeholder="留空则入队后立即执行"
+            value-format="YYYY-MM-DDTHH:mm:ss"
+            :disabled-date="(date: Date) => date.getTime() < Date.now() - 86400000"
+            clearable
+            style="width: 100%"
+          />
+          <span class="form-hint">到点前设备网关领不走这条指令，超时计时也从预约时刻起算</span>
+        </el-form-item>
+
         <template v-if="isWaterFertilizer">
           <el-form-item label="灌溉分区">
             <el-table :data="commandForm.zones" size="small" border class="zone-table">
@@ -318,7 +344,7 @@ import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import type { DeviceFieldAccess, DeviceModbusBinding, DeviceQuery } from '@/types'
-import { formatDateTime, getControlTypeText, getDeviceStatusText, getDeviceStatusType } from '@/utils'
+import { formatDateTime, getControlStatusText, getControlTypeText, getDeviceStatusText, getDeviceStatusType } from '@/utils'
 import { deviceStatusOptions, deviceTypeLabel, deviceTypeOptions } from '@/utils/device'
 import { controlApi, iotApi, plotApi, type IrrigationPlan } from '@/api'
 import { useUserStore } from '@/stores'
@@ -632,7 +658,7 @@ async function submitConfig() {
 
 /* ---------------- 控制指令 ---------------- */
 
-const commandTypeOptions = ['IRRIGATION', 'FERTILIZATION', 'SEEDING', 'WEEDING', 'ESTOP'].map((value) => ({ value, label: getControlTypeText(value) }))
+const commandTypeOptions = ['IRRIGATION', 'FERTILIZATION', 'SEEDING', 'WEEDING', 'TILLAGE', 'PAUSE', 'RESUME', 'RETURN_HOME', 'TOOL_SWITCH', 'ESTOP', 'POWER_OFF'].map((value) => ({ value, label: getControlTypeText(value) }))
 
 const commandVisible = ref(false)
 const sending = ref(false)
@@ -647,15 +673,50 @@ const commandForm = reactive({
   type: 'IRRIGATION',
   plotCode: '' as string | undefined,
   reason: '',
+  // PAUSE/RESUME 的目标指令（A7）与定时执行时刻（A6），其余类型不参与
+  targetCommandId: '',
+  scheduledAt: '',
   flowM3h: 20,
   zones: [{ zoneCode: 'ZONE-01', areaMu: 0, targetMm: 10 }],
   recipe: { nitrogen: 1, phosphorus: 1, potassium: 1 },
   stir: { durationMin: 10, rpm: 60 }
 })
 
+/** 暂停/恢复是指向另一条指令的联动指令，需要选目标 */
+const isLinkedCommand = computed(() => commandForm.type === 'PAUSE' || commandForm.type === 'RESUME')
+
+const targetOptions = ref<any[]>([])
+const targetLoading = ref(false)
+
+/** 目标候选限本机在途指令，再按类型过滤可暂停/可恢复的状态，与服务端校验同口径 */
+async function loadTargetOptions() {
+  if (!isLinkedCommand.value || !commandForm.deviceId) {
+    targetOptions.value = []
+    return
+  }
+  targetLoading.value = true
+  try {
+    const result = await controlApi.getCommands({ deviceId: commandForm.deviceId, pending: true, size: 50 })
+    const allowed = commandForm.type === 'PAUSE' ? ['SENT', 'ACKED'] : ['PAUSED']
+    targetOptions.value = result.items.filter((item: any) => allowed.includes(item.status))
+  } catch (error) {
+    targetOptions.value = []
+    console.error('目标指令加载失败', error)
+  } finally {
+    targetLoading.value = false
+  }
+}
+
 const commandRules: FormRules = {
   type: [{ required: true, message: '请选择指令类型', trigger: 'change' }],
-  reason: [{ required: true, message: '请填写指令缘由', trigger: 'blur' }]
+  reason: [{ required: true, message: '请填写指令缘由', trigger: 'blur' }],
+  targetCommandId: [{
+    validator: (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+      if (isLinkedCommand.value && !value) callback(new Error('请选择目标指令'))
+      else callback()
+    },
+    trigger: 'change'
+  }]
 }
 
 /** 播种、除草只落地块与缘由；水肥类需要分区才能算出用水量与阀门时序 */
@@ -668,7 +729,9 @@ async function openCommand(row: any) {
     deviceNo: row.deviceNo,
     type: 'IRRIGATION',
     plotCode: row.plotCode || '',
-    reason: ''
+    reason: '',
+    targetCommandId: '',
+    scheduledAt: ''
   })
   plan.value = null
   resetParameters()
@@ -683,8 +746,11 @@ function resetParameters() {
   commandForm.zones = [{ zoneCode: 'ZONE-01', areaMu: 0, targetMm: 10 }]
   commandForm.recipe = { nitrogen: 1, phosphorus: 1, potassium: 1 }
   commandForm.stir = { durationMin: 10, rpm: 60 }
+  commandForm.targetCommandId = ''
   plan.value = null
   fillZoneArea()
+  // 切到暂停/恢复时拉一次目标候选，其余类型清空
+  void loadTargetOptions()
 }
 
 /** 首个分区的面积按所选地块的实际亩数预填，人工只需核对定额 */
@@ -728,6 +794,8 @@ async function simulatePlan() {
 }
 
 function buildParameters(): Record<string, unknown> {
+  // 联动指令只带目标标识；水肥类带分区与配比；其余类型自由参数留空
+  if (isLinkedCommand.value) return { targetCommandId: commandForm.targetCommandId }
   if (!isWaterFertilizer.value) return {}
   return {
     zones: commandForm.zones.map((zone) => ({ zoneCode: zone.zoneCode.trim() || undefined, areaMu: zone.areaMu, targetMm: zone.targetMm })),
@@ -743,9 +811,19 @@ async function submitCommand() {
     ElMessage.warning('分区面积必须大于 0 亩，否则算不出用水量')
     return
   }
-  const summary = `${commandForm.deviceName}：${getControlTypeText(commandForm.type)}${isWaterFertilizer.value ? `，${commandForm.zones.length} 个分区` : ''}`
-  // 急停的「执行到位」必须由设备侧到位确认背书，确认框里先说清楚
-  const followUp = commandForm.type === 'ESTOP' ? '急停指令需设备回报到位确认后才能结单。' : ''
+  // 定时执行：控件给的是本地时间串，转 ISO 后必须仍在未来，与服务端校验同口径
+  let scheduledAt: string | undefined
+  if (commandForm.scheduledAt) {
+    const at = new Date(commandForm.scheduledAt)
+    if (!Number.isFinite(at.getTime()) || at.getTime() <= Date.now()) {
+      ElMessage.warning('定时执行时刻必须晚于当前时间')
+      return
+    }
+    scheduledAt = at.toISOString()
+  }
+  const summary = `${commandForm.deviceName}：${getControlTypeText(commandForm.type)}${isWaterFertilizer.value ? `，${commandForm.zones.length} 个分区` : ''}${scheduledAt ? `，定时 ${formatDateTime(scheduledAt)} 执行` : ''}`
+  // 急停/断电的「执行到位」必须由设备侧到位确认背书，确认框里先说清楚
+  const followUp = commandForm.type === 'ESTOP' ? '急停指令需设备回报到位确认后才能结单。' : commandForm.type === 'POWER_OFF' ? '断电指令需设备回报到位确认后才能结单。' : ''
   try {
     await ElMessageBox.confirm(`确认下发指令？${summary}。指令入队后即进入执行队列，${followUp}后续在「控制指令」页按回执推进状态。`, '二次确认', {
       type: 'warning',
@@ -762,9 +840,10 @@ async function submitCommand() {
       ...(commandForm.plotCode ? { plotCode: commandForm.plotCode } : {}),
       type: commandForm.type,
       reason: commandForm.reason.trim(),
-      parameters: buildParameters()
+      parameters: buildParameters(),
+      ...(scheduledAt ? { scheduledAt } : {})
     })
-    ElMessage.success('指令已入队，可在「控制指令」页按人工来源查看')
+    ElMessage.success(scheduledAt ? '指令已入队，到点后自动进入执行队列' : '指令已入队，可在「控制指令」页按人工来源查看')
     commandVisible.value = false
   } catch (error) {
     // 参数越界等业务原因由请求拦截器直接提示，这里只留日志

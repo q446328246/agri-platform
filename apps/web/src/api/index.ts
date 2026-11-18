@@ -767,12 +767,16 @@ export const weatherApi = {
 }
 
 export const operationApi = {
-  getTasks(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; status?: string | undefined; type?: string | undefined; plotCode?: string | undefined; priority?: string | undefined; from?: string | undefined; to?: string | undefined; archived?: 'NONE' | 'ONLY' | 'ALL' | undefined }): Promise<PageResult<any>> {
+  getTasks(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; status?: string | undefined; type?: string | undefined; plotCode?: string | undefined; deviceId?: string | undefined; priority?: string | undefined; from?: string | undefined; to?: string | undefined; archived?: 'NONE' | 'ONLY' | 'ALL' | undefined }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/farm-tasks', cleanParams(params))
   },
-  /** 创建返回任务本体 + conflicts：同地块/同负责人计划时间重叠的在册任务，只提示不阻断 */
-  createTask(data: { plotCode: string; type: string; name: string; scheduledAt?: string; scheduledEndAt?: string; assigneeName?: string; priority?: string }): Promise<any> {
+  /** 创建返回任务本体 + conflicts：同地块/同负责人/同设备计划时间重叠的在册任务，只提示不阻断 */
+  createTask(data: { plotCode: string; type: string; name: string; scheduledAt?: string; scheduledEndAt?: string; assigneeName?: string; deviceId?: string; priority?: string }): Promise<any> {
     return post<any>('/farm-tasks', data)
+  },
+  /** 设备任务队列（A5 自动排队）：在册未结束任务按 优先级→计划开始→建档时间 给出位次 */
+  getTaskQueue(deviceId: string): Promise<{ deviceId: string; items: Array<any & { position: number }> }> {
+    return get<{ deviceId: string; items: Array<any & { position: number }> }>('/farm-tasks/queue', { deviceId })
   },
   /** 单条任务的排期冲突：与创建时同一套判定，供详情页复核 */
   getTaskConflicts(id: string): Promise<Array<{ task: any; reasons: string[] }>> {
@@ -899,8 +903,9 @@ export const controlApi = {
   getCommands(params?: { plotCode?: string; origin?: 'EVENT' | 'MANUAL'; type?: string; status?: string; deviceId?: string; from?: string; to?: string; pending?: boolean; overdue?: boolean; page?: number; size?: number }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/control/commands', cleanParams(params))
   },
-  /** 人工下发控制指令：需二次确认头，reason 写明处置依据供指令列表与生产档案复盘 */
-  sendCommand(data: { deviceId: string; plotCode?: string; type: string; parameters?: Record<string, unknown>; reason?: string }): Promise<any> {
+  /** 人工下发控制指令：需二次确认头，reason 写明处置依据供指令列表与生产档案复盘；
+   *  scheduledAt 可选定时执行（未来 ISO），PAUSE/RESUME 需在 parameters.targetCommandId 指向目标指令 */
+  sendCommand(data: { deviceId: string; plotCode?: string; type: string; parameters?: Record<string, unknown>; reason?: string; scheduledAt?: string }): Promise<any> {
     return post<any>('/control/commands', data, { headers: { 'X-Confirm-Action': 'CONFIRM' } })
   },
   /** 标记指令已下发到设备（QUEUED→SENT）；设备网关接入前由人工确认这一步真实发生 */
@@ -911,14 +916,39 @@ export const controlApi = {
   cancelCommand(commandId: string, reason?: string): Promise<any> {
     return post<any>(`/control/commands/${encodeURIComponent(commandId)}/cancel`, reason ? { reason } : {})
   },
-  /** 登记设备回执：ACKED 已接收、DONE 执行到位、FAILED 失败（急停的 DONE 必须带到位确认） */
-  reportReceipt(data: { commandId: string; status: 'ACKED' | 'DONE' | 'FAILED'; message?: string; result?: Record<string, unknown> }): Promise<any> {
+  /** 登记设备回执：ACKED 已接收、PAUSED 已暂停、DONE 执行到位、FAILED 失败（急停/断电的 DONE 必须带到位确认） */
+  reportReceipt(data: { commandId: string; status: 'ACKED' | 'PAUSED' | 'DONE' | 'FAILED'; message?: string; result?: Record<string, unknown> }): Promise<any> {
     return post<any>('/control/device/receipt', data)
   },
   /** 变量灌溉方案预演：只算不执行，返回分区时序与累计供水曲线 */
   buildIrrigationPlan(data: IrrigationPlanInput): Promise<IrrigationPlan> {
     return post<IrrigationPlan>('/control/irrigation-plans', data, { headers: { 'X-Confirm-Action': 'CONFIRM' } })
+  },
+  /** 作业授权列表（A8 范围管控）：空列表 = 未启用，人工下发不受限 */
+  getAuthorizations(): Promise<ControlAuthorization[]> {
+    return get<ControlAuthorization[]>('/control/authorizations')
+  },
+  /** 建档作业授权：设备/地块留空表示通配，窗口内人工下发才放行 */
+  createAuthorization(data: { deviceId?: string; plotCode?: string; validFrom: string; validTo: string; note?: string }): Promise<ControlAuthorization> {
+    return post<ControlAuthorization>('/control/authorizations', data)
+  },
+  /** 删除作业授权；删空后范围管控回到未启用状态 */
+  deleteAuthorization(id: string): Promise<void> {
+    return del<void>(`/control/authorizations/${encodeURIComponent(id)}`)
   }
+}
+
+/** 一条作业授权（A8）：设备/地块缺省表示全部，窗口闭区间 */
+export interface ControlAuthorization {
+  id: string
+  tenantId: string
+  deviceId?: string
+  plotCode?: string
+  validFrom: string
+  validTo: string
+  note?: string
+  createdBy: string
+  createdAt: string
 }
 
 /** 水肥方案入参：分区按亩与毫米给定额，可附带配比与搅拌 */

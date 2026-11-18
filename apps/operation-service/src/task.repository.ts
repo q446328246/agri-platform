@@ -32,6 +32,8 @@ export interface Task {
   scheduledAt?: string;
   scheduledEndAt?: string;
   assigneeName?: string;
+  /** 执行设备（A5 自动排队，迁移 052）；可空，人工任务不强制绑设备 */
+  deviceId?: string;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
@@ -49,6 +51,7 @@ export interface TaskQuery {
   type?: TaskType;
   priority?: TaskPriority;
   plotCode?: string;
+  deviceId?: string;
   from?: string;
   to?: string;
   archived?: TaskArchiveFilter;
@@ -64,8 +67,10 @@ export interface TaskRepository {
   remove(tenantId: string, id: string, deletedAt: string, actor?: string, traceId?: string): Promise<Task | null>;
   /** 任务变更历史（追加式留痕），归档任务也可回查 */
   history(tenantId: string, taskId: string): Promise<TaskChangeLog[]>;
-  /** 排程冲突提示：同地块或同负责人的在册任务计划时间重叠；只提示不阻断 */
+  /** 排程冲突提示：同地块、同负责人或同设备的在册任务计划时间重叠；只提示不阻断 */
   conflicts(tenantId: string, probe: ConflictProbe): Promise<TaskConflict[]>;
+  /** 设备任务队列（A5）：在册未结束（PENDING/RUNNING）按 优先级 → 计划开始 → 建档时间 排序 */
+  queue(tenantId: string, deviceId: string): Promise<Task[]>;
 }
 /** 冲突探测入参：新建任务或回查既有任务都用它描述待检查的排程 */
 export interface ConflictProbe {
@@ -73,6 +78,7 @@ export interface ConflictProbe {
   id?: string;
   plotCode: string;
   assigneeName?: string;
+  deviceId?: string;
   scheduledAt?: string;
   scheduledEndAt?: string;
 }
@@ -85,7 +91,7 @@ export interface TaskConflict {
  * 冲突判定纯函数，两套仓储共用同一口径：
  * 只看在册（未归档）且未结束（PENDING/RUNNING）的任务；双方都给了计划开始时间
  * 才比较，时间窗按 [开始, 结束 ?? 开始] 闭区间判重叠。没排时间的任务无从判断
- * 冲突，不猜；负责人为空也不参与「同人」判定。
+ * 冲突，不猜；负责人/设备为空也不参与「同人/同机」判定。
  */
 export function conflictsOf(probe: ConflictProbe, rows: Task[]): TaskConflict[] {
   if (!probe.scheduledAt) return [];
@@ -104,9 +110,21 @@ export function conflictsOf(probe: ConflictProbe, rows: Task[]): TaskConflict[] 
     const reasons: string[] = [];
     if (row.plotCode === probe.plotCode) reasons.push("同地块计划时间重叠");
     if (probe.assigneeName && row.assigneeName === probe.assigneeName) reasons.push("同负责人计划时间重叠");
+    // 同设备重叠只提示不阻断：方案 8.7 的处置是自动排队，队列端点给出位次供调度人权衡
+    if (probe.deviceId && row.deviceId === probe.deviceId) reasons.push("同设备计划时间重叠，将按队列顺序执行");
     if (reasons.length > 0) hits.push({ task: row, reasons });
   }
   return hits;
+}
+/** 队列排序纯函数（A5）：优先级 HIGH→NORMAL→LOW，同优先级按计划开始（未排时间的排最后），
+ *  再按建档时间；与 SQL 侧 ORDER BY CASE priority … scheduled_at NULLS LAST 同口径 */
+const PRIORITY_RANK: Record<TaskPriority, number> = { HIGH: 0, NORMAL: 1, LOW: 2 };
+export function queueCompare(a: Task, b: Task): number {
+  const scheduledMs = (task: Task): number => (task.scheduledAt === undefined ? Number.POSITIVE_INFINITY : Date.parse(task.scheduledAt));
+  return PRIORITY_RANK[a.priority ?? "NORMAL"] - PRIORITY_RANK[b.priority ?? "NORMAL"]
+    || scheduledMs(a) - scheduledMs(b)
+    || a.createdAt.localeCompare(b.createdAt)
+    || a.id.localeCompare(b.id);
 }
 const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   PENDING: ["RUNNING", "CANCELLED"], RUNNING: ["COMPLETED", "CANCELLED"], COMPLETED: [], CANCELLED: [],
@@ -138,6 +156,7 @@ export class InMemoryTaskRepository implements TaskRepository {
         && (!query.status || task.status === query.status) && (!query.type || task.type === query.type)
         && (!query.priority || (task.priority ?? "NORMAL") === query.priority)
         && (!query.plotCode || task.plotCode === query.plotCode)
+        && (!query.deviceId || task.deviceId === query.deviceId)
         && (!query.keyword || keywordHits(query.keyword, [task.name, task.plotCode]))
         && (!query.from || at >= Date.parse(query.from)) && (!query.to || at <= Date.parse(query.to));
     }).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
@@ -162,6 +181,7 @@ export class InMemoryTaskRepository implements TaskRepository {
       ...(task.scheduledAt === undefined ? {} : { scheduledAt: task.scheduledAt }),
       ...(task.scheduledEndAt === undefined ? {} : { scheduledEndAt: task.scheduledEndAt }),
       ...(task.assigneeName === undefined ? {} : { assigneeName: task.assigneeName }),
+      ...(task.deviceId === undefined ? {} : { deviceId: task.deviceId }),
       createdAt: task.createdAt,
       version: 1,
     };
@@ -205,8 +225,15 @@ export class InMemoryTaskRepository implements TaskRepository {
   }
   async conflicts(tenantId: string, probe: ConflictProbe): Promise<TaskConflict[]> {
     const candidates = this.tasks.filter((task) => task.tenantId === tenantId
-      && (task.plotCode === probe.plotCode || (probe.assigneeName !== undefined && task.assigneeName === probe.assigneeName)));
+      && (task.plotCode === probe.plotCode || (probe.assigneeName !== undefined && task.assigneeName === probe.assigneeName) || (probe.deviceId !== undefined && task.deviceId === probe.deviceId)));
     return conflictsOf(probe, structuredClone(candidates));
+  }
+  async queue(tenantId: string, deviceId: string): Promise<Task[]> {
+    return this.tasks
+      .filter((task) => task.tenantId === tenantId && task.deviceId === deviceId && task.deletedAt === undefined
+        && (task.status === "PENDING" || task.status === "RUNNING"))
+      .sort(queueCompare)
+      .map((task) => structuredClone(task));
   }
 }
 function fromRow(row: Record<string, unknown>): Task {
@@ -215,6 +242,7 @@ function fromRow(row: Record<string, unknown>): Task {
     if (row[column] != null) task[key] = toIsoTimestamp(row[column]);
   }
   if (row.assignee_name != null) task.assigneeName = String(row.assignee_name);
+  if (row.device_id != null) task.deviceId = String(row.device_id);
   if (row.result_json != null) task.result = row.result_json as TaskResult;
   return task;
 }
@@ -229,7 +257,7 @@ export class SqlTaskRepository implements TaskRepository {
     // 归档条件同时进 count 与分页查询，总数与页内行数才不会各算一套
     if (query.archived === "ONLY") where.push("deleted_at IS NOT NULL");
     else if (query.archived !== "ALL") where.push("deleted_at IS NULL");
-    for (const [column, value] of [["status", query.status], ["type", query.type], ["priority", query.priority], ["plot_code", query.plotCode]] as const) {
+    for (const [column, value] of [["status", query.status], ["type", query.type], ["priority", query.priority], ["plot_code", query.plotCode], ["device_id", query.deviceId]] as const) {
       if (value) { values.push(value); where.push(`${column} = $${values.length}`); }
     }
     // 逐字段字面量匹配，与内存模式的 keywordHits 同一口径；拼接 name 和 plot_code 会造出跨字段假命中
@@ -264,12 +292,12 @@ export class SqlTaskRepository implements TaskRepository {
   async create(task: Task, actor = "system", traceId?: string): Promise<Task> {
     // 建档与建档留痕一条语句写完，避免出现「任务建了、历史没记」的审计缺口
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(`WITH ins AS (
-      INSERT INTO operation_tasks (id, tenant_id, plot_code, type, name, status, priority, scheduled_at, scheduled_end_at, assignee_name, created_at, version)
-        VALUES ($1, $2, $3, $4, $5, 'PENDING', $13, $6, $7, $8, $9, 1) RETURNING *
+      INSERT INTO operation_tasks (id, tenant_id, plot_code, type, name, status, priority, scheduled_at, scheduled_end_at, assignee_name, device_id, created_at, version)
+        VALUES ($1, $2, $3, $4, $5, 'PENDING', $13, $6, $7, $8, $14, $9, 1) RETURNING *
     ), logged AS (
       INSERT INTO operation_task_change_logs (id, task_id, tenant_id, action, summary, actor, trace_id, created_at)
         SELECT $10, id, tenant_id, 'CREATE', '新建任务：' || name, $11, $12, $9::timestamptz FROM ins RETURNING id
-    ) SELECT * FROM ins`, task.id, task.tenantId, task.plotCode, task.type, task.name, task.scheduledAt ?? null, task.scheduledEndAt ?? null, task.assigneeName ?? null, task.createdAt, randomUUID(), actor, traceId ?? null, task.priority ?? "NORMAL");
+    ) SELECT * FROM ins`, task.id, task.tenantId, task.plotCode, task.type, task.name, task.scheduledAt ?? null, task.scheduledEndAt ?? null, task.assigneeName ?? null, task.createdAt, randomUUID(), actor, traceId ?? null, task.priority ?? "NORMAL", task.deviceId ?? null);
     return fromRow(rows[0]!);
   }
   async transition(task: Task, status: TaskStatus, at: string, traceId: string, result?: TaskResult, actor = "system"): Promise<Task | null> {
@@ -298,13 +326,24 @@ export class SqlTaskRepository implements TaskRepository {
     return this.changeLog.listByTask(tenantId, taskId);
   }
   async conflicts(tenantId: string, probe: ConflictProbe): Promise<TaskConflict[]> {
-    // 只捞可能命中的行（同地块或同负责人、在册未结束、排过时间），重叠判定与内存模式共用 conflictsOf
+    // 只捞可能命中的行（同地块、同负责人或同设备、在册未结束、排过时间），重叠判定与内存模式共用 conflictsOf
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `SELECT * FROM operation_tasks
        WHERE tenant_id = $1 AND deleted_at IS NULL AND status IN ('PENDING', 'RUNNING') AND scheduled_at IS NOT NULL
-         AND (plot_code = $2 OR ($3::text IS NOT NULL AND assignee_name = $3))`,
-      tenantId, probe.plotCode, probe.assigneeName ?? null,
+         AND (plot_code = $2 OR ($3::text IS NOT NULL AND assignee_name = $3) OR ($4::text IS NOT NULL AND device_id = $4))`,
+      tenantId, probe.plotCode, probe.assigneeName ?? null, probe.deviceId ?? null,
     );
     return conflictsOf(probe, rows.map(fromRow));
+  }
+  async queue(tenantId: string, deviceId: string): Promise<Task[]> {
+    // 排序与内存模式 queueCompare 同口径：优先级 → 计划开始（未排最后）→ 建档时间
+    const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT * FROM operation_tasks
+       WHERE tenant_id = $1 AND device_id = $2 AND deleted_at IS NULL AND status IN ('PENDING', 'RUNNING')
+       ORDER BY CASE priority WHEN 'HIGH' THEN 0 WHEN 'NORMAL' THEN 1 ELSE 2 END,
+         scheduled_at ASC NULLS LAST, created_at ASC, id ASC`,
+      tenantId, deviceId,
+    );
+    return rows.map(fromRow);
   }
 }

@@ -106,17 +106,24 @@ export function getControlTypeText(type: string): string {
     IRRIGATION: '灌溉',
     WEEDING: '除草',
     FERTILIZATION: '水肥',
-    ESTOP: '急停'
+    ESTOP: '急停',
+    PAUSE: '暂停',
+    RESUME: '恢复',
+    RETURN_HOME: '返航',
+    POWER_OFF: '断电',
+    TOOL_SWITCH: '切换机具',
+    TILLAGE: '耕整地'
   }
   return map[type] || type
 }
 
-/** 控制指令生命周期：入队 → 已下发 → 设备已接收 → 执行到位，任一在途状态都可能失败；未领取（QUEUED）可取消 */
+/** 控制指令生命周期：入队 → 已下发 → 设备已接收 → 执行到位，在途可被暂停后恢复，任一在途状态都可能失败；未领取（QUEUED）可取消 */
 export function getControlStatusText(status: string): string {
   const map: Record<string, string> = {
     QUEUED: '已入队',
     SENT: '已下发',
     ACKED: '设备已接收',
+    PAUSED: '已暂停',
     DONE: '执行到位',
     FAILED: '失败',
     CANCELLED: '已取消'
@@ -129,6 +136,7 @@ export function getControlStatusType(status: string): 'primary' | 'success' | 'i
     QUEUED: 'info',
     SENT: 'warning',
     ACKED: 'primary',
+    PAUSED: 'warning',
     DONE: 'success',
     FAILED: 'danger',
     CANCELLED: 'info'
