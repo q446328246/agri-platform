@@ -87,19 +87,23 @@
         <el-table-column label="来源" width="90">
           <template #default="{ row }">{{ row.sourceEventId ? '事件' : '手工' }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="90">
+        <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-tag v-if="row.ignored" type="info" size="small" effect="plain">已忽略</el-tag>
+            <el-tooltip v-else-if="row.dispatched" :content="`处置人：${row.dispatchedBy || '—'} · ${formatDateTime(row.dispatchedAt)}${row.dispatchNote ? ' · ' + row.dispatchNote : ''}`" placement="top">
+              <el-tag type="success" size="small" effect="plain">已派单</el-tag>
+            </el-tooltip>
             <el-tag v-else :type="row.read ? 'info' : 'warning'" size="small">{{ row.read ? '已读' : '未读' }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
-            <template v-if="!row.ignored">
+            <template v-if="!row.ignored && !row.dispatched">
               <el-button v-if="!row.read" link type="primary" @click="markRead(row)">标记已读</el-button>
+              <el-button v-if="row.type === 'ALERT'" link type="success" @click="openDispatch(row)">派单</el-button>
               <el-button link type="warning" @click="ignore(row)">忽略</el-button>
             </template>
             <span v-else class="message-done">—</span>
@@ -151,6 +155,23 @@
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="submitting" @click="submit">发送</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="dispatchVisible" title="派单处置" width="480px">
+      <p class="message-hint preference-hint">{{ dispatchTarget?.title }}</p>
+      <el-form label-width="80px">
+        <el-form-item label="处置说明" required>
+          <el-input v-model="dispatchNote" type="textarea" :rows="3" maxlength="200" show-word-limit placeholder="必填：处置要求或转派说明" />
+        </el-form-item>
+        <el-form-item label="处置人">
+          <el-input v-model="dispatchBy" maxlength="40" placeholder="选填，缺省记当前登录账号" />
+        </el-form-item>
+      </el-form>
+      <p class="message-hint preference-hint">派单后消息自动标已读；派单与忽略互斥，已派单的消息不再提供忽略入口。</p>
+      <template #footer>
+        <el-button @click="dispatchVisible = false">取消</el-button>
+        <el-button type="primary" :loading="dispatching" @click="submitDispatch">确认派单</el-button>
       </template>
     </el-dialog>
 
@@ -208,6 +229,11 @@ interface MessageRow {
   level: 'INFO' | 'WARNING' | 'CRITICAL'
   read: boolean
   ignored?: boolean
+  /** 派单处置（迁移 048）：仅告警可派单，派单顺带标已读 */
+  dispatched?: boolean
+  dispatchedBy?: string
+  dispatchNote?: string
+  dispatchedAt?: string
   plotCode?: string
   sourceEventId?: string
   createdAt: string
@@ -366,6 +392,42 @@ async function ignore(row: MessageRow): Promise<void> {
   } catch (error) {
     console.error('忽略消息失败', error)
     await load()
+  }
+}
+
+// 派单处置：仅告警可派，处置说明必填，后端同步标已读
+const dispatchVisible = ref(false)
+const dispatching = ref(false)
+const dispatchTarget = ref<MessageRow | null>(null)
+const dispatchNote = ref('')
+const dispatchBy = ref('')
+
+function openDispatch(row: MessageRow): void {
+  dispatchTarget.value = row
+  dispatchNote.value = ''
+  dispatchBy.value = ''
+  dispatchVisible.value = true
+}
+
+async function submitDispatch(): Promise<void> {
+  const target = dispatchTarget.value
+  if (!target) return
+  const note = dispatchNote.value.trim()
+  if (!note) {
+    ElMessage.warning('请填写处置说明')
+    return
+  }
+  dispatching.value = true
+  try {
+    const by = dispatchBy.value.trim()
+    await messageApi.dispatch(target.id, { note, ...(by ? { dispatchedBy: by } : {}) })
+    ElMessage.success('已派单处置')
+    dispatchVisible.value = false
+    await load()
+  } catch (error: any) {
+    ElMessage.error(error?.message ?? '派单失败')
+  } finally {
+    dispatching.value = false
   }
 }
 

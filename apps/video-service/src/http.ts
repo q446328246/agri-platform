@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import type { ApiResponse, PageResult } from "@agri/contracts";
+import type { ApiResponse, AiEventTypeValue, PageResult } from "@agri/contracts";
 import { authorizeRequest } from "@agri/shared";
-import { forwardPestDetection, parseAiDetection } from "./ai-event.js";
+import { AI_EVENT_TYPES, forwardAiDetection, parseAiDetection } from "./ai-event.js";
 import type { AiDetection, ForwardResult } from "./ai-event.js";
 import { InMemoryAiEventRepository, toDetection } from "./ai-event.repository.js";
 import type { AiEventQuery, AiEventRecord, AiEventRepository } from "./ai-event.repository.js";
@@ -73,6 +73,11 @@ function aiQuery(query: URLSearchParams): AiEventQuery {
   if (forwarded === "true") result.forwarded = true;
   else if (forwarded === "false") result.forwarded = false;
   else if (forwarded !== "") throw new Error("forwarded 筛选需为 true 或 false");
+  const eventType = param(query, "eventType");
+  if (eventType !== "") {
+    if (!AI_EVENT_TYPES.includes(eventType as AiEventTypeValue)) throw new Error(`eventType需为 ${AI_EVENT_TYPES.join("/")}`);
+    result.eventType = eventType as AiEventTypeValue;
+  }
   return result;
 }
 function ptzQuery(query: URLSearchParams): PtzQuery {
@@ -90,7 +95,7 @@ export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
   const aiEvents = options.aiEvents ?? new InMemoryAiEventRepository();
   const ptz = options.ptz ?? new InMemoryPtzRepository();
   const channel = options.channel ?? new UnconfiguredPtzChannel();
-  const forward = options.forward ?? forwardPestDetection;
+  const forward = options.forward ?? forwardAiDetection;
   /** 云台投递后按通道真实结果落状态：未接入硬件通道时留存 QUEUED，不假装下发成功 */
   const deliverPtz = async (tenantId: string, command: PtzCommand): Promise<{ command: PtzCommand; message: string }> => {
     const delivered = await channel.deliver(command);
@@ -127,7 +132,7 @@ export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
   // 视频 AI 联动：先落库再转发，转发失败保留记录并由中继补投，重启不丢识别结果
   if (req.method === "POST" && url.pathname === "/api/v1/video/ai-events") {
     const detection = parseAiDetection(await json(req));
-    let record: AiEventRecord = await aiEvents.create({ id: randomUUID(), tenantId, cameraId: detection.cameraId, plotCode: detection.plotCode, pestType: detection.pestType, level: detection.level, confidence: detection.confidence, ...(detection.imageFileId ? { imageFileId: detection.imageFileId } : {}), detectedAt: detection.detectedAt, receivedAt: new Date().toISOString(), forwarded: false, forwardStatus: 0, forwardMessage: "", retryCount: 0 });
+    let record: AiEventRecord = await aiEvents.create({ id: randomUUID(), tenantId, cameraId: detection.cameraId, plotCode: detection.plotCode, eventType: detection.eventType ?? "PEST", pestType: detection.pestType, level: detection.level, confidence: detection.confidence, ...(detection.imageFileId ? { imageFileId: detection.imageFileId } : {}), detectedAt: detection.detectedAt, receivedAt: new Date().toISOString(), forwarded: false, forwardStatus: 0, forwardMessage: "", retryCount: 0 });
     const result = await forward(detection, forwardOptions);
     record = (result.forwarded ? await aiEvents.markForwarded(tenantId, record.id, new Date().toISOString(), result.status, result.message) : await aiEvents.markFailed(tenantId, record.id, result.status, result.message)) ?? record;
     send(res, record.forwarded ? 201 : 202, record, traceId, result.message); return;

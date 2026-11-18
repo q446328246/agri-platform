@@ -207,6 +207,43 @@ export function createMessageHttpServer(dependencies?: MessageDependencies): Ser
         return;
       }
 
+      // 派单处置：告警转交线下处置（顺带标已读）；与忽略互斥，只有 ALERT 可派单
+      const dispatchMatch = url.pathname.match(/^\/api\/v1\/messages\/([^/]+)\/dispatch$/);
+      const dispatchId = dispatchMatch?.[1] ? decodeURIComponent(dispatchMatch[1]) : undefined;
+      if (dispatchId && req.method === "POST") {
+        const current = await messages.findById(dispatchId, tenantId);
+        if (!current) {
+          send(res, 404, null, traceId, "消息不存在");
+          return;
+        }
+        if (current.type !== "ALERT") {
+          send(res, 400, null, traceId, "仅告警消息支持派单处置");
+          return;
+        }
+        if (current.ignored) {
+          send(res, 400, null, traceId, "该消息已忽略，无需派单");
+          return;
+        }
+        if (current.dispatched) {
+          send(res, 400, null, traceId, "该消息已派单，请勿重复提交");
+          return;
+        }
+        const body = await json(req);
+        const note = String(body.note ?? "").trim();
+        if (!note) {
+          send(res, 400, null, traceId, "派单说明不能为空");
+          return;
+        }
+        const by = String(body.dispatchedBy ?? "").trim() || req.headers["x-user-id"]?.toString() || "system";
+        const message = await messages.markDispatched(dispatchId, { by, note, at: new Date().toISOString() }, tenantId);
+        if (!message) {
+          send(res, 404, null, traceId, "消息不存在");
+          return;
+        }
+        send(res, 200, message, traceId);
+        return;
+      }
+
       const detailMatch = url.pathname.match(/^\/api\/v1\/messages\/([^/]+)$/);
       const detailId = detailMatch?.[1] ? decodeURIComponent(detailMatch[1]) : undefined;
       if (detailId && req.method === "GET") {

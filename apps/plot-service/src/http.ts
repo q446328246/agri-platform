@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 
-import type { ApiResponse, GeoLineString, GeoPolygon, PageResult } from "@agri/contracts";
+import type { ApiResponse, GeoLineString, GeoPolygon, MachineTypeValue, PageResult } from "@agri/contracts";
+import { MachineType } from "@agri/contracts";
 import { authorizeRequest, ulid, BizError } from "@agri/shared";
 
 import { INFRA_LINE_TYPES, InMemoryInfraLineRepository, estimateLengthM } from "./infra-line.repository.js";
@@ -19,6 +20,49 @@ import { InMemoryZoneRepository } from "./zone.repository.js";
 import type { PlotZone, ZonePatch, ZoneRepository } from "./zone.repository.js";
 
 const API_PREFIX = "/api/v1";
+
+/** 线路适用机型白名单，与 @agri/contracts 的 MachineType 同一套编码（迁移 047） */
+const MACHINE_TYPES: MachineTypeValue[] = Object.values(MachineType);
+
+/**
+ * 台账属性字段（迁移 047）：POST/PUT 共用校验。
+ * 宽度/限速选填，填了必须为正，null 表示清除登记；机型数组元素受白名单约束。
+ */
+function parseLineAttributes(input: Record<string, unknown>): { error: string; attrs?: undefined } | { error?: undefined; attrs: InfraLinePatch } {
+  const attrs: InfraLinePatch = {};
+  if (input.widthM !== undefined) {
+    if (input.widthM === null) attrs.widthM = null;
+    else {
+      const widthM = Number(input.widthM);
+      if (!Number.isFinite(widthM) || widthM <= 0) return { error: "线路宽度需为正数（米），传 null 清除登记" };
+      attrs.widthM = widthM;
+    }
+  }
+  if (input.speedLimitKmh !== undefined) {
+    if (input.speedLimitKmh === null) attrs.speedLimitKmh = null;
+    else {
+      const speedLimitKmh = Number(input.speedLimitKmh);
+      if (!Number.isFinite(speedLimitKmh) || speedLimitKmh <= 0) return { error: "限速需为正数（公里/小时），传 null 清除登记" };
+      attrs.speedLimitKmh = speedLimitKmh;
+    }
+  }
+  if (input.applicableMachines !== undefined) {
+    const machines = input.applicableMachines;
+    if (!Array.isArray(machines) || machines.some((item) => !MACHINE_TYPES.includes(item as MachineTypeValue))) {
+      return { error: `适用机型需为数组，取值 ${MACHINE_TYPES.join("/")}` };
+    }
+    attrs.applicableMachines = [...new Set(machines.map(String))] as MachineTypeValue[];
+  }
+  if (input.enabled !== undefined) {
+    if (typeof input.enabled !== "boolean") return { error: "enabled 需为布尔值" };
+    attrs.enabled = input.enabled;
+  }
+  if (input.isTemplate !== undefined) {
+    if (typeof input.isTemplate !== "boolean") return { error: "isTemplate 需为布尔值" };
+    attrs.isTemplate = input.isTemplate;
+  }
+  return { attrs };
+}
 
 function traceId(request: IncomingMessage): string {
   const value = request.headers["x-request-id"];
@@ -180,11 +224,35 @@ export function createPlotHttpServer(
       // 管线必须先于 /plots/:code 匹配，否则 infra-lines 会被当成地块编码
       if (url.pathname === `${API_PREFIX}/plots/infra-lines` && request.method === "GET") {
         const tenantId = request.headers["x-tenant-id"]?.toString() || "tenant-demo";
-        const type = url.searchParams.get("lineType");
+        const type = (url.searchParams.get("lineType") ?? "").trim();
         const plotCode = (url.searchParams.get("plotCode") ?? "").trim();
+        const enabledRaw = (url.searchParams.get("enabled") ?? "").trim();
+        const templateRaw = (url.searchParams.get("template") ?? "").trim();
+        const machine = (url.searchParams.get("machine") ?? "").trim();
+        // 受白名单/布尔约束的筛选参数非法直接 400，避免拼错参数时静默筛空
+        if (type !== "" && !INFRA_LINE_TYPES.includes(type as InfraLineType)) {
+          send(response, 400, null, requestTraceId, `lineType需为 ${INFRA_LINE_TYPES.join("/")}`);
+          return;
+        }
+        if (enabledRaw !== "" && enabledRaw !== "true" && enabledRaw !== "false") {
+          send(response, 400, null, requestTraceId, "enabled需为 true/false");
+          return;
+        }
+        if (templateRaw !== "" && templateRaw !== "true" && templateRaw !== "false") {
+          send(response, 400, null, requestTraceId, "template需为 true/false");
+          return;
+        }
+        if (machine !== "" && !MACHINE_TYPES.includes(machine as MachineTypeValue)) {
+          send(response, 400, null, requestTraceId, `machine需为 ${MACHINE_TYPES.join("/")}`);
+          return;
+        }
         const lines = await infraLines.listByTenant(tenantId);
         send(response, 200, lines.filter((line) =>
-          (!type || line.lineType === type) && (plotCode === "" || line.plotCode === plotCode),
+          (type === "" || line.lineType === type)
+          && (plotCode === "" || line.plotCode === plotCode)
+          && (enabledRaw === "" || (line.enabled ?? true) === (enabledRaw === "true"))
+          && (templateRaw === "" || (line.isTemplate ?? false) === (templateRaw === "true"))
+          && (machine === "" || (line.applicableMachines ?? []).includes(machine as MachineTypeValue)),
         ), requestTraceId);
         return;
       }
@@ -215,6 +283,11 @@ export function createPlotHttpServer(
           send(response, 400, null, requestTraceId, `归属地块 ${plotCode} 不存在`);
           return;
         }
+        const parsed = parseLineAttributes(input);
+        if (parsed.error) {
+          send(response, 400, null, requestTraceId, parsed.error);
+          return;
+        }
         const line: InfraLine = {
           id: ulid(),
           lineCode,
@@ -224,8 +297,65 @@ export function createPlotHttpServer(
           geom: { type: "LineString", coordinates: geom.coordinates, srid: Number(geom.srid ?? 4490) },
           lengthM: input.lengthM !== undefined ? Number(input.lengthM) : estimateLengthM(geom),
           plotCode,
+          enabled: parsed.attrs.enabled ?? true,
+          isTemplate: parsed.attrs.isTemplate ?? false,
           createdAt: new Date().toISOString(),
         };
+        if (parsed.attrs.widthM !== undefined && parsed.attrs.widthM !== null) line.widthM = parsed.attrs.widthM;
+        if (parsed.attrs.speedLimitKmh !== undefined && parsed.attrs.speedLimitKmh !== null) line.speedLimitKmh = parsed.attrs.speedLimitKmh;
+        if (parsed.attrs.applicableMachines !== undefined) line.applicableMachines = parsed.attrs.applicableMachines;
+        await infraLines.create(undefined, line);
+        send(response, 201, line, requestTraceId);
+        return;
+      }
+      // 从模板建档：复制模板线的几何与台账属性，副本自身不再是模板，避免模板列表套娃
+      if (url.pathname === `${API_PREFIX}/plots/infra-lines/from-template` && request.method === "POST") {
+        const input = await readJson(request);
+        const templateCode = String(input.templateCode ?? "").trim();
+        if (templateCode === "") {
+          send(response, 400, null, requestTraceId, "模板线路编码不能为空");
+          return;
+        }
+        const template = await infraLines.findByCode(templateCode);
+        if (!template) {
+          send(response, 404, null, requestTraceId, `模板线路 ${templateCode} 不存在`);
+          return;
+        }
+        if (!template.isTemplate) {
+          send(response, 400, null, requestTraceId, `线路 ${templateCode} 未标记为模板`);
+          return;
+        }
+        const lineName = input.lineName !== undefined ? String(input.lineName).trim() : `${template.lineName}-副本`;
+        if (lineName === "") {
+          send(response, 400, null, requestTraceId, "管线名称不能为空");
+          return;
+        }
+        const lineCode = typeof input.lineCode === "string" && input.lineCode !== "" ? input.lineCode : `LINE-${ulid().slice(-8)}`;
+        if (await infraLines.findByCode(lineCode)) {
+          send(response, 409, null, requestTraceId, `管线编码 ${lineCode} 已存在`);
+          return;
+        }
+        const plotCode = input.plotCode !== undefined ? String(input.plotCode).trim() : template.plotCode;
+        if (plotCode !== "" && !(await service.exists(plotCode))) {
+          send(response, 400, null, requestTraceId, `归属地块 ${plotCode} 不存在`);
+          return;
+        }
+        const line: InfraLine = {
+          id: ulid(),
+          lineCode,
+          lineName,
+          lineType: template.lineType,
+          tenantId: tenantOf(request),
+          geom: structuredClone(template.geom),
+          lengthM: template.lengthM,
+          plotCode,
+          enabled: template.enabled ?? true,
+          isTemplate: false,
+          createdAt: new Date().toISOString(),
+        };
+        if (template.widthM !== undefined) line.widthM = template.widthM;
+        if (template.speedLimitKmh !== undefined) line.speedLimitKmh = template.speedLimitKmh;
+        if (template.applicableMachines !== undefined) line.applicableMachines = [...template.applicableMachines];
         await infraLines.create(undefined, line);
         send(response, 201, line, requestTraceId);
         return;
@@ -283,6 +413,12 @@ export function createPlotHttpServer(
           }
           patch.plotCode = plotCode;
         }
+        const parsed = parseLineAttributes(input);
+        if (parsed.error) {
+          send(response, 400, null, requestTraceId, parsed.error);
+          return;
+        }
+        Object.assign(patch, parsed.attrs);
         const updated = await infraLines.update(undefined, lineCode, patch);
         if (!updated) {
           send(response, 404, null, requestTraceId, "管线不存在");

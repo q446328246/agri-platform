@@ -9,6 +9,7 @@ export const EventTopic = {
   IotDeviceOffline: "iot.device.offline",
   TelemetryThresholdBreached: "telemetry.threshold.breached",
   TelemetryPestDetected: "telemetry.pest.detected",
+  TelemetryAiDetected: "telemetry.ai.detected",
   DecisionPrescriptionIssued: "decision.prescription.issued",
   OperationTaskCompleted: "operation.task.completed",
   ControlIrrigationFinished: "control.irrigation.finished",

@@ -110,6 +110,11 @@
         <div class="search-bar">
           <el-form :inline="true" @submit.prevent="loadAiEvents">
             <el-form-item label="地块编码"><el-input v-model="aiQuery.plotCode" placeholder="可选" clearable style="width: 180px" /></el-form-item>
+            <el-form-item label="事件类型">
+              <el-select v-model="aiQuery.eventType" placeholder="全部" clearable style="width: 140px">
+                <el-option v-for="opt in aiTypeOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="转发状态">
               <el-select v-model="aiQuery.forwarded" placeholder="全部" clearable style="width: 130px">
                 <el-option label="已转发" value="true" />
@@ -122,7 +127,12 @@
         <el-table v-loading="aiLoading" :data="aiEvents" stripe>
           <el-table-column label="摄像机" min-width="150"><template #default="{ row }">{{ cameraName(row.cameraId) }}</template></el-table-column>
           <el-table-column prop="plotCode" label="地块" min-width="180" show-overflow-tooltip />
-          <el-table-column prop="pestType" label="虫害类型" width="110" />
+          <el-table-column label="事件类型" width="110">
+            <template #default="{ row }">{{ aiTypeLabel(row.eventType) }}</template>
+          </el-table-column>
+          <el-table-column label="虫害类型" width="110">
+            <template #default="{ row }">{{ (row.eventType ?? 'PEST') === 'PEST' ? row.pestType : '—' }}</template>
+          </el-table-column>
           <el-table-column label="等级" width="80">
             <template #default="{ row }">
               <el-tag :type="row.level === 3 ? 'danger' : row.level === 2 ? 'warning' : 'info'" size="small">{{ ['', '轻微', '中等', '严重'][row.level] }}</el-tag>
@@ -258,7 +268,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { videoApi } from '@/api'
 import { formatDateTime } from '@/utils'
-import type { Camera, PtzAction, PtzCommand, Recording, VideoAiEvent } from '@/types'
+import type { AiEventType, Camera, PtzAction, PtzCommand, Recording, VideoAiEvent } from '@/types'
 
 /** 播放状态：加载中、播放中、加载失败、未开始 */
 type PlayState = 'loading' | 'playing' | 'error' | 'idle'
@@ -536,7 +546,20 @@ function stopRecordingPlayback() {
 }
 
 // —— AI 识别事件 ——
-const aiQuery = reactive<{ plotCode: string; forwarded: string }>({ plotCode: '', forwarded: '' })
+/** 事件类型白名单（迁移 048），与 contracts AiEventType 七码同步；存量记录无 eventType 视为虫情 */
+const aiTypeOptions: Array<{ value: AiEventType; label: string }> = [
+  { value: 'PEST', label: '虫情' },
+  { value: 'PERSON_INTRUSION', label: '人员闯入' },
+  { value: 'MACHINE_STATUS', label: '农机状态' },
+  { value: 'FLOOD', label: '涝情' },
+  { value: 'LODGING', label: '倒伏' },
+  { value: 'FIRE', label: '火情' },
+  { value: 'SMOKE', label: '烟雾' },
+]
+function aiTypeLabel(type?: AiEventType): string {
+  return aiTypeOptions.find((opt) => opt.value === (type ?? 'PEST'))?.label ?? (type ?? 'PEST')
+}
+const aiQuery = reactive<{ plotCode: string; eventType: string; forwarded: string }>({ plotCode: '', eventType: '', forwarded: '' })
 const aiEvents = ref<VideoAiEvent[]>([])
 const aiLoading = ref(false)
 const aiPage = ref(1)
@@ -550,6 +573,7 @@ async function loadAiEvents() {
       page: aiPage.value,
       size: aiSize,
       ...(aiQuery.plotCode ? { plotCode: aiQuery.plotCode } : {}),
+      ...(aiQuery.eventType ? { eventType: aiQuery.eventType as AiEventType } : {}),
       ...(aiQuery.forwarded ? { forwarded: aiQuery.forwarded === 'true' } : {})
     })
     aiEvents.value = res.items ?? []
@@ -562,13 +586,13 @@ async function loadAiEvents() {
   }
 }
 
-function resetAiQuery() { aiQuery.plotCode = ''; aiQuery.forwarded = ''; aiPage.value = 1; void loadAiEvents() }
+function resetAiQuery() { aiQuery.plotCode = ''; aiQuery.eventType = ''; aiQuery.forwarded = ''; aiPage.value = 1; void loadAiEvents() }
 
 async function retryAiEvent(event: VideoAiEvent) {
   retryingId.value = event.id
   try {
     const updated = await videoApi.retryAiEvent(event.id)
-    if (updated.forwarded) ElMessage.success('转发成功，已生成虫情告警')
+    if (updated.forwarded) ElMessage.success(updated.forwardMessage || '转发成功，已生成告警')
     else ElMessage.warning(updated.forwardMessage || '遥测服务仍不可达，稍后再试')
     void loadAiEvents()
   } catch {

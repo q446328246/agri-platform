@@ -27,6 +27,14 @@ export interface MessageRecord {
   read: boolean;
   /** 已忽略处置：确认无需处置后从待办拿掉，记录保留可回查；缺省 false */
   ignored?: boolean;
+  /** 已派单处置：转交线下处置（迁移 048）；与忽略互斥使用，缺省 false */
+  dispatched?: boolean;
+  /** 派单操作人 */
+  dispatchedBy?: string;
+  /** 派单说明：转交给谁、怎么处置 */
+  dispatchNote?: string;
+  /** 派单时间，ISO 8601 UTC */
+  dispatchedAt?: string;
   createdAt: string;
   /** 关联地块编码，便于按地块过滤 */
   plotCode?: string;
@@ -63,6 +71,8 @@ export interface MessageRepository {
   markRead(id: string, tenantId?: string): Promise<MessageRecord | null>;
   /** 忽略处置：置 ignored 并顺带标已读（忽略即确认无需处置），不存在返回 null */
   markIgnored(id: string, tenantId?: string): Promise<MessageRecord | null>;
+  /** 派单处置：置 dispatched 并顺带标已读（与忽略同口径），不存在返回 null */
+  markDispatched(id: string, dispatch: { by: string; note: string; at: string }, tenantId?: string): Promise<MessageRecord | null>;
   unreadCount(tenantId?: string): Promise<number>;
 }
 
@@ -85,10 +95,17 @@ function toRecord(row: Record<string, unknown>): MessageRecord {
   if (row.plot_code !== null && row.plot_code !== undefined) record.plotCode = String(row.plot_code);
   if (row.source_event_id !== null && row.source_event_id !== undefined) record.sourceEventId = String(row.source_event_id);
   if (row.dedupe_key !== null && row.dedupe_key !== undefined) record.dedupeKey = String(row.dedupe_key);
+  // 未派单的消息不带派单字段，保持与存量响应/测试断言同形
+  if (row.dispatched === true) record.dispatched = true;
+  if (row.dispatched_by !== null && row.dispatched_by !== undefined && String(row.dispatched_by) !== "") record.dispatchedBy = String(row.dispatched_by);
+  if (row.dispatch_note !== null && row.dispatch_note !== undefined && String(row.dispatch_note) !== "") record.dispatchNote = String(row.dispatch_note);
+  if (row.dispatched_at !== null && row.dispatched_at !== undefined) {
+    record.dispatchedAt = row.dispatched_at instanceof Date ? row.dispatched_at.toISOString() : new Date(String(row.dispatched_at)).toISOString();
+  }
   return record;
 }
 
-/** PostgreSQL 实现，表结构由迁移 003 管理 */
+/** PostgreSQL 实现，表结构由迁移 003 管理，派单处置列由迁移 048 追加 */
 export class SqlMessageRepository implements MessageRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
@@ -102,7 +119,7 @@ export class SqlMessageRepository implements MessageRepository {
       `INSERT INTO ops_messages (id, tenant_id, type, title, content, level, is_read, plot_code, source_event_id, dedupe_key, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9, $10)
        ON CONFLICT DO NOTHING
-       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at`,
+       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, dispatched, dispatched_by, dispatch_note, dispatched_at, created_at`,
       input.id,
       input.tenantId,
       input.type,
@@ -159,7 +176,7 @@ export class SqlMessageRepository implements MessageRepository {
     const total = Number(totalRows[0]?.total ?? 0);
     values.push(query.size, (query.page - 1) * query.size);
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `SELECT id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at
+      `SELECT id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, dispatched, dispatched_by, dispatch_note, dispatched_at, created_at
        FROM ops_messages ${where}
        ORDER BY created_at DESC, id DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
       ...values,
@@ -175,7 +192,7 @@ export class SqlMessageRepository implements MessageRepository {
       where += ` AND tenant_id = $${values.length}`;
     }
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `SELECT id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at
+      `SELECT id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, dispatched, dispatched_by, dispatch_note, dispatched_at, created_at
        FROM ops_messages WHERE ${where} LIMIT 1`,
       ...values,
     );
@@ -192,7 +209,7 @@ export class SqlMessageRepository implements MessageRepository {
     }
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `UPDATE ops_messages SET is_read = TRUE WHERE ${where}
-       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at`,
+       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, dispatched, dispatched_by, dispatch_note, dispatched_at, created_at`,
       ...values,
     );
     const row = rows[0];
@@ -209,7 +226,24 @@ export class SqlMessageRepository implements MessageRepository {
     // 忽略即确认无需处置：顺带标已读，未读角标不再为它计数
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `UPDATE ops_messages SET ignored = TRUE, is_read = TRUE WHERE ${where}
-       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, created_at`,
+       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, dispatched, dispatched_by, dispatch_note, dispatched_at, created_at`,
+      ...values,
+    );
+    const row = rows[0];
+    return row ? toRecord(row) : null;
+  }
+
+  async markDispatched(id: string, dispatch: { by: string; note: string; at: string }, tenantId?: string): Promise<MessageRecord | null> {
+    const values: unknown[] = [id, dispatch.by, dispatch.note, dispatch.at];
+    let where = "id = $1";
+    if (tenantId !== undefined && tenantId !== "") {
+      values.push(tenantId);
+      where += ` AND tenant_id = $${values.length}`;
+    }
+    // 派单即转交线下处置：顺带标已读，与忽略同一口径；重复派单/已忽略的拦截由 HTTP 层前置校验
+    const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
+      `UPDATE ops_messages SET dispatched = TRUE, is_read = TRUE, dispatched_by = $2, dispatch_note = $3, dispatched_at = $4::timestamptz WHERE ${where}
+       RETURNING id, tenant_id, type, title, content, level, is_read, ignored, plot_code, source_event_id, dedupe_key, dispatched, dispatched_by, dispatch_note, dispatched_at, created_at`,
       ...values,
     );
     const row = rows[0];
@@ -288,6 +322,17 @@ export class InMemoryMessageRepository implements MessageRepository {
     if (!row) return null;
     row.ignored = true;
     row.read = true;
+    return structuredClone(row);
+  }
+
+  async markDispatched(id: string, dispatch: { by: string; note: string; at: string }, tenantId?: string): Promise<MessageRecord | null> {
+    const row = this.rows.find((item) => item.id === id && (tenantId ? item.tenantId === tenantId : true));
+    if (!row) return null;
+    row.dispatched = true;
+    row.read = true;
+    row.dispatchedBy = dispatch.by;
+    row.dispatchNote = dispatch.note;
+    row.dispatchedAt = dispatch.at;
     return structuredClone(row);
   }
 

@@ -177,6 +177,9 @@ export interface MapShapeActive {
   cat?: 'WATER' | 'ELECTRIC' | 'NET';
 }
 
+/** 线路适用机型白名单（与 @agri/contracts 的 MachineType 一致） */
+export type MachineType = 'TRACTOR' | 'HARVESTER' | 'DRONE' | 'FERTILIZER_MACHINE' | 'TRANSPORT' | 'OTHER'
+
 /** 进入编辑态的既有图形，points 为 [经度, 纬度] 开环 */
 export interface MapShapeTarget {
   code: string;
@@ -188,6 +191,16 @@ export interface MapShapeTarget {
   lineType?: InfraLineType | undefined;
   /** 管线归属地块编码（plots.parcelCode），空/缺省表示未绑定 */
   plotCode?: string | undefined;
+  /** 线路宽度（米），未登记缺省 */
+  widthM?: number | undefined;
+  /** 限速（公里/小时），未登记缺省 */
+  speedLimitKmh?: number | undefined;
+  /** 适用机型白名单 */
+  applicableMachines?: MachineType[] | undefined;
+  /** 启用状态，缺省视为启用 */
+  enabled?: boolean | undefined;
+  /** 模板标记，编辑时回传避免误清模板身份 */
+  isTemplate?: boolean | undefined;
 }
 
 export interface MapShapeSaved {
@@ -440,11 +453,16 @@ export interface PtzCommand {
   deliveredAt?: string
 }
 
+/** AI 事件类型（与 @agri/contracts 的 AiEventType 一致）；存量记录缺省视为 PEST */
+export type AiEventType = 'PEST' | 'PERSON_INTRUSION' | 'MACHINE_STATUS' | 'FLOOD' | 'LODGING' | 'FIRE' | 'SMOKE'
+
 /** 视频 AI 识别事件：转发失败保留记录，可人工重试 */
 export interface VideoAiEvent {
   id: string
   cameraId: string
   plotCode: string
+  /** 事件类型；缺省视为 PEST，非虫情类型 pestType 为空串 */
+  eventType?: AiEventType
   pestType: string
   level: 1 | 2 | 3
   confidence: number

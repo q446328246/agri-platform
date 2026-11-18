@@ -8,7 +8,7 @@
 
 - **技术栈**：pnpm workspace + Turborepo；后端为多个 Node/TypeScript HTTP 服务，前端为 `apps/web`（Vue 3 + Element Plus + ECharts + Vite）。
 - **服务规模**：`apps/` 下 15 个 HTTP 服务，加 `apps/web` 前端；`packages/` 下 9 个共享包。
-- **数据层**：PostgreSQL + PostGIS，统一通过 `@agri/db` 的 `PrismaClientLike` 跑**原生 SQL**（`$queryRawUnsafe` / `$executeRawUnsafe`），迁移为 `infra/postgres/migrations/` 下编号 SQL 文件（当前到 `045`），**无 Prisma schema**。
+- **数据层**：PostgreSQL + PostGIS，统一通过 `@agri/db` 的 `PrismaClientLike` 跑**原生 SQL**（`$queryRawUnsafe` / `$executeRawUnsafe`），迁移为 `infra/postgres/migrations/` 下编号 SQL 文件（当前到 `049`，其中 047–049 已写未应用），**无 Prisma schema**。
 - **演示数据集**：迁移 `044`–`045` 按卫星底图（Esri z17 瓦片目视解译）重置地块/管线测试数据——13 块小田（1.25~3.85 亩，类型/状态四样齐备）、7 条管线（机耕道/灌溉/电力/通信）、2 个片区；旧 010 大尺度示范与页面手绘残留整体清除，设备/任务/财务/溯源/遥测等业务历史按映射改挂新地块、零悬空引用。
 - **部署**：`Dockerfile` 两阶段目标 `app`（15 个服务）与 `edge`（nginx）；`infra/docker-compose.yml` 用 `--profile app` 拉起 postgres / minio / app / edge。
 
@@ -76,7 +76,7 @@
 - **业务逻辑**：
   - **地块建档**：含边界绘制；建档后发布 `PlotCreated` 事件，消息中心据此提示"新地块已进入平台"。
   - **季次管理**：地块按季次（年份/季）独立；作业、任务、读数等按季次与地块联合定位。
-  - **设施线**：灌溉渠、机井、电力等作为地块附属的基础设施记录。
+  - **设施线**：灌溉渠、机井、电力等作为地块附属的基础设施记录；台账属性含宽度（米）/限速（km/h）/适用机型白名单（contracts `MachineType` 六码）/启用停用/模板标记（迁移 `047`）；GET 支持 enabled/machine/template 筛选；`POST /infra-lines/from-template` 从模板线复制几何与属性建档（副本强制非模板）；停用线地图降透明度展示。
   - **管理分区（zone）**：按地块边界聚合形成的作业/管理单元。
   - **地块合并**：多块地合并为一块，采用**全量几何重算**——用合并后的边界重新生成地块代码并重算面积，**不逐块累加**，避免小误差累积。
   - **凹形地块合并**：合并后若面积因几何形状变化出现**正的 delta（面积增加）**，成功后给出**手工编辑合并后边界**的入口（跳转地块编辑页），用户可修正边界；负 delta 仅提示。合并前后边界面积差值（delta）会先行提示用户。
@@ -132,6 +132,8 @@
   - **阈值规则**：按指标设阈值，触发**越限告警**，发布 `TelemetryThresholdBreached` 事件；告警**三级**（提示 / 告警 / 严重），按阈值方向区分**高于上限 / 低于下限**（`rule.repository.ts`）。
   - **生长期判读**：按作物生长期阶段与指标阈值判断生长状况，越上限 → 告警，越下限 → 提示。
   - **虫情（pest）**：接收虫情识别（来自视频 AI 或田间上报），**统一由遥测收口**——落库、生成告警、发布 `TelemetryPestDetected` 事件，消息中心按等级生成告警或提醒。**避免同一份识别结果出现第二条告警路径**。
+  - **非虫情 AI 事件**：`POST /telemetry/ai-events` 接收人员闯入/农机状态/涝情/倒伏/火情/烟雾六类（迁移 `048`，显式拒收 PEST 防双路径），落告警（metric=eventType）并发布 `TelemetryAiDetected`，消息中心按契约模板定级（农机状态→通知；火情/烟雾三级→严重）。
+  - **数据质量治理**（迁移 `049`）：上报时打三类可疑标记——超量程 OUT_OF_RANGE（十一指标量程表）、连续 5 次同值 STUCK_VALUE、时间戳超前>5min/陈旧>30天 TIMESTAMP_ANOMALY（`quality.ts` 纯函数）；**打标不拒收**保留现场原始值，可疑读数不触发阈值告警、落 `telemetry_quality_logs` 留痕；最新值与曲线汇总默认剔除可疑行（`includeSuspicious=true` 回查）；`GET /telemetry/quality-logs` 按设备/指标/标记回查。
   - **灾情（disaster）**：灾情记录归档。
 
 ### 10. `weather-service` — 气象与田时
@@ -150,8 +152,9 @@
 - **业务逻辑**（`consumer.ts`）：
   - **订阅偏好**：按租户 + 事件主题设置 `enabled` 与**最低级别门槛**。
   - **模板渲染 → 偏好过滤 → 落库**：事件先交契约包的消息模板渲染成草稿（未登记模板的主题直接跳过，便于先加模板再加订阅）；再按偏好过滤（未启用不落库；消息级别**低于**订阅门槛不落库）；最后落库。
-  - **订阅主题**：遥测越限、处方生成、虫情识别、地块建档、指令超时、灌溉完成、施肥完成等。
+  - **订阅主题**：遥测越限、处方生成、虫情识别、非虫情 AI 识别（`TelemetryAiDetected`）、地块建档、指令超时、灌溉完成、施肥完成等。
   - **忽略处置**：`POST /messages/:id/ignore` 把确认无需处置的消息从待办拿掉（顺带标已读），记录保留；缺省列表与未读数排除已忽略，`ignored=true` 可回查。
+  - **派单处置**（迁移 `048`）：`POST /messages/:id/dispatch` 仅告警可派，处置说明必填、处置人缺省当前账号；与忽略互斥，派单顺带标已读（未读数自动排除），留痕 dispatchedBy/dispatchNote/dispatchedAt。
   - 去重与重试交给分发器（`maxAttempts: 3`），落库唯一约束再兜一层。
 
 ### 12. `video-service` — 视频与 AI 识别
@@ -160,7 +163,7 @@
 - **业务逻辑**：
   - **视频接入**：摄像头视频流接入。
   - **云台控制**：PTZ 转动/缩放控制。
-  - **AI 识别转发**（`ai-event.ts`）：摄像头侧算法识别出虫害后，视频服务**只做校验与转发**——校验 `cameraId / plotCode / pestType / level(1~3) / confidence(0~1)`，携带设备凭证转发给遥测服务的 `pest-events` 入口。**转发失败不丢弃**，返回 `forwarded=false` 便于现场排查，识别结果仍在视频侧留记录。告警统一由遥测收口，视频不重复生成告警。
+  - **AI 识别转发**（`ai-event.ts`）：摄像头侧算法识别后，视频服务**只做校验与转发**——事件类型七码白名单（contracts `AiEventType`，缺省 PEST），校验 `cameraId / plotCode / level(1~3) / confidence(0~1)`，pestType 仅虫情必填（迁移 `048`）；携带设备凭证按类型路由：虫情→遥测 `pest-events`，其余六类→`ai-events`。**转发失败不丢弃**，返回 `forwarded=false` 便于现场排查，识别结果仍在视频侧留记录。告警统一由遥测收口，视频不重复生成告警。模型本体属 B 类外部依赖。
 
 ### 13. `file-service` — 对象存储与文件元数据
 
@@ -178,6 +181,7 @@
   - **报表三维度**：按**月**（东八区 `Asia/Shanghai`，`YYYY-MM`，与展示层月份口径一致）、按**类别**（INPUT / OUTPUT 分开）、按**地块**。
   - **利润 = 产出 − 投入**；月份升序、类别按金额降序、地块按利润降序。
   - **数据来源联动**：灌溉/施肥执行完成后，控制服务发布完成事件，据此为地块记账（灌溉水量账、施肥投肥账）。
+  - **监管统计报表（前端聚合）**：投入产出页内五源（地块/农事任务/虫情/灾情/收支）`Promise.allSettled` 聚合报表，单源失败不拖垮整表，支持 CSV 导出；驾驶舱「报表中心」入口直达该页。不动后端。
 
 ### 15. `trace-service` — 事件归档
 

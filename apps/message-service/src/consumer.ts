@@ -50,6 +50,12 @@ export class MessageEventConsumer {
     await this.deliver(event);
   }
 
+  /** 非虫情类 AI 识别：人员闯入/农机状态/涝情/倒伏/火情/烟雾，模板按类型与等级定级 */
+  @registerHandler(EventTopic.TelemetryAiDetected)
+  async onAiDetected(event: DomainEvent<unknown>): Promise<void> {
+    await this.deliver(event);
+  }
+
   /** 地块建档：生成通知消息，提示新地块已进入平台 */
   @registerHandler(EventTopic.PlotCreated)
   async onPlotCreated(event: DomainEvent<unknown>): Promise<void> {

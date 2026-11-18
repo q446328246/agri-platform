@@ -21,6 +21,31 @@
       </select>
     </label>
 
+    <label v-if="kind === 'line'" class="se-field">
+      <span>宽度</span>
+      <input v-model="draftWidth" class="se-input" type="number" min="0" step="0.1" placeholder="米，选填" />
+    </label>
+
+    <label v-if="kind === 'line'" class="se-field">
+      <span>限速</span>
+      <input v-model="draftSpeed" class="se-input" type="number" min="0" step="0.5" placeholder="公里/小时，选填" />
+    </label>
+
+    <div v-if="kind === 'line'" class="se-field">
+      <span>机型</span>
+      <div class="se-machines">
+        <label v-for="opt in machineOptions" :key="opt.value" class="se-check">
+          <input v-model="draftMachines" type="checkbox" :value="opt.value" />{{ opt.label }}
+        </label>
+      </div>
+    </div>
+
+    <div v-if="kind === 'line'" class="se-field">
+      <span>状态</span>
+      <label class="se-check"><input v-model="draftEnabled" type="checkbox" />启用</label>
+      <label class="se-check"><input v-model="draftTemplate" type="checkbox" />设为模板</label>
+    </div>
+
     <label class="se-field">
       <span>名称</span>
       <input v-model="draftName" class="se-input" type="text" maxlength="40" :placeholder="`请输入${kindLabel}名称`" />
@@ -63,7 +88,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import L from 'leaflet'
 import { ElMessage } from 'element-plus'
 import { plotApi, toPolygonGeom, zoneApi } from '@/api'
-import type { InfraLineType } from '@/api'
+import type { InfraLineType, MachineType } from '@/api'
 import { PlotType } from '@/types'
 import type { MapShapeActive, MapShapeKind, MapShapeSaved, MapShapeTarget } from '@/types'
 import { getPlotTypeText } from '@/utils'
@@ -104,6 +129,20 @@ const draftPlotType = ref<PlotType>(PlotType.FIELD)
 const draftZoneCode = ref('')
 const draftPlotCode = ref('')
 const draftColor = ref('#00d4ff')
+/** 线路台账属性（迁移 047）：宽度/限速用字符串草稿，空串表示未登记 */
+const draftWidth = ref('')
+const draftSpeed = ref('')
+const draftMachines = ref<MachineType[]>([])
+const draftEnabled = ref(true)
+const draftTemplate = ref(false)
+const machineOptions: Array<{ value: MachineType; label: string }> = [
+  { value: 'TRACTOR', label: '拖拉机' },
+  { value: 'HARVESTER', label: '收割机' },
+  { value: 'DRONE', label: '无人机' },
+  { value: 'FERTILIZER_MACHINE', label: '施肥机' },
+  { value: 'TRANSPORT', label: '运输车' },
+  { value: 'OTHER', label: '其他' },
+]
 const saving = ref(false)
 
 const kind = computed<MapShapeKind>(() => active.value?.kind ?? 'line')
@@ -285,6 +324,11 @@ function startLine(cat: LineCat) {
   if (!begin({ kind: 'line', mode: 'create', cat })) return
   draftType.value = defaultTypeOfCat[cat]
   draftPlotCode.value = ''
+  draftWidth.value = ''
+  draftSpeed.value = ''
+  draftMachines.value = []
+  draftEnabled.value = true
+  draftTemplate.value = false
   draftName.value = props.suggestName('line', draftType.value)
   openLayers()
 }
@@ -338,6 +382,11 @@ function editLine(source: MapShapeTarget) {
   draftName.value = source.name
   draftType.value = lineType
   draftPlotCode.value = source.plotCode ?? ''
+  draftWidth.value = source.widthM !== undefined ? String(source.widthM) : ''
+  draftSpeed.value = source.speedLimitKmh !== undefined ? String(source.speedLimitKmh) : ''
+  draftMachines.value = [...(source.applicableMachines ?? [])]
+  draftEnabled.value = source.enabled ?? true
+  draftTemplate.value = source.isTemplate ?? false
   openLayers()
   void fitToPoints()
 }
@@ -364,17 +413,40 @@ async function save() {
     ElMessage.warning(`${kindLabel.value}${isPolygon.value ? '面积为 0' : '长度为 0'}，请拖动圆点错开重合或共线的点`)
     return
   }
+  // 台账属性选填，填了必须为正；空串在编辑态表示清除登记（发 null）
+  const widthM = draftWidth.value.trim() === '' ? undefined : Number(draftWidth.value)
+  const speedLimitKmh = draftSpeed.value.trim() === '' ? undefined : Number(draftSpeed.value)
+  if (shape.kind === 'line') {
+    if (widthM !== undefined && (!Number.isFinite(widthM) || widthM <= 0)) {
+      ElMessage.warning('线路宽度需为正数（米）')
+      return
+    }
+    if (speedLimitKmh !== undefined && (!Number.isFinite(speedLimitKmh) || speedLimitKmh <= 0)) {
+      ElMessage.warning('限速需为正数（公里/小时）')
+      return
+    }
+  }
   saving.value = true
   let saved: MapShapeSaved | null = null
   try {
     if (shape.kind === 'line') {
       const geom = { type: 'LineString' as const, coordinates: points.value.map(([lng, lat]) => [lng, lat]), srid: 4490 }
       if (shape.mode === 'edit' && target.value) {
-        const updated = await plotApi.updateInfraLine(target.value.code, { lineName: name, lineType: draftType.value, geom, plotCode: draftPlotCode.value })
+        const updated = await plotApi.updateInfraLine(target.value.code, {
+          lineName: name, lineType: draftType.value, geom, plotCode: draftPlotCode.value,
+          widthM: widthM ?? null, speedLimitKmh: speedLimitKmh ?? null,
+          applicableMachines: draftMachines.value, enabled: draftEnabled.value, isTemplate: draftTemplate.value,
+        })
         ElMessage.success(`管线「${updated.lineName}」已更新 · ${updated.lengthM.toFixed(0)} 米`)
         saved = { kind: 'line', mode: 'edit', code: updated.lineCode }
       } else {
-        const created = await plotApi.createInfraLine({ lineName: name, lineType: draftType.value, geom, ...(draftPlotCode.value ? { plotCode: draftPlotCode.value } : {}) })
+        const created = await plotApi.createInfraLine({
+          lineName: name, lineType: draftType.value, geom,
+          ...(draftPlotCode.value ? { plotCode: draftPlotCode.value } : {}),
+          ...(widthM !== undefined ? { widthM } : {}),
+          ...(speedLimitKmh !== undefined ? { speedLimitKmh } : {}),
+          applicableMachines: draftMachines.value, enabled: draftEnabled.value, isTemplate: draftTemplate.value,
+        })
         ElMessage.success(`已保存「${created.lineName}」· ${created.lengthM.toFixed(0)} 米`)
         saved = { kind: 'line', mode: 'create', code: created.lineCode }
       }
@@ -445,6 +517,9 @@ defineExpose({ attach, startLine, startPlot, startZone, editPlot, editZone, edit
 .se-x:hover { color: #ff8a65; }
 .se-field { display: flex; align-items: center; gap: 8px; color: #9fc3d3; font-size: 12px; }
 .se-field > span { flex: none; width: 30px; }
+.se-machines { display: flex; flex: 1; flex-wrap: wrap; gap: 4px 8px; }
+.se-check { display: inline-flex; align-items: center; gap: 3px; color: #cdeeff; font-size: 11px; cursor: pointer; }
+.se-check input { accent-color: #00d4ff; cursor: pointer; }
 .se-input { flex: 1; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid rgba(0,212,255,.28); border-radius: 3px; background: rgba(4,16,31,.9); color: #e8f5ff; font-size: 12px; }
 .se-input option { background: #0b2943; color: #e8f5ff; }
 .se-input:focus { outline: none; border-color: #00d4ff; }

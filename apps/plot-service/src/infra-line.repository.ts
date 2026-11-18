@@ -1,4 +1,4 @@
-import type { GeoLineString } from "@agri/contracts";
+import type { GeoLineString, MachineTypeValue } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
 import { toIsoTimestamp } from "@agri/shared";
 
@@ -27,6 +27,16 @@ export interface InfraLine {
   lengthM: number;
   /** 归属地块编码（plots.parcel_code），空串表示未绑定地块 */
   plotCode: string;
+  /** 线路宽度，单位：米；未登记时缺省（迁移 047） */
+  widthM?: number;
+  /** 限速，单位：公里/小时；未登记时缺省 */
+  speedLimitKmh?: number;
+  /** 适用机型白名单，取值见 @agri/contracts 的 MachineType */
+  applicableMachines?: MachineTypeValue[];
+  /** 启用状态，缺省视为启用；停用线路地图降透明度展示 */
+  enabled?: boolean;
+  /** 模板标记，可从模板复制建档 */
+  isTemplate?: boolean;
   createdAt: string;
   deletedAt?: string;
 }
@@ -39,15 +49,25 @@ export interface InfraLineInput {
   geom: GeoLineString;
   lengthM?: number;
   plotCode?: string;
+  widthM?: number | null;
+  speedLimitKmh?: number | null;
+  applicableMachines?: MachineTypeValue[];
+  enabled?: boolean;
+  isTemplate?: boolean;
 }
 
-/** 局部更新入参：只覆盖传入的字段，几何变化时长度由调用方重算 */
+/** 局部更新入参：只覆盖传入的字段，几何变化时长度由调用方重算；宽度/限速传 null 表示清除登记 */
 export interface InfraLinePatch {
   lineName?: string;
   lineType?: InfraLineType;
   geom?: GeoLineString;
   lengthM?: number;
   plotCode?: string;
+  widthM?: number | null;
+  speedLimitKmh?: number | null;
+  applicableMachines?: MachineTypeValue[];
+  enabled?: boolean;
+  isTemplate?: boolean;
 }
 
 export interface InfraLineRepository {
@@ -99,10 +119,15 @@ function toLine(row: Record<string, unknown>): InfraLine {
     createdAt: toIsoTimestamp(row.created_at),
   };
   if (row.deleted_at !== null && row.deleted_at !== undefined) record.deletedAt = toIsoTimestamp(row.deleted_at);
+  if (row.width_m !== null && row.width_m !== undefined) record.widthM = Number(row.width_m);
+  if (row.speed_limit_kmh !== null && row.speed_limit_kmh !== undefined) record.speedLimitKmh = Number(row.speed_limit_kmh);
+  if (Array.isArray(row.applicable_machines)) record.applicableMachines = row.applicable_machines.map(String) as MachineTypeValue[];
+  if (row.enabled !== null && row.enabled !== undefined) record.enabled = Boolean(row.enabled);
+  if (row.is_template !== null && row.is_template !== undefined) record.isTemplate = Boolean(row.is_template);
   return record;
 }
 
-/** PostgreSQL 实现，表结构由迁移 008 管理 */
+/** PostgreSQL 实现，表结构由迁移 008 管理，台账属性列由迁移 047 追加 */
 export class SqlInfraLineRepository implements InfraLineRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
@@ -112,7 +137,7 @@ export class SqlInfraLineRepository implements InfraLineRepository {
 
   async listByTenant(tenantId: string): Promise<InfraLine[]> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, created_at, deleted_at
+      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, width_m, speed_limit_kmh, applicable_machines, enabled, is_template, created_at, deleted_at
        FROM infra_lines WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY line_code`,
       tenantId,
     );
@@ -121,7 +146,7 @@ export class SqlInfraLineRepository implements InfraLineRepository {
 
   async findByCode(lineCode: string): Promise<InfraLine | null> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, created_at, deleted_at
+      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, width_m, speed_limit_kmh, applicable_machines, enabled, is_template, created_at, deleted_at
        FROM infra_lines WHERE line_code = $1 AND deleted_at IS NULL LIMIT 1`,
       lineCode,
     );
@@ -131,8 +156,8 @@ export class SqlInfraLineRepository implements InfraLineRepository {
 
   async create(tx: unknown, record: InfraLine): Promise<InfraLine> {
     await this.executor(tx).$executeRawUnsafe(
-      `INSERT INTO infra_lines (id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)`,
+      `INSERT INTO infra_lines (id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, width_m, speed_limit_kmh, applicable_machines, enabled, is_template, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11::jsonb, $12, $13, $14)`,
       record.id,
       record.lineCode,
       record.lineName,
@@ -141,6 +166,11 @@ export class SqlInfraLineRepository implements InfraLineRepository {
       JSON.stringify(record.geom),
       record.lengthM,
       record.plotCode,
+      record.widthM ?? null,
+      record.speedLimitKmh ?? null,
+      JSON.stringify(record.applicableMachines ?? []),
+      record.enabled ?? true,
+      record.isTemplate ?? false,
       record.createdAt,
     );
     return record;
@@ -149,7 +179,7 @@ export class SqlInfraLineRepository implements InfraLineRepository {
   async update(tx: unknown, lineCode: string, patch: InfraLinePatch): Promise<InfraLine | null> {
     const executor = this.executor(tx);
     const rows = await executor.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, created_at, deleted_at
+      `SELECT id, line_code, line_name, line_type, tenant_id, geom, length_m, plot_code, width_m, speed_limit_kmh, applicable_machines, enabled, is_template, created_at, deleted_at
        FROM infra_lines WHERE line_code = $1 AND deleted_at IS NULL LIMIT 1`,
       lineCode,
     );
@@ -182,6 +212,28 @@ export class SqlInfraLineRepository implements InfraLineRepository {
     if (patch.plotCode !== undefined) {
       add("plot_code", patch.plotCode);
       next.plotCode = patch.plotCode;
+    }
+    if (patch.widthM !== undefined) {
+      add("width_m", patch.widthM);
+      if (patch.widthM === null) delete next.widthM;
+      else next.widthM = patch.widthM;
+    }
+    if (patch.speedLimitKmh !== undefined) {
+      add("speed_limit_kmh", patch.speedLimitKmh);
+      if (patch.speedLimitKmh === null) delete next.speedLimitKmh;
+      else next.speedLimitKmh = patch.speedLimitKmh;
+    }
+    if (patch.applicableMachines !== undefined) {
+      add("applicable_machines", JSON.stringify(patch.applicableMachines), "::jsonb");
+      next.applicableMachines = [...patch.applicableMachines];
+    }
+    if (patch.enabled !== undefined) {
+      add("enabled", patch.enabled);
+      next.enabled = patch.enabled;
+    }
+    if (patch.isTemplate !== undefined) {
+      add("is_template", patch.isTemplate);
+      next.isTemplate = patch.isTemplate;
     }
     if (sets.length > 0) {
       await executor.$executeRawUnsafe(
@@ -235,6 +287,17 @@ export class InMemoryInfraLineRepository implements InfraLineRepository {
     if (patch.geom !== undefined) row.geom = structuredClone(patch.geom);
     if (patch.lengthM !== undefined) row.lengthM = patch.lengthM;
     if (patch.plotCode !== undefined) row.plotCode = patch.plotCode;
+    if (patch.widthM !== undefined) {
+      if (patch.widthM === null) delete row.widthM;
+      else row.widthM = patch.widthM;
+    }
+    if (patch.speedLimitKmh !== undefined) {
+      if (patch.speedLimitKmh === null) delete row.speedLimitKmh;
+      else row.speedLimitKmh = patch.speedLimitKmh;
+    }
+    if (patch.applicableMachines !== undefined) row.applicableMachines = [...patch.applicableMachines];
+    if (patch.enabled !== undefined) row.enabled = patch.enabled;
+    if (patch.isTemplate !== undefined) row.isTemplate = patch.isTemplate;
     return structuredClone(row);
   }
 

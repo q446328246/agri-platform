@@ -31,6 +31,23 @@
     </div>
 
     <div class="card-container mt-20">
+      <div class="report-header">
+        <span class="report-title">监管统计报表</span>
+        <span class="report-hint">地块/农事任务/虫情/灾情/收支五源前端聚合，全量口径不随下方筛选联动</span>
+        <div class="supervision-actions">
+          <el-button size="small" :loading="supervisionLoading" @click="loadSupervision">刷新</el-button>
+          <el-button size="small" type="primary" :disabled="!supervisionRows.length" @click="exportSupervision">导出 CSV</el-button>
+        </div>
+      </div>
+      <el-table v-loading="supervisionLoading" :data="supervisionRows" size="small" border max-height="420" empty-text="暂无统计数据">
+        <el-table-column prop="group" label="板块" width="110" />
+        <el-table-column prop="metric" label="指标" min-width="170" />
+        <el-table-column prop="value" label="数值" min-width="130" align="right" />
+        <el-table-column prop="note" label="说明" min-width="240" show-overflow-tooltip />
+      </el-table>
+    </div>
+
+    <div class="card-container mt-20">
       <el-form :inline="true" :model="query" @submit.prevent="search">
         <el-form-item label="地块编码"><el-input v-model="query.plotCode" placeholder="可选" clearable style="width: 170px" /></el-form-item>
         <el-form-item label="类型">
@@ -139,10 +156,11 @@ import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import { TooltipComponent, LegendComponent, GridComponent } from 'echarts/components'
-import { financeApi } from '@/api'
-import type { FinanceQuery, FinanceReport } from '@/api'
+import { financeApi, operationApi, plotApi, telemetryApi } from '@/api'
+import type { FinanceQuery, FinanceReport, PestStats, DisasterStats } from '@/api'
+import type { PlotStats } from '@/types'
 import { useUserStore } from '@/stores'
-import { formatDateTime } from '@/utils'
+import { formatDateTime, getTaskStatusText } from '@/utils'
 import { exportCsv } from '@/utils/export'
 use([CanvasRenderer, BarChart, LineChart, PieChart, TooltipComponent, LegendComponent, GridComponent])
 const userStore = useUserStore()
@@ -224,6 +242,69 @@ const plotChartOption = computed(() => ({
   }],
 }))
 function search() { page.page = 1; void load() }
+
+// —— 监管统计报表（A4）：五源前端聚合，不动后端；单源失败不拖垮整表 ——
+interface SupervisionRow { group: string; metric: string; value: string; note: string }
+const supervisionLoading = ref(false)
+const supervisionRows = ref<SupervisionRow[]>([])
+
+async function loadSupervision() {
+  supervisionLoading.value = true
+  try {
+    const [plots, tasks, pests, disasters, finance] = await Promise.allSettled([
+      plotApi.getStats(),
+      operationApi.getTasks({ page: 1, size: 200 }),
+      telemetryApi.getPestStats(),
+      telemetryApi.getDisasterStats(),
+      financeApi.getSummary(),
+    ])
+    const rows: SupervisionRow[] = []
+    const failed = (group: string) => rows.push({ group, metric: '数据获取', value: '—', note: '接口暂不可用，可点刷新重试' })
+    if (plots.status === 'fulfilled') {
+      const stats = plots.value as PlotStats
+      rows.push({ group: '地块资源', metric: '地块总数', value: `${stats.totalPlots} 个`, note: '在册地块（不含归档）' })
+      rows.push({ group: '地块资源', metric: '总面积', value: `${Number(stats.totalAreaMu).toFixed(1)} 亩`, note: `土壤类型 ${stats.soilTypes.length} 类` })
+    } else failed('地块资源')
+    if (tasks.status === 'fulfilled') {
+      const result = tasks.value as { items?: any[]; total?: number }
+      const items = result.items ?? []
+      const countOf = (status: string) => items.filter((task) => (task.status === 'RUNNING' ? 'IN_PROGRESS' : task.status) === status).length
+      rows.push({ group: '农事任务', metric: '任务总数', value: `${result.total ?? items.length} 条`, note: '状态分布按最近 200 条在册任务样本' })
+      for (const status of ['PENDING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']) {
+        rows.push({ group: '农事任务', metric: getTaskStatusText(status as any), value: `${countOf(status)} 条`, note: '' })
+      }
+    } else failed('农事任务')
+    if (pests.status === 'fulfilled') {
+      const stats = pests.value as PestStats
+      const severe = stats.byLevel.find((item) => item.level === 3)?.count ?? 0
+      const topType = [...stats.byType].sort((a, b) => b.count - a.count)[0]
+      rows.push({ group: '虫情防控', metric: '识别总数', value: `${stats.total} 条`, note: topType ? `主要虫害：${topType.pestType}（${topType.count} 条）` : '' })
+      rows.push({ group: '虫情防控', metric: '待治理', value: `${stats.pending} 条`, note: `严重级（三级）${severe} 条` })
+    } else failed('虫情防控')
+    if (disasters.status === 'fulfilled') {
+      const stats = disasters.value as DisasterStats
+      rows.push({ group: '灾情管理', metric: '灾情总数', value: `${stats.total} 条`, note: `未闭环 ${stats.open} 条` })
+      rows.push({ group: '灾情管理', metric: '受灾面积', value: `${Number(stats.affectedAreaMu).toFixed(1)} 亩`, note: '按灾情登记受影响面积汇总' })
+    } else failed('灾情管理')
+    if (finance.status === 'fulfilled') {
+      const sum = finance.value as { input: number; output: number; profit: number }
+      rows.push({ group: '投入产出', metric: '投入合计', value: money(sum.input), note: '全量收支登记，不随下方筛选' })
+      rows.push({ group: '投入产出', metric: '产出合计', value: money(sum.output), note: '' })
+      rows.push({ group: '投入产出', metric: '利润', value: money(sum.profit), note: '产出 − 投入' })
+    } else failed('投入产出')
+    supervisionRows.value = rows
+  } finally {
+    supervisionLoading.value = false
+  }
+}
+
+function exportSupervision() {
+  if (!supervisionRows.value.length) { ElMessage.info('暂无可导出的监管统计数据'); return }
+  const headers = ['板块', '指标', '数值', '说明']
+  const rows = supervisionRows.value.map((row) => [row.group, row.metric, row.value, row.note])
+  exportCsv(`监管统计报表_${formatDateTime(new Date(), 'YYYYMMDD_HHmmss')}.csv`, headers, rows)
+  ElMessage.success(`已导出 ${rows.length} 项监管指标`)
+}
 /** 导出当前筛选条件下的全部收支（后端返回全量，分页只是前端切片），与列表口径一致 */
 function exportEntries() {
   if (!entries.value.length) { ElMessage.info('当前筛选条件下没有可导出的收支记录'); return }
@@ -268,7 +349,7 @@ async function submit() {
     creating.value = false
   }
 }
-onMounted(() => void load())
+onMounted(() => { void load(); void loadSupervision() })
 </script>
 
 <style scoped>
@@ -279,6 +360,7 @@ onMounted(() => void load())
 .report-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
 .report-title { font-size: 15px; font-weight: 600; color: #303133; }
 .report-hint { font-size: 12px; color: var(--el-text-color-secondary); }
+.supervision-actions { margin-left: auto; display: flex; gap: 8px; }
 .report-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .report-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .report-cell-title { font-size: 13px; color: #606266; }

@@ -1,4 +1,4 @@
-import type { PageResult } from "@agri/contracts";
+import type { AiEventTypeValue, PageResult } from "@agri/contracts";
 import type { PrismaClientLike } from "@agri/db";
 import { toIsoTimestamp } from "@agri/shared";
 
@@ -10,6 +10,8 @@ export interface AiEventRecord {
   tenantId: string;
   cameraId: string;
   plotCode: string;
+  /** 事件类型（迁移 048）；存量记录与测试字面量缺省视为 PEST */
+  eventType?: AiEventTypeValue;
   pestType: string;
   level: 1 | 2 | 3;
   confidence: number;
@@ -29,6 +31,7 @@ export interface AiEventQuery {
   size: number;
   plotCode?: string;
   forwarded?: boolean;
+  eventType?: AiEventTypeValue;
 }
 
 export interface AiEventRepository {
@@ -45,6 +48,7 @@ export function toDetection(event: AiEventRecord): AiDetection {
   return {
     cameraId: event.cameraId,
     plotCode: event.plotCode,
+    eventType: event.eventType ?? "PEST",
     pestType: event.pestType,
     level: event.level,
     confidence: event.confidence,
@@ -65,7 +69,8 @@ export class InMemoryAiEventRepository implements AiEventRepository {
     const filtered = [...this.events.values()]
       .filter((event) => event.tenantId === tenantId
         && (query.plotCode === undefined || event.plotCode === query.plotCode)
-        && (query.forwarded === undefined || event.forwarded === query.forwarded))
+        && (query.forwarded === undefined || event.forwarded === query.forwarded)
+        && (query.eventType === undefined || (event.eventType ?? "PEST") === query.eventType))
       .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
     const start = (query.page - 1) * query.size;
     return { items: filtered.slice(start, start + query.size).map((event) => structuredClone(event)), total: filtered.length, page: query.page, size: query.size, pages: Math.ceil(filtered.length / query.size) };
@@ -108,7 +113,7 @@ export class InMemoryAiEventRepository implements AiEventRepository {
   }
 }
 
-const columns = "id, tenant_id, camera_id, plot_code, pest_type, level, confidence, image_file_id, detected_at, received_at, forwarded, forward_status, forward_message, retry_count, last_error, forwarded_at";
+const columns = "id, tenant_id, camera_id, plot_code, pest_type, level, confidence, image_file_id, detected_at, received_at, forwarded, forward_status, forward_message, retry_count, last_error, forwarded_at, event_type";
 
 function fromRow(row: Record<string, unknown>): AiEventRecord {
   const event: AiEventRecord = {
@@ -119,6 +124,7 @@ function fromRow(row: Record<string, unknown>): AiEventRecord {
     retryCount: Number(row.retry_count),
   };
   if (row.image_file_id != null) event.imageFileId = String(row.image_file_id);
+  if (row.event_type != null) event.eventType = String(row.event_type) as AiEventTypeValue;
   if (row.last_error != null) event.lastError = String(row.last_error);
   if (row.forwarded_at != null) event.forwardedAt = toIsoTimestamp(row.forwarded_at);
   return event;
@@ -129,10 +135,10 @@ export class SqlAiEventRepository implements AiEventRepository {
 
   async create(event: AiEventRecord): Promise<AiEventRecord> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `INSERT INTO video_ai_events (${columns}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING ${columns}`,
+      `INSERT INTO video_ai_events (${columns}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING ${columns}`,
       event.id, event.tenantId, event.cameraId, event.plotCode, event.pestType, event.level, event.confidence,
       event.imageFileId ?? null, event.detectedAt, event.receivedAt, event.forwarded, event.forwardStatus,
-      event.forwardMessage, event.retryCount, event.lastError ?? null, event.forwardedAt ?? null,
+      event.forwardMessage, event.retryCount, event.lastError ?? null, event.forwardedAt ?? null, event.eventType ?? "PEST",
     );
     return fromRow(rows[0]!);
   }
@@ -142,6 +148,7 @@ export class SqlAiEventRepository implements AiEventRepository {
     const where = ["tenant_id = $1"];
     if (query.plotCode !== undefined) { values.push(query.plotCode); where.push(`plot_code = $${values.length}`); }
     if (query.forwarded !== undefined) { values.push(query.forwarded); where.push(`forwarded = $${values.length}`); }
+    if (query.eventType !== undefined) { values.push(query.eventType); where.push(`event_type = $${values.length}`); }
     const filter = where.join(" AND ");
     const counts = await this.client.$queryRawUnsafe<Array<{ total: string }>>(`SELECT count(*) AS total FROM video_ai_events WHERE ${filter}`, ...values);
     const total = Number(counts[0]?.total ?? 0);

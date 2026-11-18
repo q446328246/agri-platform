@@ -209,7 +209,7 @@ import { getPlotTypeText } from '@/utils'
 import { baseMapCrs, baseMapLabelOf, baseMapMaxZoom, createBaseLayer, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { parsePlotBoundaries, polygonAreaMu, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
 import { exportMapPng } from '@/utils/mapExport'
-import { LINE_PANEL_BRIDGE, catColor, categorize, lineCategories, lineColorOf, lineTypeLabel } from '@/utils/infraLine'
+import { LINE_PANEL_BRIDGE, catColor, categorize, lineCategories, lineColorOf, lineTypeLabel, machineTypeLabel } from '@/utils/infraLine'
 import type { LineCat, LinePanelBridge } from '@/utils/infraLine'
 import MapShapeEditor from '@/components/MapShapeEditor.vue'
 import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
@@ -354,14 +354,14 @@ function allowed(perm?: string): boolean {
 // ---------- 快捷入口簇（A2）：高频业务一键直达 ----------
 // 目标面板均已在 panelComps 登记（/farm/record、/device/irrigation、/farm/task、/device/list、/finance），
 // 新增入口时须同步登记；权限码与路由 meta.permission 一致，经 checkPermission 过滤。
-// 报表中心本体（监管统计报表）属 A4 随 P2 补齐，当前先路由到最接近的投入产出核算页。
+// 报表中心（监管统计报表）已随 P2/A4 落在投入产出核算页内，入口直达该页。
 interface QuickEntry { label: string; panel: string; perm: string; hint: string; icon: string }
 const quickEntries: QuickEntry[] = [
   { label: '一键巡田', panel: '/farm/record', perm: 'operation:read', hint: '巡田登记：打开农事记录，巡查事件随手记', icon: icon('M12 2C8 2 5 5 5 9c0 5 7 13 7 13s7-8 7-13c0-4-3-7-7-7Zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5Z') },
   { label: '快捷灌溉', panel: '/device/irrigation', perm: 'device:control', hint: '水肥灌溉：智能灌溉策略与一键启停', icon: icon('M12 2s6 6.6 6 11a6 6 0 0 1-12 0c0-4.4 6-11 6-11Z') },
   { label: '作业计划', panel: '/farm/task', perm: 'operation:read', hint: '农事任务：作业计划排期与派发', icon: icon('M7 2v2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2V2h-2v2H9V2H7Zm12 8H5V6h14v4Z') },
   { label: '设备列表', panel: '/device/list', perm: 'device:read', hint: '设备台账：全部设备与在线状态', icon: icon('M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm4 14h8v2H8v-2Z') },
-  { label: '报表中心', panel: '/finance', perm: 'finance:read', hint: '投入产出核算与导出；监管统计报表建设中（P2）', icon: icon('M4 20h16v2H4v-2Zm2-8h3v7H6v-7Zm5-6h3v13h-3V6Zm5 3h3v10h-3V9Z') },
+  { label: '报表中心', panel: '/finance', perm: 'finance:read', hint: '投入产出核算与监管统计报表，支持 CSV 导出', icon: icon('M4 20h16v2H4v-2Zm2-8h3v7H6v-7Zm5-6h3v13h-3V6Zm5 3h3v10h-3V9Z') },
 ]
 
 // ---------- 地图内浮层面板 ----------
@@ -724,6 +724,8 @@ function editLineOnMap(line: InfraLine) {
   shapeEditor.value?.editLine({
     code: line.lineCode, name: line.lineName, lineType: line.lineType, points: lineDraftPoints(line),
     plotCode: line.plotCode,
+    widthM: line.widthM, speedLimitKmh: line.speedLimitKmh, applicableMachines: line.applicableMachines,
+    enabled: line.enabled, isTemplate: line.isTemplate,
   })
 }
 
@@ -756,6 +758,11 @@ function linePopup(line: InfraLine): HTMLElement {
     line.lineCode,
     line.plotCode ? `归属地块：${owner?.name ?? line.plotCode}` : '未绑定地块',
   ]
+  // 台账属性（迁移 047）：未登记不占行，启用/模板状态常驻一行
+  if (line.widthM != null) rows.push(`宽度：${line.widthM} 米`)
+  if (line.speedLimitKmh != null) rows.push(`限速：${line.speedLimitKmh} 公里/小时`)
+  if ((line.applicableMachines ?? []).length > 0) rows.push(`适用机型：${(line.applicableMachines ?? []).map(machineTypeLabel).join('、')}`)
+  rows.push(`状态：${(line.enabled ?? true) ? '启用' : '停用'}${line.isTemplate ? ' · 模板线' : ''}`)
   const actions: PopupAction[] = []
   if (line.plotCode && allowed('plot:read')) {
     actions.push({ label: '地块详情', onClick: () => { map?.closePopup(); void router.push(`/plot/detail/${encodeURIComponent(line.plotCode)}`) } })
@@ -767,8 +774,8 @@ function linePopup(line: InfraLine): HTMLElement {
   return shapePopup(line.lineName, rows, actions)
 }
 
-/** 管线列表面板只负责查询，定位与改删都通过这里回到地图 */
-provide<LinePanelBridge>(LINE_PANEL_BRIDGE, { revision: lineRevision, locate: locateLine, edit: editLineOnMap, remove: removeInfraLine })
+/** 管线列表面板只负责查询，定位与改删都通过这里回到地图；面板改台账属性后调 refresh 重查重绘 */
+provide<LinePanelBridge>(LINE_PANEL_BRIDGE, { revision: lineRevision, locate: locateLine, edit: editLineOnMap, remove: removeInfraLine, refresh: loadLines })
 
 function renderLines(list: InfraLine[]) {
   if (!map) return
@@ -777,8 +784,10 @@ function renderLines(list: InfraLine[]) {
     if (!Array.isArray(line.geom?.coordinates) || line.geom.coordinates.length < 2) continue
     const points = line.geom.coordinates.map((p) => [Number(p[1]), Number(p[0])] as [number, number])
     const cat = categorize(line.lineType)
+    // 停用线降透明度保留走向，与启用线区分
+    const opacity = (line.enabled ?? true) ? 0.9 : 0.4
     buckets[cat].push(
-      L.polyline(points, { color: lineColorOf(line.lineType), weight: cat === 'ROAD' ? 2 : 3, opacity: 0.9, dashArray: cat === 'ROAD' ? '6 6' : undefined })
+      L.polyline(points, { color: lineColorOf(line.lineType), weight: cat === 'ROAD' ? 2 : 3, opacity, dashArray: cat === 'ROAD' ? '6 6' : undefined })
         .bindTooltip(nameTooltip(line.lineName, ''))
         .on('click', (event: any) => showPopup(event, linePopup(line))),
     )

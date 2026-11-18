@@ -51,3 +51,35 @@ export const TelemetryMetric = {
 } as const;
 
 export type TelemetryMetricValue = (typeof TelemetryMetric)[keyof typeof TelemetryMetric];
+
+/**
+ * 视频 AI 识别事件类型。
+ * 与迁移 048 的 video_ai_events.event_type CHECK 白名单同步；
+ * PEST 沿用虫情链路（pestType 必填），其余类型 pestType 可空。
+ */
+export const AiEventType = {
+  Pest: "PEST",
+  PersonIntrusion: "PERSON_INTRUSION",
+  MachineStatus: "MACHINE_STATUS",
+  Flood: "FLOOD",
+  Lodging: "LODGING",
+  Fire: "FIRE",
+  Smoke: "SMOKE",
+} as const;
+
+export type AiEventTypeValue = (typeof AiEventType)[keyof typeof AiEventType];
+
+/**
+ * 线路适用机型白名单（迁移 047 的 applicable_machines 数组元素取值）。
+ * 台账登记与筛选共用同一套编码，消费侧对未知取值容错。
+ */
+export const MachineType = {
+  Tractor: "TRACTOR",
+  Harvester: "HARVESTER",
+  Drone: "DRONE",
+  FertilizerMachine: "FERTILIZER_MACHINE",
+  Transport: "TRANSPORT",
+  Other: "OTHER",
+} as const;
+
+export type MachineTypeValue = (typeof MachineType)[keyof typeof MachineType];

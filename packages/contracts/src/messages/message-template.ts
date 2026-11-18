@@ -1,4 +1,5 @@
 import type {
+  AiDetectedPayload,
   CommandTimeoutPayload,
   FertilizationFinishedPayload,
   IrrigationFinishedPayload,
@@ -162,6 +163,52 @@ const pestDetectedTemplate: MessageTemplate<PestDetectedPayload> = {
   },
 };
 
+/** AI 事件类型中文名，缺省回落到类型编码 */
+const AI_EVENT_TYPE_LABELS: Record<string, string> = {
+  PEST: "虫情",
+  PERSON_INTRUSION: "人员闯入",
+  MACHINE_STATUS: "农机状态",
+  FLOOD: "涝情",
+  LODGING: "倒伏",
+  FIRE: "火情",
+  SMOKE: "烟雾",
+};
+
+/**
+ * 非虫情类 AI 识别事件：农机状态是运行提醒只发通知；
+ * 其余类型中等以上按告警处理，火情/烟雾的严重级直接拉到 CRITICAL。
+ * 去重按「地块 + 摄像头 + 类型 + 小时」聚合，抑制同一现场一小时内刷屏。
+ */
+const aiDetectedTemplate: MessageTemplate<AiDetectedPayload> = {
+  topic: EventTopic.TelemetryAiDetected,
+  label: "AI 识别告警",
+  type: "ALERT",
+  render(payload, context) {
+    const plotCode = payload.parcelId || "未绑定地块";
+    const typeLabel = AI_EVENT_TYPE_LABELS[payload.eventType] ?? payload.eventType;
+    const levelLabel = PEST_LEVEL_LABELS[payload.level] ?? `${payload.level} 级`;
+    const occurredAt = payload.detectedAt || context.occurredAt;
+    const image = payload.imageFileId ? `，现场影像 ${payload.imageFileId}` : "";
+    const isMachineStatus = payload.eventType === "MACHINE_STATUS";
+    const isFireSmoke = payload.eventType === "FIRE" || payload.eventType === "SMOKE";
+    return {
+      type: isMachineStatus ? "NOTICE" : payload.level >= 2 ? "ALERT" : "NOTICE",
+      level: isMachineStatus
+        ? "INFO"
+        : isFireSmoke && payload.level >= 3
+          ? "CRITICAL"
+          : payload.level >= 2
+            ? "WARNING"
+            : "INFO",
+      title: `${typeLabel}识别：${plotCode} ${levelLabel}`,
+      content: `摄像头 ${payload.cameraId} 识别到${typeLabel}，发生等级 ${levelLabel}，置信度 ${(payload.confidence * 100).toFixed(1)}%，识别时间 ${occurredAt}${image}。请安排现场核查与处置。`,
+      plotCode: payload.parcelId,
+      occurredAt,
+      dedupeKey: `${EventTopic.TelemetryAiDetected}:${payload.parcelId}:${payload.cameraId}:${payload.eventType}:${hourOf(occurredAt)}`,
+    };
+  },
+};
+
 /** 土壤类型编码中文名，未登记的回落到原编码 */
 const SOIL_LABELS: Record<string, string> = {
   PADDY_SOIL: "水稻土",
@@ -295,6 +342,7 @@ const fertilizationFinishedTemplate: MessageTemplate<FertilizationFinishedPayloa
 export const MESSAGE_TEMPLATES = {
   [EventTopic.TelemetryThresholdBreached]: thresholdTemplate,
   [EventTopic.TelemetryPestDetected]: pestDetectedTemplate,
+  [EventTopic.TelemetryAiDetected]: aiDetectedTemplate,
   [EventTopic.DecisionPrescriptionIssued]: prescriptionTemplate,
   [EventTopic.PlotCreated]: plotCreatedTemplate,
   [EventTopic.ControlCommandTimeout]: commandTimeoutTemplate,

@@ -1,4 +1,5 @@
 import type { GeoPolygon } from "../dto/geo.dto.js";
+import type { AiEventTypeValue } from "../enums/domain.enum.js";
 
 /**
  * 八个领域事件的载荷结构。
@@ -53,6 +54,23 @@ export interface PestDetectedPayload {
   gridCode?: string;
   /** 虫害类型编码，取自虫情字典 */
   pestType: string;
+  /** 发生等级：1 轻微、2 中等、3 严重 */
+  level: 1 | 2 | 3;
+  /** 识别置信度，取值 0 到 1 */
+  confidence: number;
+  /** 现场影像文件标识，访问地址由文件服务解析 */
+  imageFileId?: string;
+  /** 识别时间，ISO 8601 UTC */
+  detectedAt: string;
+}
+
+/** telemetry.ai.detected —— 非虫情类视频 AI 识别确认（人员闯入/农机状态/涝情/倒伏/火情/烟雾） */
+export interface AiDetectedPayload {
+  parcelId: string;
+  /** 识别摄像头标识，去重与现场定位用 */
+  cameraId: string;
+  /** 事件类型，取值来自 AiEventType；PEST 不走本载荷，沿用 PestDetectedPayload */
+  eventType: AiEventTypeValue;
   /** 发生等级：1 轻微、2 中等、3 严重 */
   level: 1 | 2 | 3;
   /** 识别置信度，取值 0 到 1 */

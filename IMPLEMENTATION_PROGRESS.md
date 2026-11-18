@@ -732,6 +732,17 @@
 - **交付口径**：纯前端改动，未跑测试/构建/浏览器验证（静态复核：监听器增删配对、测量/绘制/框选三态互斥、noUnusedLocals 隐患已清）。
 - **部署（同日用户点名）**：前端-only 走 edge 单目标路径——`docker build --target edge`（build 阶段随源码变动重跑：依赖 13.5s + tsc 7.1s + vue-tsc/vite 23.1s，镜像内类型检查与打包顺带通过）+ `compose --profile app up -d edge`（不带 --build，app/postgres/minio 未重启保持 Healthy）；天地图 Key 在 apps/web/.env，构建参数空传 unset 不覆盖。线上 bundle 递归核验 **9 项全 PASS**（扫 39 chunk：一键巡田/工具行类名/measure-tip/导出提示/退出大屏 + 缩放条与框选回归，网关 401 预期）。
 
+### 2026-11-18（续二）：P2 台账与契约交付（A10/A12/A11 + 伴随 A3/A4，用户点名「部署 P1 后接着做 P2」）
+
+- **迁移（已写未应用，部署前须先应用）**：`047_infra_line_attributes.sql`（infra_lines 加 width_m/speed_limit_kmh 可空 CHECK>0、applicable_machines JSONB 默认 '[]' CHECK 数组、enabled 默认 TRUE、is_template 默认 FALSE + 启用部分索引）；`048_ai_event_types_message_dispatch.sql`（video_ai_events 加 event_type 默认 'PEST' CHECK 七码，pest_type 改条件 CHECK「非 PEST 可空」；ops_messages 加 dispatched/dispatched_by/dispatch_note/dispatched_at）；`049_telemetry_quality.sql`（telemetry_readings 加 quality_flags JSONB 默认 '[]' + 干净行部分索引；新表 telemetry_quality_logs）。
+- **contracts**：`AiEventType` 七码（PEST/PERSON_INTRUSION/MACHINE_STATUS/FLOOD/LODGING/FIRE/SMOKE）与 `MachineType` 六码枚举；新主题 `TelemetryAiDetected` + `AiDetectedPayload`；`aiDetectedTemplate` 登记 MESSAGE_TEMPLATES（MACHINE_STATUS→NOTICE/INFO；其余 level≥2→ALERT/WARNING；FIRE/SMOKE level3→CRITICAL；dedupeKey 按 topic:地块:摄像机:类型:小时）。
+- **A10 线路台账属性**：plot-service 仓储五可选字段（SQL/InMemory 双实现同步）；POST/PUT 共用 `parseLineAttributes` 校验（宽度/限速正数、机型白名单，PUT 传 null 清除登记）；GET 新增 enabled/machine/template 筛选（非法枚举 400）；新端点 `POST /plots/infra-lines/from-template`（复制模板几何与属性，副本强制非模板防套娃）。前端：MapShapeEditor 线表单加宽度/限速/机型复选/启用+模板四组字段；InfraLinePanel 加台账属性/状态列与状态/模板/机型筛选、设模板/从模板复用对话框；一张图 editLineOnMap 回传五属性、信息卡加属性行、停用线 opacity 0.4；bridge 新增 refresh 回调供面板改属性后地图重查重绘。
+- **A12 AI 事件类型扩展**：video-service parseAiDetection 改 eventType 白名单（缺省 PEST）+ pestType 仅 PEST 必填；`forwardPestDetection` 改名 `forwardAiDetection` 按类型路由（PEST→telemetry /pest-events 原样；其余→/ai-events）；仓储 event_type 可选列尾追 + 查询 eventType 过滤。telemetry-service 新端点 `POST /telemetry/ai-events`（显式拒收 PEST 防双路径，落告警 metric=eventType + emit TelemetryAiDetected）；gateway authz 登记该回调路径；message-service consumer `onAiDetected` 走契约模板。前端 video/Index.vue AI tab 加事件类型列与七码筛选下拉，非虫情虫害列显 '—'，重试成功文案改用后端 forwardMessage。模型本体仍 B 类，本批只扩事件契约与转发链路。
+- **A11 遥测质量治理**：新 `quality.ts`（十一指标量程表 + `detectQualityFlags` 纯函数：超量程 OUT_OF_RANGE、含本次连续 5 次同值 STUCK_VALUE、超前>5min/陈旧>30天 TIMESTAMP_ANOMALY）；上报改「打标不拒收」（recordedAt 非法/数值非数字仍 400），可疑读数不触发阈值告警、落 `telemetry_quality_logs`；latest CTE 与 historySeries 默认剔除可疑行（includeSuspicious=true 回查），history 全量带标记；新端点 `GET /telemetry/quality-logs`（flag 白名单 400、size 1-500）。前端 device/Monitor.vue 加质量异常日志卡（三类标记中文 tag、按所选设备过滤、随设备切换重查）。数据字典/资产目录另列不在本批。
+- **A3 派单处置（伴随）**：message-service `POST /messages/:id/dispatch`（仅 ALERT、与忽略互斥、note 必填、四重前置校验 404/400；派单顺带标已读，unreadCount 自动排除）；仓储 markDispatched 双实现。前端 message/Index.vue 告警行加派单按钮与对话框（处置说明必填/处置人选填缺省当前账号）、已派单 tag 悬停显处置详情，已派单不再提供忽略入口。
+- **A4 监管统计报表（伴随，纯前端）**：finance/Index.vue 新增监管统计报表卡——地块/农事任务/虫情/灾情/收支五 API `Promise.allSettled` 聚合（单源失败不拖垮整表），板块/指标/数值/说明四列表格 + exportCsv 导出；全量口径不随收支筛选联动；驾驶舱报表中心入口 hint 去「建设中」。不动后端。
+- **交付口径**：未跑验证（无测试/构建/冒烟/浏览器实操，静态检查器不可用）；新字段全部可选 + toRecord 条件赋值保存量响应/测试同形。**未重建镜像、迁移 047–049 未应用：新后端 SQL 引用新列，P2 部署前必须先应用迁移（待用户点名）。**
+
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
 > 口径：A 类是不依赖外部条件、可在现有代码上补齐的功能缺口；B 类依赖现场硬件 / 第三方系统 / 算法服务，与「下一步」第 10 条既有口径一致；C 类是已文档化的刻意架构偏差，不是漏实现。每条均经代码核实，不臆造。
@@ -741,17 +752,17 @@
 | # | 需求条款 | 缺口 | 代码证据 |
 | --- | --- | --- | --- |
 | A1 | 5.2 地图工具 | ~~无测距测面、图幅导出、大屏投放模式~~ **已完成**（2026-11-18，P1：MapMeasure + mapExport + 大屏模式） | `dashboard/Index.vue` 工具行接测距/测面/导出/大屏 |
-| A2 | 5.4 快捷入口 | ~~无「一键巡田 / 快捷灌溉 / 作业计划 / 设备列表 / 报表中心」入口簇~~ **已完成**（2026-11-18，P1；报表中心暂路由投入产出，本体随 A4/P2） | 驾驶舱 quick-cluster 五入口经 checkPermission 过滤 |
-| A3 | 5.4 告警处置 | ~~消息中心无「派单处置 / 忽略」操作~~ **忽略已完成**（2026-11-17，迁移 `041`）；派单处置仍只在四情页虫情治理 | `message-service` `/messages/:id/ignore` + 前端忽略/回查 |
-| A4 | 2.1 / 5.4 报表导出 | ~~仅地块列表支持 CSV 导出~~ **投入产出与溯源导出已完成**（2026-11-17）；监管统计报表与报表中心仍无 | `finance/Index.vue`、`trace/Index.vue` 引用 `exportCsv` |
+| A2 | 5.4 快捷入口 | ~~无「一键巡田 / 快捷灌溉 / 作业计划 / 设备列表 / 报表中心」入口簇~~ **已完成**（2026-11-18，P1；报表中心路由投入产出页，监管统计报表本体已随 A4/P2 落在该页） | 驾驶舱 quick-cluster 五入口经 checkPermission 过滤 |
+| A3 | 5.4 告警处置 | ~~消息中心无「派单处置 / 忽略」操作~~ **已完成**（忽略 2026-11-17 迁移 `041`；派单 2026-11-18 P2 迁移 `048`，仅告警可派、与忽略互斥） | `message-service` `/messages/:id/ignore` + `/messages/:id/dispatch` + 前端派单对话框 |
+| A4 | 2.1 / 5.4 报表导出 | ~~仅地块列表支持 CSV 导出~~ **已完成**（投入产出与溯源导出 2026-11-17；监管统计报表与报表中心 2026-11-18 P2，五源前端聚合+CSV） | `finance/Index.vue` 监管统计报表卡、`trace/Index.vue` 引用 `exportCsv` |
 | A5 | 8.7 任务调度 | ~~无优先级设置、冲突检测~~ **优先级与同地块/负责人冲突提示已完成**（2026-11-17，迁移 `042`）；自动排队与时间/天气冲突未做 | `task.repository.ts` `conflictsOf` + 创建响应 `conflicts` |
 | A6 | 8.4 / 9.4 定时与自动停灌 | ~~「达到上限自动停止」未联动~~ **上限自动停灌已完成**（2026-11-17，迁移 `040`，只撤 QUEUED，在途走急停）；定时执行调度器未做 | `control-service/consumer.ts` above 分支 + `/commands/:id/cancel` |
 | A7 | 8.1 / 8.8 指令类型与应急 | 指令仅 SEEDING/IRRIGATION/WEEDING/FERTILIZATION/ESTOP 五类；无暂停/续作、返航、断电、切换机具；TILLAGE 只是任务类型无对应控制指令 | 迁移 `031` CHECK 与 `contracts/events/payload.ts` 同口径 |
 | A8 | 14.3 范围管控 | 指令无「授权地块 + 授权时间段」范围校验 | 现有三重管控为权限码 + 二次确认 + 租户隔离，无时间窗/地块授权表 |
 | A9 | 4.1 地块流转 | ~~变更历史无流转（权属变更）动作~~ **已完成**（2026-11-17，迁移 `043` + `/plots/:code/transfer` + 详情页流转入口） | `plot_change_logs` 动作枚举含 TRANSFER |
-| A10 | 4.4 线路属性 | 线路台账无宽度、限速、适用机型、启用/停用、模板复用；无轨迹采集生成线路 | `infra_lines` 仅编号/名称/类型/几何/长度/地块关联（008/013/024） |
-| A11 | 11.4 数据质量治理 | 遥测上报无超量程/连续不变/时间戳异常的可疑标记、补值剔除与异常日志；无数据字典/资产目录 | `telemetry-service` 上报链路仅数值合法性校验 |
-| A12 | 7.3 视频 AI 事件契约 | AI 事件仅虫情（pestType）一类；无人员入侵/农机作业状态/水淹倒伏火情烟雾事件类型与转发联动 | `video-service/ai-event.ts` 强制 pestType 必填（模型属 B 类，但事件契约可先扩展） |
+| A10 | 4.4 线路属性 | ~~线路台账无宽度、限速、适用机型、启用/停用、模板复用~~ **已完成**（2026-11-18 P2，迁移 `047` 待应用）；轨迹采集生成线路仍无（依赖农机 T-Box，B 类） | `infra-line.repository.ts` 五字段 + `/infra-lines/from-template` + 台账表单筛选 |
+| A11 | 11.4 数据质量治理 | ~~遥测上报无可疑标记、补值剔除与异常日志~~ **已完成**（2026-11-18 P2，迁移 `049` 待应用：三类标记+曲线汇总剔除+异常日志端点）；数据字典/资产目录另列 | `telemetry-service/quality.ts` + `/telemetry/quality-logs` + Monitor 异常日志卡 |
+| A12 | 7.3 视频 AI 事件契约 | ~~AI 事件仅虫情一类~~ **已完成**（2026-11-18 P2，迁移 `048` 待应用：七类事件+条件必填+按类型转发+消息模板）；模型本体仍 B 类 | `video-service/ai-event.ts` 白名单 + telemetry `/ai-events` + contracts `AiDetectedPayload` |
 | A13 | 7.1 / 7.2 多画面与录像留档 | 单路播放 + 截图，无多画面分屏监看；无告警时刻前后录像片段自动留档 | `video/Index.vue` 单播放器；录像查询依赖摄像机侧存储 |
 | A14 | 6.2 长势分布图 | 四情页有生育期时间轴与提前/滞后对比，无地块内空间长势分布图 | `agro/Index.vue`；反演输入（多光谱影像）属 B 类 |
 | A15 | 8.3 / 9.3 变量作业 | 无变量播种与地块内网格级变量施肥方案 | `operation-service/coverage.ts` 为全地块均匀牛耕式布带 |
@@ -761,15 +772,15 @@
 
 ### A 类剩余 12 项缺口排期（2026-11-18 用户点名）
 
-> 口径：12 项 = 审计表未划完成行（A1/A2/A7/A8/A10/A11/A12/A13/A14/A15/A17/A18）；按依赖与价值分五批，批内可并行、批间顺序交付；每批独立可部署（纯前端批走 edge 单目标，迁移批应用待点名）。估时为单人开发人日，含自验不含 B 类外部联调。**P1（A1/A2）已于 2026-11-18 交付并部署（见同日续节），剩 10 项待启动。**
+> 口径：12 项 = 审计表未划完成行（A1/A2/A7/A8/A10/A11/A12/A13/A14/A15/A17/A18）；按依赖与价值分五批，批内可并行、批间顺序交付；每批独立可部署（纯前端批走 edge 单目标，迁移批应用待点名）。估时为单人开发人日，含自验不含 B 类外部联调。**P1（A1/A2）已于 2026-11-18 交付并部署；P2（A10/A12/A11 + 伴随 A3/A4）同日交付（迁移 047–049 已写未应用，部署待点名），剩 7 项（A7/A8/A13/A14/A15/A17/A18）待启动。**
 
 | 批次 | 项 | 内容摘要 | 迁移 | 估时 | 依赖/验收要点 |
 | --- | --- | --- | --- | --- | --- |
 | ~~P1 纯前端快赢~~ ✅ | A2 | 驾驶舱快捷入口簇（一键巡田/快捷灌溉/作业计划/设备列表/报表中心），路由既有面板/页 | 无 | 1d | ✅ 已交付：入口经 checkPermission 过滤；panelComps 登记同步 |
 | ~~P1~~ ✅ | A1 | 地图测距/测面（临时层+实时 tooltip）、图幅导出 PNG、大屏投放模式（隐菜单面板+字号放大） | 无 | 2d | ✅ 已交付：测面复用 polygonAreaMu 同公式；导出含边界，可跨域源含底图（谷歌/高德退矢量图幅） |
-| P2 台账与契约 | A10 | 线路宽度/限速/适用机型/启用停用/模板复用 | 047 | 2d | CHECK 与 contracts 同步；台账表单与筛选可用 |
-| P2 | A12 | AI 事件类型扩 PERSON_INTRUSION/MACHINE_STATUS/FLOOD/LODGING/FIRE/SMOKE，pestType 改条件必填+消息转发 | 048 | 1.5d | 契约单测+网关路由回归；模型本体仍 B 类 |
-| P2 | A11 | 遥测质量标记（超量程/连续不变/时间戳异常）+曲线与汇总剔除+异常日志端点 | 049 | 2.5d | 三类异常注入冒烟；数据字典/资产目录另列 |
+| ~~P2 台账与契约~~ ✅ | A10 | 线路宽度/限速/适用机型/启用停用/模板复用 | 047 | 2d | ✅ 已交付（未跑验证，迁移待应用）：CHECK 与 contracts MachineType 同步；台账表单与筛选可用 |
+| ~~P2~~ ✅ | A12 | AI 事件类型扩 PERSON_INTRUSION/MACHINE_STATUS/FLOOD/LODGING/FIRE/SMOKE，pestType 改条件必填+消息转发 | 048 | 1.5d | ✅ 已交付（未跑验证，迁移待应用）：契约与网关回调登记同步；模型本体仍 B 类 |
+| ~~P2~~ ✅ | A11 | 遥测质量标记（超量程/连续不变/时间戳异常）+曲线与汇总剔除+异常日志端点 | 049 | 2.5d | ✅ 已交付（未跑验证，迁移待应用）：三类标记纯函数可注入冒烟；数据字典/资产目录另列 |
 | P3 控制深化 | A7 | 指令扩 PAUSE/RESUME/RETURN_HOME/POWER_OFF/TOOL_SWITCH/TILLAGE | 050 | 3d | 状态机跃迁表单测+回执冒烟；contracts payload 同步 |
 | P3 | A8 | 指令授权地块+授权时间窗范围校验（三重管控升四重） | 051 | 2.5d | 超范围指令 403 冒烟 |
 | P3 | A18 | EC/pH 偏离规则种子+决策联动肥液配比调整处方 | 052 | 2d | 依赖 A11 质量标记防误触发；规则命中出处方冒烟 |
@@ -778,8 +789,8 @@
 | P5 视频与移动 | A13 | 2/4/9 分屏监看+逐屏截图/PTZ；录像留档仅留接口与档案表（片源依赖 B 类流媒体） | 055 | 3d | 分屏切换不泄漏播放器实例 |
 | P5 | A17 | 移动端 H5 响应式优先（驾驶舱/巡田/任务回执三页），小程序另立项评估 | 无 | 10d | 375px 宽可用；独立工程不混入 apps/web 桌面布局 |
 
-- **合计**：12 项主 list ≈36 人日（P1 3 / P2 6 / P3 7.5 / P4 7 / P5 13，含批次内并行压缩空间）；P1 已交付，剩 ≈33 人日。
-- **伴随小项**（部分完成行的残留，不计入 12 项）：A3 派单处置（消息中心操作，1d，随 P2）、A4 监管统计报表与报表中心本体（2d，随 P2）、A5 自动排队（1d，随 P3）、A6 定时执行调度器（1.5d，随 P3）。
+- **合计**：12 项主 list ≈36 人日（P1 3 / P2 6 / P3 7.5 / P4 7 / P5 13，含批次内并行压缩空间）；P1/P2 已交付，剩 ≈27 人日。
+- **伴随小项**（部分完成行的残留，不计入 12 项）：~~A3 派单处置（1d，随 P2）~~ ✅、~~A4 监管统计报表与报表中心本体（2d，随 P2）~~ ✅（均 2026-11-18 交付）、A5 自动排队（1d，随 P3）、A6 定时执行调度器（1.5d，随 P3）。
 - **顺序理由**：P1 无迁移零风险先见效果；P2 为 P3/P4 提供质量标记与契约基础；A18 挂 P3 末因依赖 A11；P4 依赖数据积累故置后；P5 重且部分悬 B 类殿后。
 
 ### B. 外部依赖（需现场 / 第三方条件，平台侧接口已就绪或已留痕）
@@ -807,7 +818,7 @@
 
 > **交付口径（2026-11-11 起，用户长期要求）**：改完直接 `git commit` + `git push`，**不再**跑单元测试 / `tsc -b` / `pnpm build` / `smoke-*` 冒烟 / 浏览器实操验证，**不再**重建或重新部署 `app`、`edge` 镜像。迁移文件照常编写，只在用户点名时才应用到库；风险较高的改动收工时注明「未跑验证」即可。
 
-首版业务链路已闭环，剩余工作是业务子项补齐与外部依赖对接。**代码侧可补齐的功能缺口见上方「未完成功能清单（2026-11-17）」A 类 18 项，其中 6 项（A3 忽略 / A4 导出 / A5 优先级与冲突提示 / A6 自动停灌 / A9 流转 / A16 审计留存）已于 2026-11-17 补齐（见同日完成记录，迁移 040–043 已应用、镜像已重建部署并只读冒烟通过），A1/A2 已于 2026-11-18 按 P1 排期交付（纯前端，待点名部署），剩 10 项按 P2–P5 排期待启动；B 类外部依赖与下方第 10 条口径一致**：
+首版业务链路已闭环，剩余工作是业务子项补齐与外部依赖对接。**代码侧可补齐的功能缺口见上方「未完成功能清单（2026-11-17）」A 类 18 项，其中 6 项（A3 忽略 / A4 导出 / A5 优先级与冲突提示 / A6 自动停灌 / A9 流转 / A16 审计留存）已于 2026-11-17 补齐，A1/A2 已于 2026-11-18 按 P1 交付并部署，A10/A12/A11 及伴随 A3 派单/A4 监管报表同日按 P2 交付（未跑验证，迁移 047–049 已写未应用，部署前须先应用），剩 7 项按 P3–P5 排期待启动；B 类外部依赖与下方第 10 条口径一致**：
 
 1. **已完成**：会话持久化与口令强散列（`007` 迁移 + `SessionRepository` + scrypt + `POST /auth/refresh`），旧 token 重启后仍有效，改密/删号即时回收会话。
 2. **已完成**：部署编排（`Dockerfile` 双目标、compose `app`/`edge`、HTTPS 终止、`AUTH_GUARD_MODE=enforce`、连接池与内部凭证配置）；已在本机完成镜像构建与容器实跑复验（详见「本机容器化部署实录」）。环境侧约束：`docker.io` 直连不可用，需先把基础镜像经镜像源拉取并重打 tag。
@@ -1166,3 +1177,4 @@
 | 2026-11-18 | 迁移 `046_history_clear_demo_restore.sql` 应用（用户点名清历史+恢复口令） | 已应用（23ms）；历史七表+七辅表清空，devices 12 台/绑定 11 保留，四演示账号回种子散列、temp01 回 DISABLED |
 | 2026-11-18 | `node .runtime/verify-046.mjs` + `node scripts/smoke-demo-data.mjs` | 核验 **27 项全 PASS**（含网关实测 demo123 三账号 200 / temp01 403 / admin 200）；冒烟 **37 项全 PASS、0 WARN**（账号漂移消除，历史类改空列表可用口径） |
 | 2026-11-18 | `docker build --target edge` + `compose --profile app up -d edge` + `node .runtime/verify-edge-basemap.mjs`（P1 仅前端部署） | edge 单目标重建（镜像内 vue-tsc + vite 顺带通过）、app 等三容器未重启；线上 bundle 只读核验 **9 项全 PASS**（扫 39 chunk 含一键巡田/工具行/measure-tip/导出提示/退出大屏与缩放条框选回归） |
+| 2026-11-18 | P2 交付（A10/A12/A11 + A3/A4，迁移 047–049 编写） | **未跑验证**（按交付口径不跑测试/构建/冒烟，静态检查器不可用）；迁移未应用、镜像未重建；新后端 SQL 引用新列，部署前须先应用 047–049（待点名） |

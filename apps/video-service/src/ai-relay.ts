@@ -1,4 +1,4 @@
-import { forwardPestDetection } from "./ai-event.js";
+import { forwardAiDetection } from "./ai-event.js";
 import type { ForwardResult } from "./ai-event.js";
 import { toDetection } from "./ai-event.repository.js";
 import type { AiEventRepository } from "./ai-event.repository.js";
@@ -11,7 +11,7 @@ export interface AiRelayOptions {
   /** 失败重试上限（含首次转发），默认 5 次；人工重试不受限 */
   maxRetries?: number;
   batchSize?: number;
-  forward?: (detection: Parameters<typeof forwardPestDetection>[0], options: { baseUrl: string; deviceToken?: string | undefined }) => Promise<ForwardResult>;
+  forward?: (detection: Parameters<typeof forwardAiDetection>[0], options: { baseUrl: string; deviceToken?: string | undefined }) => Promise<ForwardResult>;
 }
 
 /** 转发失败的识别事件按接收时间顺序补投，超过上限后停止自动重试，仍可人工触发 */
@@ -37,7 +37,7 @@ export class AiForwardRelay {
     this.running = true;
     try {
       const pending = await this.events.listRetryable(this.options.batchSize ?? 20, this.options.maxRetries ?? 5);
-      const forward = this.options.forward ?? forwardPestDetection;
+      const forward = this.options.forward ?? forwardAiDetection;
       let forwarded = 0;
       for (const event of pending) {
         const result = await forward(toDetection(event), { baseUrl: this.options.baseUrl, deviceToken: this.options.deviceToken });

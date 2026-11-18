@@ -6,7 +6,7 @@ import type { EventPublisher } from "@agri/mq";
 import { InMemoryEventPublisher, InMemoryOutboxStore, OutboxService } from "@agri/mq";
 import type { OutboxStore } from "@agri/mq";
 import { EventTopic } from "@agri/contracts";
-import type { PestDetectedPayload, ThresholdBreachedPayload } from "@agri/contracts";
+import type { AiDetectedPayload, AiEventTypeValue, PestDetectedPayload, ThresholdBreachedPayload } from "@agri/contracts";
 import type { EventTopicValue } from "@agri/contracts";
 import { authorizeRequest, toIsoTimestamp } from "@agri/shared";
 
@@ -19,6 +19,10 @@ import { InMemoryGrowthStageRepository } from "./growth.repository.js";
 import type { GrowthStageInput, GrowthStageRepository } from "./growth.repository.js";
 import { DISASTER_STATUSES, DISASTER_TYPES, InMemoryDisasterRepository } from "./disaster.repository.js";
 import type { CreateDisasterInput, DisasterRepository, DisasterSeverity, DisasterStatus, SupplementDisasterInput, DisasterType } from "./disaster.repository.js";
+import { detectQualityFlags, QUALITY_FLAGS, STUCK_WINDOW } from "./quality.js";
+import type { QualityFlag } from "./quality.js";
+import { InMemoryQualityLogRepository } from "./quality-log.repository.js";
+import type { QualityLogRepository } from "./quality-log.repository.js";
 import { breaches, DEFAULT_TELEMETRY_RULES, InMemoryRuleRepository, RULE_SEVERITY } from "./rule.repository.js";
 import type { RuleLevel, RuleRepository, TelemetryRule } from "./rule.repository.js";
 
@@ -34,6 +38,7 @@ export interface TelemetryDependencies {
   pests?: PestEventRepository;
   growth?: GrowthStageRepository;
   disasters?: DisasterRepository;
+  qualityLogs?: QualityLogRepository;
   outbox?: OutboxStore;
   publisher?: EventPublisher;
   tenantId?: string;
@@ -72,6 +77,7 @@ function historyQuery(params: URLSearchParams): HistoryQuery {
   const to = params.get("to") ?? undefined;
   const plotCode = params.get("plotCode") ?? undefined;
   const depth = parseDepth(params.get("depthCm"));
+  const includeSuspicious = params.get("includeSuspicious") === "true";
   return {
     ...(deviceId ? { deviceId } : {}),
     ...(metric ? { metric } : {}),
@@ -79,6 +85,7 @@ function historyQuery(params: URLSearchParams): HistoryQuery {
     ...(to ? { to } : {}),
     ...(plotCode ? { plotCode } : {}),
     ...(typeof depth === "number" ? { depthCm: depth } : {}),
+    ...(includeSuspicious ? { includeSuspicious } : {}),
     limit: Number(params.get("size") ?? 200),
   };
 }
@@ -132,6 +139,48 @@ function parsePestEvent(body: Record<string, unknown>): { input?: CreatePestEven
     level: level as PestLevel,
     confidence,
     detectedAt: String(body.detectedAt ?? new Date().toISOString()),
+  };
+  if (body.imageFileId !== undefined && body.imageFileId !== null && String(body.imageFileId) !== "") {
+    input.imageFileId = String(body.imageFileId);
+  }
+  return { input };
+}
+
+/** 非虫情类 AI 事件白名单：PEST 走 /pest-events，本入口拒收避免双路径 */
+const AI_EVENT_TYPES: AiEventTypeValue[] = ["PERSON_INTRUSION", "MACHINE_STATUS", "FLOOD", "LODGING", "FIRE", "SMOKE"];
+
+/** AI 事件类型中文名，与消息模板同一套文案口径 */
+const AI_TYPE_LABELS: Record<string, string> = {
+  PERSON_INTRUSION: "人员闯入",
+  MACHINE_STATUS: "农机状态",
+  FLOOD: "涝情",
+  LODGING: "倒伏",
+  FIRE: "火情",
+  SMOKE: "烟雾",
+};
+
+/** 解析并校验非虫情类 AI 识别事件入参；视频服务转发与算法直报共用 */
+function parseAiEvent(body: Record<string, unknown>): { input?: AiDetectedPayload & { deviceId: string }; error?: string } {
+  const eventType = String(body.eventType ?? "").trim() as AiEventTypeValue;
+  if (eventType === "PEST") return { error: "虫情事件请走 /api/v1/telemetry/pest-events" };
+  if (!AI_EVENT_TYPES.includes(eventType)) return { error: `eventType 只能是 ${AI_EVENT_TYPES.join("、")}` };
+  const deviceId = String(body.deviceId ?? "").trim();
+  if (!deviceId) return { error: "deviceId 不能为空" };
+  const level = Number(body.level);
+  if (level !== 1 && level !== 2 && level !== 3) return { error: "level 只能是 1、2、3" };
+  const confidence = body.confidence === undefined ? 0.9 : Number(body.confidence);
+  if (!(confidence >= 0 && confidence <= 1)) return { error: "confidence 必须落在 0 到 1" };
+  const detectedRaw = body.detectedAt === undefined || body.detectedAt === "" ? new Date().toISOString() : String(body.detectedAt);
+  const detectedAt = toIsoTimestamp(detectedRaw);
+  if (!detectedAt || Number.isNaN(new Date(detectedAt).getTime())) return { error: "detectedAt 不是合法时间" };
+  const input: AiDetectedPayload & { deviceId: string } = {
+    parcelId: String(body.plotCode ?? "").trim(),
+    deviceId,
+    cameraId: deviceId,
+    eventType,
+    level: level as 1 | 2 | 3,
+    confidence,
+    detectedAt,
   };
   if (body.imageFileId !== undefined && body.imageFileId !== null && String(body.imageFileId) !== "") {
     input.imageFileId = String(body.imageFileId);
@@ -266,6 +315,7 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
   const pests = dependencies?.pests ?? new InMemoryPestEventRepository();
   const growth = dependencies?.growth ?? new InMemoryGrowthStageRepository();
   const disasters = dependencies?.disasters ?? new InMemoryDisasterRepository();
+  const qualityLogs = dependencies?.qualityLogs ?? new InMemoryQualityLogRepository();
   const tenantId = dependencies?.tenantId ?? "tenant-demo";
   const publisher = dependencies?.publisher ?? new InMemoryEventPublisher();
   setDefaultPublisher(publisher);
@@ -288,7 +338,7 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
     try {
       if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "telemetry" }, traceId); return; }
       // 设备上报与 AI 回调认 DEVICE_CALLBACK_TOKEN 凭证（或用户写权限），其余接口需要遥测读写权限
-      const denied = authorizeRequest(req, { read: "telemetry:read", write: "telemetry:write", callbackPaths: ["/api/v1/telemetry/report", "/api/v1/telemetry/pest-events"] });
+      const denied = authorizeRequest(req, { read: "telemetry:read", write: "telemetry:write", callbackPaths: ["/api/v1/telemetry/report", "/api/v1/telemetry/pest-events", "/api/v1/telemetry/ai-events"] });
       if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
 
       // 最新读数：按设备过滤，每个设备每个指标（含深度分层）只取最近一次；地块/指标/深度为可选后置筛选
@@ -334,51 +384,99 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
         return;
       }
 
-      // 上报读数：落库后按阈值生成告警，并在越限时写入本地消息表发布事件
+      // 上报读数：先判质量再落库——可疑读数只打标不拒收（保留现场原始值），
+      // 不触发阈值告警，另落异常日志留痕；干净读数按阈值生成告警并发布越限事件
       if (req.method === "POST" && url.pathname === "/api/v1/telemetry/report") {
         const body = await json(req);
         const depth = parseDepth(body.depthCm);
         if (depth === null) { send(res, 400, null, traceId, "depthCm 必须是 0-32767 的整数（厘米）"); return; }
+        // 时间戳非法直接拒收；超前/陈旧属于可疑而非非法，由质量标记处理
+        const recordedRaw = body.recordedAt === undefined || body.recordedAt === "" ? new Date().toISOString() : String(body.recordedAt);
+        const recordedAt = toIsoTimestamp(recordedRaw);
+        if (!recordedAt || Number.isNaN(new Date(recordedAt).getTime())) { send(res, 400, null, traceId, "recordedAt 不是合法时间"); return; }
+        const value = Number(body.value);
+        if (!Number.isFinite(value)) { send(res, 400, null, traceId, "value 必须是数字"); return; }
+        const deviceId = String(body.deviceId ?? "");
+        const metric = String(body.metric ?? "");
+        if (!deviceId || !metric) { send(res, 400, null, traceId, "deviceId 与 metric 不能为空"); return; }
+        const recent = await readings.recentValues(deviceId, metric, typeof depth === "number" ? depth : undefined, STUCK_WINDOW - 1);
+        const flags = detectQualityFlags({ metric, value, recordedAt }, recent);
         const input: CreateReadingInput = {
-          deviceId: String(body.deviceId ?? ""),
+          deviceId,
           plotCode: String(body.plotCode ?? ""),
-          metric: String(body.metric ?? ""),
-          value: Number(body.value),
+          metric,
+          value,
           unit: String(body.unit ?? ""),
-          recordedAt: String(body.recordedAt ?? new Date().toISOString()),
+          recordedAt,
           ...(typeof depth === "number" ? { depthCm: depth } : {}),
+          ...(flags.length > 0 ? { qualityFlags: flags } : {}),
         };
-        if (!input.deviceId || !input.metric) { send(res, 400, null, traceId, "deviceId 与 metric 不能为空"); return; }
         const reading = await readings.create(undefined, input);
-        // 地块专属分级规则优先，未配置回落全局；命中多级时只按最严重的一级生成一条告警
-        const applicable = await rules.findEnabled(reading.metric, reading.plotCode);
-        const rule = applicable
-          .filter((candidate) => breaches(candidate, reading.value))
-          .sort((a, b) => RULE_SEVERITY[b.level] - RULE_SEVERITY[a.level])[0] ?? null;
         let alert: TelemetryAlert | null = null;
-        if (rule) {
-          alert = {
+        if (flags.length > 0) {
+          // 可疑读数不触发阈值告警，避免传感器故障刷告警；异常日志供审计回查
+          await qualityLogs.append(undefined, {
             id: newReadingId(),
+            readingId: reading.id,
             deviceId: reading.deviceId,
             plotCode: reading.plotCode,
-            level: rule.level,
-            metric: reading.metric,
-            message: rule.message,
-            createdAt: reading.recordedAt,
-            handled: false,
-          };
-          await alerts.create(undefined, alert);
-          const payload: ThresholdBreachedPayload = {
-            parcelId: reading.plotCode,
             metric: reading.metric,
             value: reading.value,
-            threshold: rule.threshold,
-            direction: rule.direction,
-            occurredAt: reading.recordedAt,
-          };
-          await emit(EventTopic.TelemetryThresholdBreached, payload, reading.plotCode);
+            unit: reading.unit,
+            recordedAt: reading.recordedAt,
+            flags,
+            createdAt: new Date().toISOString(),
+          });
+        } else {
+          // 地块专属分级规则优先，未配置回落全局；命中多级时只按最严重的一级生成一条告警
+          const applicable = await rules.findEnabled(reading.metric, reading.plotCode);
+          const rule = applicable
+            .filter((candidate) => breaches(candidate, reading.value))
+            .sort((a, b) => RULE_SEVERITY[b.level] - RULE_SEVERITY[a.level])[0] ?? null;
+          if (rule) {
+            alert = {
+              id: newReadingId(),
+              deviceId: reading.deviceId,
+              plotCode: reading.plotCode,
+              level: rule.level,
+              metric: reading.metric,
+              message: rule.message,
+              createdAt: reading.recordedAt,
+              handled: false,
+            };
+            await alerts.create(undefined, alert);
+            const payload: ThresholdBreachedPayload = {
+              parcelId: reading.plotCode,
+              metric: reading.metric,
+              value: reading.value,
+              threshold: rule.threshold,
+              direction: rule.direction,
+              occurredAt: reading.recordedAt,
+            };
+            await emit(EventTopic.TelemetryThresholdBreached, payload, reading.plotCode);
+          }
         }
         send(res, 201, { reading, alert }, traceId);
+        return;
+      }
+
+      // 质量异常日志：按设备/指标/标记回查可疑读数留痕，标记非法直接 400
+      if (req.method === "GET" && url.pathname === "/api/v1/telemetry/quality-logs") {
+        const deviceId = trimmed(url.searchParams, "deviceId");
+        const metric = trimmed(url.searchParams, "metric");
+        const flag = trimmed(url.searchParams, "flag");
+        if (flag !== "" && !QUALITY_FLAGS.includes(flag as QualityFlag)) {
+          send(res, 400, null, traceId, `flag 只能是 ${QUALITY_FLAGS.join("、")}`);
+          return;
+        }
+        const size = Number(url.searchParams.get("size") ?? 100);
+        if (!Number.isInteger(size) || size < 1 || size > 500) { send(res, 400, null, traceId, "size 必须是 1-500 的整数"); return; }
+        send(res, 200, await qualityLogs.list({
+          ...(deviceId ? { deviceId } : {}),
+          ...(metric ? { metric } : {}),
+          ...(flag ? { flag: flag as QualityFlag } : {}),
+          limit: size,
+        }), traceId);
         return;
       }
 
@@ -434,6 +532,29 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
         if (event.imageFileId) payload.imageFileId = event.imageFileId;
         await emit(EventTopic.TelemetryPestDetected, payload, event.plotCode);
         send(res, 201, { event, alert }, traceId);
+        return;
+      }
+
+      // 非虫情类 AI 识别结果：视频服务按类型转发到此，落告警后发布 TelemetryAiDetected，
+      // 消息中心按模板生成通知；识别记录本体由视频侧留存，这里不重复建档
+      if (req.method === "POST" && url.pathname === "/api/v1/telemetry/ai-events") {
+        const parsed = parseAiEvent(await json(req));
+        if (!parsed.input) { send(res, 400, null, traceId, parsed.error ?? "AI 事件参数非法"); return; }
+        const { deviceId, ...payload } = parsed.input;
+        const typeLabel = AI_TYPE_LABELS[payload.eventType] ?? payload.eventType;
+        const levelLabel = payload.level === 3 ? "严重" : payload.level === 2 ? "中等" : "轻微";
+        const alert = await alerts.create(undefined, {
+          id: newReadingId(),
+          deviceId,
+          plotCode: payload.parcelId,
+          level: payload.level === 3 ? "CRITICAL" : payload.level === 2 ? "WARNING" : "INFO",
+          metric: payload.eventType,
+          message: `识别到${typeLabel}（${levelLabel}）`,
+          createdAt: payload.detectedAt,
+          handled: false,
+        });
+        await emit(EventTopic.TelemetryAiDetected, payload, payload.parcelId);
+        send(res, 201, { detection: payload, alert }, traceId);
         return;
       }
 

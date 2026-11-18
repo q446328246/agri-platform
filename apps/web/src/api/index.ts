@@ -1,7 +1,7 @@
 import type { AxiosRequestConfig } from 'axios'
 import { get, post, put, del, request } from '@/utils/request'
 import type {
-  Plot, PlotQuery, PlotForm, PlotType, InfraLineType,
+  Plot, PlotQuery, PlotForm, PlotType, InfraLineType, MachineType,
   CropSeason, CropSeasonStatus,
   PlotChangeLog,
   Device, DeviceRealtimeData,
@@ -9,7 +9,7 @@ import type {
   FarmTask, FarmTaskQuery,
   DashboardStats,
   PageResult, LoginParams, LoginResult,
-  Camera, PlotStats, Recording, PtzAction, PtzCommand, VideoAiEvent,
+  Camera, PlotStats, Recording, PtzAction, PtzCommand, VideoAiEvent, AiEventType,
   TelemetryHistoryPoint, TelemetryAlert,
   MessagePreference, MessageLevel,
   SystemUser, PlatformRole, PermissionGroup,
@@ -152,16 +152,20 @@ export const plotApi = {
   getStats(): Promise<PlotStats> {
     return get('/plots/stats')
   },
-  /** 一张图用：田间线路/管线（灌水管、施肥管、电力线、机耕道）。可按类型或归属地块过滤 */
-  getInfraLines(params?: { lineType?: InfraLineType | undefined; plotCode?: string | undefined }): Promise<InfraLine[]> {
-    return get<InfraLine[]>('/plots/infra-lines', params)
+  /** 一张图用：田间线路/管线（灌水管、施肥管、电力线、机耕道）。可按类型/地块/启用状态/机型/模板过滤 */
+  getInfraLines(params?: { lineType?: InfraLineType | undefined; plotCode?: string | undefined; enabled?: boolean | undefined; machine?: MachineType | undefined; template?: boolean | undefined }): Promise<InfraLine[]> {
+    return get<InfraLine[]>('/plots/infra-lines', cleanParams(params))
   },
-  createInfraLine(data: { lineName: string; lineType: InfraLineType; geom: { type: 'LineString'; coordinates: number[][]; srid: number }; lineCode?: string; plotCode?: string }): Promise<InfraLine> {
+  createInfraLine(data: { lineName: string; lineType: InfraLineType; geom: { type: 'LineString'; coordinates: number[][]; srid: number }; lineCode?: string; plotCode?: string; widthM?: number; speedLimitKmh?: number; applicableMachines?: MachineType[]; enabled?: boolean; isTemplate?: boolean }): Promise<InfraLine> {
     return post<InfraLine>('/plots/infra-lines', data)
   },
-  /** 局部更新：只发传入字段；改了 geom 时服务端按新折点重算 lengthM */
-  updateInfraLine(lineCode: string, data: { lineName?: string; lineType?: InfraLineType; geom?: { type: 'LineString'; coordinates: number[][]; srid: number }; plotCode?: string }): Promise<InfraLine> {
+  /** 局部更新：只发传入字段；改了 geom 时服务端按新折点重算 lengthM；宽度/限速传 null 清除登记 */
+  updateInfraLine(lineCode: string, data: { lineName?: string; lineType?: InfraLineType; geom?: { type: 'LineString'; coordinates: number[][]; srid: number }; plotCode?: string; widthM?: number | null; speedLimitKmh?: number | null; applicableMachines?: MachineType[]; enabled?: boolean; isTemplate?: boolean }): Promise<InfraLine> {
     return put<InfraLine>(`/plots/infra-lines/${encodeURIComponent(lineCode)}`, data)
+  },
+  /** 从模板建档：复制模板线的几何与台账属性，副本自身不再是模板 */
+  createInfraLineFromTemplate(data: { templateCode: string; lineName?: string; lineCode?: string; plotCode?: string }): Promise<InfraLine> {
+    return post<InfraLine>('/plots/infra-lines/from-template', data)
   },
   deleteInfraLine(lineCode: string): Promise<void> {
     return del<void>(`/plots/infra-lines/${encodeURIComponent(lineCode)}`)
@@ -186,7 +190,7 @@ export const plotApi = {
   }
 }
 /** 管线类型定义在 @/types，这里转出保持既有引用路径 */
-export type { InfraLineType }
+export type { InfraLineType, MachineType }
 
 export interface InfraLine {
   id: string
@@ -197,6 +201,16 @@ export interface InfraLine {
   lengthM: number
   /** 归属地块编码（plots.parcelCode），空串表示未绑定地块 */
   plotCode: string
+  /** 线路宽度（米），未登记缺省 */
+  widthM?: number
+  /** 限速（公里/小时），未登记缺省 */
+  speedLimitKmh?: number
+  /** 适用机型白名单 */
+  applicableMachines?: MachineType[]
+  /** 启用状态，缺省视为启用；停用线地图降透明度展示 */
+  enabled?: boolean
+  /** 模板标记，可从模板复制建档 */
+  isTemplate?: boolean
   createdAt: string
 }
 
@@ -462,9 +476,13 @@ export const telemetryApi = {
   getHistory(params?: { deviceId?: string; plotCode?: string; metric?: string; depthCm?: number; from?: string; to?: string; size?: number }): Promise<any[]> {
     return get<any[]>('/telemetry/history', cleanParams(params))
   },
-  /** 历史曲线：按时间升序返回 (时间, 数值)，供趋势图直接绑定；extra 支持按地块/深度/时间窗筛选 */
-  getHistorySeries(deviceId: string, metric: string, extra?: { plotCode?: string; depthCm?: number; from?: string; to?: string; size?: number }): Promise<TelemetryHistoryPoint[]> {
+  /** 历史曲线：按时间升序返回 (时间, 数值)，供趋势图直接绑定；默认剔除可疑读数，includeSuspicious=true 回查全量 */
+  getHistorySeries(deviceId: string, metric: string, extra?: { plotCode?: string; depthCm?: number; from?: string; to?: string; size?: number; includeSuspicious?: boolean }): Promise<TelemetryHistoryPoint[]> {
     return get<TelemetryHistoryPoint[]>('/telemetry/history/series', cleanParams({ deviceId, metric, ...extra }))
+  },
+  /** 质量异常日志：可疑读数留痕，可按设备/指标/标记回查 */
+  getQualityLogs(params?: { deviceId?: string; metric?: string; flag?: TelemetryQualityFlag; size?: number }): Promise<TelemetryQualityLog[]> {
+    return get<TelemetryQualityLog[]>('/telemetry/quality-logs', cleanParams(params))
   },
   /** 待处置告警：可按级别/指标/地块筛选 */
   getAlerts(params?: { level?: MessageLevel; metric?: string; plotCode?: string }): Promise<any[]> {
@@ -540,6 +558,23 @@ export const telemetryApi = {
 /** 阈值方向：above 高于上限、below 低于下限 */
 export type RuleDirection = 'above' | 'below'
 export type RuleLevel = 'INFO' | 'WARNING' | 'CRITICAL'
+
+/** 遥测质量标记：超量程/连续不变/时间戳异常（与后端 quality.ts 同步） */
+export type TelemetryQualityFlag = 'OUT_OF_RANGE' | 'STUCK_VALUE' | 'TIMESTAMP_ANOMALY'
+
+/** 质量异常日志：每条带标记的可疑读数对应一条留痕 */
+export interface TelemetryQualityLog {
+  id: string
+  readingId: string
+  deviceId: string
+  plotCode: string
+  metric: string
+  value: number
+  unit: string
+  recordedAt: string
+  flags: TelemetryQualityFlag[]
+  createdAt: string
+}
 
 export interface TelemetryRule {
   id: string
@@ -990,7 +1025,7 @@ export const videoApi = {
   getRecordings(params?: { page?: number; size?: number; cameraId?: string; plotCode?: string; from?: string; to?: string }): Promise<PageResult<Recording>> {
     return get<PageResult<Recording>>('/video/recordings', cleanParams(params))
   },
-  getAiEvents(params?: { page?: number; size?: number; plotCode?: string; forwarded?: boolean }): Promise<PageResult<VideoAiEvent>> {
+  getAiEvents(params?: { page?: number; size?: number; plotCode?: string; forwarded?: boolean; eventType?: AiEventType }): Promise<PageResult<VideoAiEvent>> {
     return get<PageResult<VideoAiEvent>>('/video/ai-events', cleanParams(params))
   },
   retryAiEvent(eventId: string): Promise<VideoAiEvent> {
@@ -1028,6 +1063,10 @@ export const messageApi = {
   /** 忽略处置：确认无需处置的消息从待办拿掉（顺带标已读），记录保留可回查 */
   markIgnored(id: string): Promise<any> {
     return post<any>(`/messages/${encodeURIComponent(id)}/ignore`)
+  },
+  /** 派单处置：告警转交线下处置（顺带标已读）；与忽略互斥，仅 ALERT 可派单 */
+  dispatch(id: string, data: { note: string; dispatchedBy?: string }): Promise<any> {
+    return post<any>(`/messages/${encodeURIComponent(id)}/dispatch`, data)
   },
   /** 订阅偏好：返回模板目录全量，未配置的主题按默认值展示 */
   getPreferences(): Promise<{ items: MessagePreference[] }> {

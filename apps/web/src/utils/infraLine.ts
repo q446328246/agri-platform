@@ -1,5 +1,5 @@
 import type { Ref } from 'vue'
-import type { InfraLine, InfraLineType } from '@/api'
+import type { InfraLine, InfraLineType, MachineType } from '@/api'
 
 /** 一张图把后端管线类型归入参考图的三类，机耕道单独常显 */
 export type LineCat = 'WATER' | 'ELECTRIC' | 'NET'
@@ -48,6 +48,20 @@ export function catLabel(cat: LineCat | 'ROAD'): string {
   return cat === 'ROAD' ? '机耕道' : lineCategories.find((item) => item.key === cat)?.label ?? cat
 }
 
+/** 适用机型白名单（迁移 047），与 contracts MachineType 六码同步 */
+export const machineTypeOptions: Array<{ value: MachineType; label: string }> = [
+  { value: 'TRACTOR', label: '拖拉机' },
+  { value: 'HARVESTER', label: '收割机' },
+  { value: 'DRONE', label: '无人机' },
+  { value: 'FERTILIZER_MACHINE', label: '施肥机' },
+  { value: 'TRANSPORT', label: '运输车' },
+  { value: 'OTHER', label: '其他' },
+]
+
+export function machineTypeLabel(type: MachineType): string {
+  return machineTypeOptions.find((opt) => opt.value === type)?.label ?? type
+}
+
 /** 管线列表的筛选口径：一个分类含两种线型（如水线含灌水管与施肥管），故在前端按分类过滤 */
 export type LineFilter = LineCat | 'ROAD' | 'ALL'
 export const lineFilterOptions: Array<{ value: LineFilter; label: string }> = [
@@ -66,5 +80,7 @@ export interface LinePanelBridge {
   edit(line: InfraLine): void
   /** 含二次确认与地图图层刷新，返回后列表自行重查 */
   remove(line: InfraLine): Promise<void>
+  /** 面板侧改台账属性（设模板/复用）后回调，地图重查并重绘管线 */
+  refresh(): Promise<void>
 }
 export const LINE_PANEL_BRIDGE = 'cockpit-line-panel-bridge'

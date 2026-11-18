@@ -85,6 +85,7 @@ export function resolveRouteRule(method: string, pathname: string): RouteRule {
   // 设备直连上报与算法回调不带用户令牌，改由 DEVICE_CALLBACK_TOKEN 共享凭证鉴权
   if (method === "POST" && path === "/api/v1/telemetry/report") return { kind: "callback", write: "telemetry:write" };
   if (method === "POST" && path === "/api/v1/telemetry/pest-events") return { kind: "callback", write: "telemetry:write" };
+  if (method === "POST" && path === "/api/v1/telemetry/ai-events") return { kind: "callback", write: "telemetry:write" };
   if (method === "POST" && path === "/api/v1/video/ai-events") return { kind: "callback", write: "device:control" };
   // 控制指令的设备通道：网关领取与执行回执同用这套共享凭证
   if (method === "POST" && path === "/api/v1/control/device/dispatch") return { kind: "callback", write: "device:control" };

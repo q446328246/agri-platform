@@ -1,6 +1,8 @@
 import type { PrismaClientLike, Tx } from "@agri/db";
 import { toIsoTimestamp, ulid } from "@agri/shared";
 
+import type { QualityFlag } from "./quality.js";
+
 /** 遥测读数 */
 export interface Reading {
   id: string;
@@ -12,6 +14,8 @@ export interface Reading {
   recordedAt: string;
   /** 土壤分层深度（厘米）；非分层指标缺省 */
   depthCm?: number;
+  /** 质量标记（迁移 049）；干净读数缺省，带标记表示可疑 */
+  qualityFlags?: QualityFlag[];
 }
 
 /** 遥测告警 */
@@ -36,6 +40,7 @@ export interface CreateReadingInput {
   unit: string;
   recordedAt: string;
   depthCm?: number;
+  qualityFlags?: QualityFlag[];
 }
 
 /** 历史查询条件 */
@@ -47,6 +52,8 @@ export interface HistoryQuery {
   limit?: number;
   plotCode?: string;
   depthCm?: number;
+  /** 曲线是否包含可疑读数；缺省剔除，原始 history 不受此开关影响 */
+  includeSuspicious?: boolean;
 }
 
 /** 历史读数点：图表直接可用 */
@@ -59,8 +66,10 @@ export interface ReadingRepository {
   create(tx: unknown, input: CreateReadingInput): Promise<Reading>;
   latest(deviceId?: string): Promise<Reading[]>;
   history(query: HistoryQuery): Promise<Reading[]>;
-  /** 按时间升序返回 (时间, 数值) 序列，供趋势图直接使用 */
+  /** 按时间升序返回 (时间, 数值) 序列，供趋势图直接使用；默认剔除可疑读数 */
   historySeries(query: HistoryQuery): Promise<ReadingPoint[]>;
+  /** 同设备同指标（同深度）最近的历史数值，按时间倒序，供连续同值判定 */
+  recentValues(deviceId: string, metric: string, depthCm: number | undefined, limit: number): Promise<number[]>;
   count(): Promise<number>;
 }
 
@@ -82,6 +91,8 @@ function toReading(row: Record<string, unknown>): Reading {
     recordedAt: toIsoTimestamp(row.recorded_at),
   };
   if (row.depth_cm !== null && row.depth_cm !== undefined) reading.depthCm = Number(row.depth_cm);
+  // 干净读数不带标记字段，保持与存量响应/测试断言同形
+  if (Array.isArray(row.quality_flags) && row.quality_flags.length > 0) reading.qualityFlags = row.quality_flags.map(String) as QualityFlag[];
   return reading;
 }
 
@@ -100,7 +111,7 @@ function toAlert(row: Record<string, unknown>): TelemetryAlert {
   return alert;
 }
 
-/** PostgreSQL 实现，表结构由迁移 002_decision_telemetry.sql 管理 */
+/** PostgreSQL 实现，表结构由迁移 002_decision_telemetry.sql 管理，质量标记列由迁移 049 追加 */
 export class SqlReadingRepository implements ReadingRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
@@ -111,8 +122,8 @@ export class SqlReadingRepository implements ReadingRepository {
   async create(tx: unknown, input: CreateReadingInput): Promise<Reading> {
     const id = ulid();
     await this.executor(tx).$executeRawUnsafe(
-      `INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm, quality_flags)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
       id,
       input.deviceId,
       input.plotCode,
@@ -121,19 +132,21 @@ export class SqlReadingRepository implements ReadingRepository {
       input.unit,
       input.recordedAt,
       input.depthCm ?? null,
+      JSON.stringify(input.qualityFlags ?? []),
     );
     return { id, ...input };
   }
 
-  /** 每个设备每个指标（含深度分层）的最近一次读数；不传设备则返回全部设备 */
+  /** 每个设备每个指标（含深度分层）的最近一次干净读数；可疑读数不参与汇总，不传设备则返回全部设备 */
   async latest(deviceId?: string): Promise<Reading[]> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `WITH ranked AS (
-         SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm,
+         SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm, quality_flags,
                 ROW_NUMBER() OVER (PARTITION BY device_id, metric, depth_cm ORDER BY recorded_at DESC) AS rn
          FROM telemetry_readings
+         WHERE quality_flags = '[]'::jsonb
        )
-       SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm FROM ranked WHERE rn = 1` +
+       SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm, quality_flags FROM ranked WHERE rn = 1` +
         (deviceId ? ` AND device_id = $1 ORDER BY metric` : ` ORDER BY device_id, metric`),
       ...(deviceId ? [deviceId] : []),
     );
@@ -153,7 +166,7 @@ export class SqlReadingRepository implements ReadingRepository {
     const limit = Math.min(2000, Math.max(1, query.limit ?? 200));
     values.push(limit);
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm FROM telemetry_readings ${where}
+      `SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm, quality_flags FROM telemetry_readings ${where}
        ORDER BY recorded_at DESC LIMIT $${values.length}`,
       ...values,
     );
@@ -162,7 +175,24 @@ export class SqlReadingRepository implements ReadingRepository {
 
   async historySeries(query: HistoryQuery): Promise<ReadingPoint[]> {
     const rows = await this.history({ ...query, limit: query.limit ?? 200 });
-    return rows.reverse().map((row) => ({ recordedAt: row.recordedAt, value: row.value }));
+    // 曲线默认剔除可疑读数，includeSuspicious=true 时回查全量
+    return rows
+      .filter((row) => query.includeSuspicious || !(row.qualityFlags && row.qualityFlags.length > 0))
+      .reverse()
+      .map((row) => ({ recordedAt: row.recordedAt, value: row.value }));
+  }
+
+  async recentValues(deviceId: string, metric: string, depthCm: number | undefined, limit: number): Promise<number[]> {
+    const rows = await this.client.$queryRawUnsafe<Array<{ value: unknown }>>(
+      `SELECT value FROM telemetry_readings
+       WHERE device_id = $1 AND metric = $2 AND depth_cm IS NOT DISTINCT FROM $3
+       ORDER BY recorded_at DESC LIMIT $4`,
+      deviceId,
+      metric,
+      depthCm ?? null,
+      Math.min(50, Math.max(1, limit)),
+    );
+    return rows.map((row) => Number(row.value));
   }
 
   async count(): Promise<number> {
@@ -227,7 +257,9 @@ export class InMemoryReadingRepository implements ReadingRepository {
   }
 
   async latest(deviceId?: string): Promise<Reading[]> {
-    const rows = deviceId ? this.rows.filter((row) => row.deviceId === deviceId) : this.rows;
+    // 与 SQL 同口径：可疑读数不参与汇总
+    const clean = this.rows.filter((row) => !(row.qualityFlags && row.qualityFlags.length > 0));
+    const rows = deviceId ? clean.filter((row) => row.deviceId === deviceId) : clean;
     const byKey = new Map<string, Reading>();
     for (const row of [...rows].sort((a, b) => a.recordedAt.localeCompare(b.recordedAt))) byKey.set(`${row.deviceId}::${row.metric}::${row.depthCm ?? ""}`, row);
     // 与 SQL 的 ORDER BY device_id, metric 同序，否则两套模式返回的列表顺序不同
@@ -252,7 +284,19 @@ export class InMemoryReadingRepository implements ReadingRepository {
 
   async historySeries(query: HistoryQuery): Promise<ReadingPoint[]> {
     const rows = await this.history({ ...query, limit: query.limit ?? 200 });
-    return rows.reverse().map((row) => ({ recordedAt: row.recordedAt, value: row.value }));
+    // 曲线默认剔除可疑读数，includeSuspicious=true 时回查全量
+    return rows
+      .filter((row) => query.includeSuspicious || !(row.qualityFlags && row.qualityFlags.length > 0))
+      .reverse()
+      .map((row) => ({ recordedAt: row.recordedAt, value: row.value }));
+  }
+
+  async recentValues(deviceId: string, metric: string, depthCm: number | undefined, limit: number): Promise<number[]> {
+    return this.rows
+      .filter((row) => row.deviceId === deviceId && row.metric === metric && row.depthCm === depthCm)
+      .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
+      .slice(0, Math.min(50, Math.max(1, limit)))
+      .map((row) => row.value);
   }
 
   async count(): Promise<number> {
