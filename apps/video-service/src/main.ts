@@ -5,6 +5,8 @@ import { InMemoryAiEventRepository, SqlAiEventRepository } from "./ai-event.repo
 import type { AiEventRepository } from "./ai-event.repository.js";
 import { InMemoryPtzRepository, SqlPtzRepository } from "./ptz.repository.js";
 import type { PtzRepository } from "./ptz.repository.js";
+import { InMemoryRecordingArchiveRepository, SqlRecordingArchiveRepository } from "./recording-archive.repository.js";
+import type { RecordingArchiveRepository } from "./recording-archive.repository.js";
 import { UnconfiguredPtzChannel, WebhookPtzChannel } from "./ptz-channel.js";
 import { AiForwardRelay } from "./ai-relay.js";
 
@@ -20,9 +22,10 @@ async function bootstrap(): Promise<void> {
   await client?.$connect();
   const aiEvents: AiEventRepository = client ? new SqlAiEventRepository(client) : new InMemoryAiEventRepository();
   const ptz: PtzRepository = client ? new SqlPtzRepository(client) : new InMemoryPtzRepository();
+  const archives: RecordingArchiveRepository = client ? new SqlRecordingArchiveRepository(client) : new InMemoryRecordingArchiveRepository();
   const ptzUrl = (process.env.PTZ_WEBHOOK_URL ?? "").trim();
   const channel = ptzUrl ? new WebhookPtzChannel(ptzUrl) : new UnconfiguredPtzChannel();
-  const server = createVideoHttpServer({ aiEvents, ptz, channel });
+  const server = createVideoHttpServer({ aiEvents, ptz, archives, channel });
   const relay = new AiForwardRelay(aiEvents, {
     baseUrl: process.env.TELEMETRY_BASE_URL ?? "http://127.0.0.1:3004",
     deviceToken: process.env.DEVICE_CALLBACK_TOKEN,

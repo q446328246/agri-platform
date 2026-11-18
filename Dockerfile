@@ -24,6 +24,8 @@ RUN pnpm install --frozen-lockfile
 ARG VITE_TIANDITU_KEY=""
 RUN pnpm run build
 RUN if [ -z "$VITE_TIANDITU_KEY" ]; then unset VITE_TIANDITU_KEY; fi; pnpm --filter @agri/web build
+# 移动端 H5（A17）：独立工程，构建产物挂 /m/ 子路径
+RUN pnpm --filter @agri/mobile build
 
 # 运行镜像按生产依赖重装：不把 tsc/vitest 等开发依赖带进线上
 RUN find . -name node_modules -type d -prune -exec rm -rf {} +
@@ -72,3 +74,4 @@ RUN apk add --no-cache openssl \
 
 COPY infra/edge/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/apps/web/dist /usr/share/nginx/html
+COPY --from=build /app/apps/mobile/dist /usr/share/nginx/html/m

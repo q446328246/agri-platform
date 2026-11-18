@@ -438,6 +438,31 @@ export interface Recording {
   playbackUrl: string
 }
 
+export type ArchiveSource = 'AI_EVENT' | 'ALERT' | 'MANUAL'
+export type ArchiveStatus = 'PENDING' | 'ARCHIVED' | 'FAILED'
+
+/** 录像留档档案（A13）：告警时刻前后窗口的片段登记；切片本体依赖流媒体服务，PENDING 为未接入时的诚实状态 */
+export interface RecordingArchive {
+  id: string
+  cameraId: string
+  plotCode: string
+  source: ArchiveSource
+  eventId: string
+  eventType: string
+  eventAt: string
+  preSeconds: number
+  postSeconds: number
+  startedAt: string
+  endedAt: string
+  storageKey: string
+  playbackUrl: string
+  status: ArchiveStatus
+  message: string
+  note: string
+  createdAt: string
+  settledAt?: string
+}
+
 export type PtzAction = 'LEFT' | 'RIGHT' | 'UP' | 'DOWN' | 'ZOOM_IN' | 'ZOOM_OUT' | 'STOP'
 export type PtzStatus = 'QUEUED' | 'SENT' | 'FAILED'
 

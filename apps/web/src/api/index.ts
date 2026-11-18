@@ -9,7 +9,7 @@ import type {
   FarmTask, FarmTaskQuery,
   DashboardStats,
   PageResult, LoginParams, LoginResult,
-  Camera, PlotStats, Recording, PtzAction, PtzCommand, VideoAiEvent, AiEventType,
+  Camera, PlotStats, Recording, RecordingArchive, ArchiveSource, ArchiveStatus, PtzAction, PtzCommand, VideoAiEvent, AiEventType,
   TelemetryHistoryPoint, TelemetryAlert,
   MessagePreference, MessageLevel,
   SystemUser, PlatformRole, PermissionGroup,
@@ -1142,6 +1142,12 @@ export const videoApi = {
   },
   getRecordings(params?: { page?: number; size?: number; cameraId?: string; plotCode?: string; from?: string; to?: string }): Promise<PageResult<Recording>> {
     return get<PageResult<Recording>>('/video/recordings', cleanParams(params))
+  },
+  getRecordingArchives(params?: { page?: number; size?: number; cameraId?: string; plotCode?: string; source?: ArchiveSource; status?: ArchiveStatus; from?: string; to?: string }): Promise<PageResult<RecordingArchive>> {
+    return get<PageResult<RecordingArchive>>('/video/recording-archives', cleanParams(params))
+  },
+  createRecordingArchive(data: { cameraId: string; eventAt: string; preSeconds?: number; postSeconds?: number; note?: string }): Promise<RecordingArchive> {
+    return post<RecordingArchive>('/video/recording-archives', data)
   },
   getAiEvents(params?: { page?: number; size?: number; plotCode?: string; forwarded?: boolean; eventType?: AiEventType }): Promise<PageResult<VideoAiEvent>> {
     return get<PageResult<VideoAiEvent>>('/video/ai-events', cleanParams(params))

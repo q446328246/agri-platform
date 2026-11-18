@@ -2,13 +2,15 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { ApiResponse, AiEventTypeValue, PageResult } from "@agri/contracts";
-import { authorizeRequest } from "@agri/shared";
+import { authorizeRequest, constantTimeEquals } from "@agri/shared";
 import { AI_EVENT_TYPES, forwardAiDetection, parseAiDetection } from "./ai-event.js";
 import type { AiDetection, ForwardResult } from "./ai-event.js";
 import { InMemoryAiEventRepository, toDetection } from "./ai-event.repository.js";
 import type { AiEventQuery, AiEventRecord, AiEventRepository } from "./ai-event.repository.js";
 import { InMemoryPtzRepository, PTZ_ACTIONS } from "./ptz.repository.js";
 import type { PtzAction, PtzCommand, PtzQuery, PtzRepository, PtzStatus } from "./ptz.repository.js";
+import { ARCHIVE_SOURCES, ARCHIVE_STATUSES, InMemoryRecordingArchiveRepository, archiveWindow } from "./recording-archive.repository.js";
+import type { ArchiveQuery, ArchiveSource, ArchiveStatus, RecordingArchiveRepository } from "./recording-archive.repository.js";
 import { UnconfiguredPtzChannel } from "./ptz-channel.js";
 import type { PtzChannel } from "./ptz-channel.js";
 interface Camera { id: string; name: string; plotCode?: string; status: "ONLINE" | "OFFLINE"; streamUrl: string }
@@ -85,15 +87,42 @@ function ptzQuery(query: URLSearchParams): PtzQuery {
   if (param(query, "cameraId") !== "") result.cameraId = param(query, "cameraId");
   return result;
 }
+function archiveQuery(query: URLSearchParams): ArchiveQuery {
+  const result: ArchiveQuery = { page: integer(query.get("page"), 1, 1_000_000), size: integer(query.get("size"), 20, 200) };
+  if (param(query, "cameraId") !== "") result.cameraId = param(query, "cameraId");
+  if (param(query, "plotCode") !== "") result.plotCode = param(query, "plotCode");
+  const source = param(query, "source");
+  if (source !== "") {
+    if (!ARCHIVE_SOURCES.includes(source as ArchiveSource)) throw new Error(`source需为 ${ARCHIVE_SOURCES.join("/")}`);
+    result.source = source as ArchiveSource;
+  }
+  const status = param(query, "status");
+  if (status !== "") {
+    if (!ARCHIVE_STATUSES.includes(status as ArchiveStatus)) throw new Error(`status需为 ${ARCHIVE_STATUSES.join("/")}`);
+    result.status = status as ArchiveStatus;
+  }
+  if (param(query, "from") !== "") result.from = param(query, "from");
+  if (param(query, "to") !== "") result.to = endOfDay(param(query, "to"));
+  return result;
+}
+/** 留档前后窗口（秒）：环境变量可配，缺省前 30 后 60，与迁移 057 的 CHECK 同界 */
+function secondsEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 600 ? parsed : fallback;
+}
+/** 内部接口凭证：流媒体服务切片回填使用，不经公网暴露 */
+function internalToken(): string { return process.env.INTERNAL_TOKEN ?? "agri-internal"; }
 export interface VideoHttpOptions {
   aiEvents?: AiEventRepository;
   ptz?: PtzRepository;
+  archives?: RecordingArchiveRepository;
   channel?: PtzChannel;
   forward?: (detection: AiDetection, options: { baseUrl: string; timeoutMs?: number; deviceToken?: string | undefined }) => Promise<ForwardResult>;
 }
 export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
   const aiEvents = options.aiEvents ?? new InMemoryAiEventRepository();
   const ptz = options.ptz ?? new InMemoryPtzRepository();
+  const archives = options.archives ?? new InMemoryRecordingArchiveRepository();
   const channel = options.channel ?? new UnconfiguredPtzChannel();
   const forward = options.forward ?? forwardAiDetection;
   /** 云台投递后按通道真实结果落状态：未接入硬件通道时留存 QUEUED，不假装下发成功 */
@@ -106,7 +135,7 @@ export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
   return createServer(async (req, res) => { const traceId = trace(req); const url = new URL(req.url ?? "/", "http://localhost"); try {
   if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "video" }, traceId); return; }
   // 识别上报由算法侧凭 DEVICE_CALLBACK_TOKEN 回调；查询与人工重试仍需设备权限
-  const denied = authorizeRequest(req, { read: "device:read", write: "device:control", ...(req.method === "POST" ? { callbackPaths: ["/api/v1/video/ai-events"] } : {}) });
+  const denied = authorizeRequest(req, { read: "device:read", write: "device:control", publicPaths: ["/api/v1/internal/video/recording-archives"], ...(req.method === "POST" ? { callbackPaths: ["/api/v1/video/ai-events"] } : {}) });
   if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
   const tenantId = req.headers["x-tenant-id"]?.toString() || "tenant-demo";
   const forwardOptions = { baseUrl: process.env.TELEMETRY_BASE_URL ?? "http://127.0.0.1:3004", deviceToken: process.env.DEVICE_CALLBACK_TOKEN };
@@ -129,10 +158,56 @@ export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
   }
   if (cameraId && !cameraMatch?.[2] && req.method === "GET") { send(res, 200, cameras.find((camera) => camera.id === cameraId) ?? null, traceId); return; }
   if (req.method === "GET" && url.pathname === "/api/v1/video/recordings") { send(res, 200, page(filterRecordings(url.searchParams), url.searchParams), traceId); return; }
+  // 录像留档（A13）：告警时刻前后窗口的片段档案；切片本体依赖 B 类流媒体，未接入时保持 PENDING
+  if (req.method === "GET" && url.pathname === "/api/v1/video/recording-archives") { send(res, 200, await archives.page(tenantId, archiveQuery(url.searchParams)), traceId); return; }
+  if (req.method === "POST" && url.pathname === "/api/v1/video/recording-archives") {
+    const body = await json(req);
+    const cameraId = String(body.cameraId ?? "").trim();
+    const camera = cameras.find((item) => item.id === cameraId);
+    if (!camera) { send(res, 404, null, traceId, "摄像头不存在"); return; }
+    const eventAt = String(body.eventAt ?? "").trim();
+    if (!eventAt || Number.isNaN(Date.parse(eventAt))) throw new Error("事件时刻 eventAt 需为可解析的时间字符串");
+    const windowOf = (value: unknown, fallback: number, label: string): number => {
+      if (value === undefined || value === null || value === "") return fallback;
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 600) throw new Error(`${label}需为 0 到 600 的整数秒`);
+      return parsed;
+    };
+    const preSeconds = windowOf(body.preSeconds, 30, "前置窗口 preSeconds");
+    const postSeconds = windowOf(body.postSeconds, 60, "后置窗口 postSeconds");
+    const note = String(body.note ?? "").trim();
+    if (note.length > 500) throw new Error("备注不能超过 500 字");
+    const window = archiveWindow(eventAt, preSeconds, postSeconds);
+    const archive = await archives.create({ id: randomUUID(), tenantId, cameraId, plotCode: camera.plotCode ?? "", source: "MANUAL", eventId: "", eventType: "", eventAt: new Date(eventAt).toISOString(), preSeconds, postSeconds, startedAt: window.startedAt, endedAt: window.endedAt, storageKey: "", playbackUrl: "", status: "PENDING", message: "流媒体服务未接入，片段待生成", note, createdAt: new Date().toISOString() });
+    send(res, 201, archive, traceId); return;
+  }
+  // 流媒体侧切片完成后经内部接口回填存储键/回放地址；只认 INTERNAL_TOKEN，不走用户身份
+  const archiveSettleMatch = url.pathname.match(/^\/api\/v1\/internal\/video\/recording-archives\/([^/]+)\/settle$/);
+  if (archiveSettleMatch && req.method === "POST") {
+    if (!constantTimeEquals(req.headers["x-internal-token"]?.toString() ?? "", internalToken())) { send(res, 401, null, traceId, "内部接口凭证无效"); return; }
+    const body = await json(req);
+    const status = String(body.status ?? "").trim().toUpperCase();
+    if (status !== "ARCHIVED" && status !== "FAILED") throw new Error("回填状态需为 ARCHIVED/FAILED");
+    const storageKey = String(body.storageKey ?? "").trim();
+    const playbackUrl = String(body.playbackUrl ?? "").trim();
+    if (status === "ARCHIVED" && storageKey === "" && playbackUrl === "") throw new Error("留档成功需回填存储键或回放地址");
+    const archive = await archives.find(tenantId, decodeURIComponent(archiveSettleMatch[1]!));
+    if (!archive) { send(res, 404, null, traceId, "留档记录不存在"); return; }
+    const updated = await archives.settle(tenantId, archive.id, { status: status as ArchiveStatus, storageKey, playbackUrl, message: String(body.message ?? "").trim() });
+    send(res, 200, updated, traceId); return;
+  }
   // 视频 AI 联动：先落库再转发，转发失败保留记录并由中继补投，重启不丢识别结果
   if (req.method === "POST" && url.pathname === "/api/v1/video/ai-events") {
     const detection = parseAiDetection(await json(req));
     let record: AiEventRecord = await aiEvents.create({ id: randomUUID(), tenantId, cameraId: detection.cameraId, plotCode: detection.plotCode, eventType: detection.eventType ?? "PEST", pestType: detection.pestType, level: detection.level, confidence: detection.confidence, ...(detection.imageFileId ? { imageFileId: detection.imageFileId } : {}), detectedAt: detection.detectedAt, receivedAt: new Date().toISOString(), forwarded: false, forwardStatus: 0, forwardMessage: "", retryCount: 0 });
+    // 告警时刻前后录像自动留档（A13）：登记事件时刻 ± 窗口的片段档案；
+    // 切片本体依赖 B 类流媒体，留档失败不阻断识别主链路，只记日志
+    try {
+      const preSeconds = secondsEnv("VIDEO_ARCHIVE_PRE_SECONDS", 30);
+      const postSeconds = secondsEnv("VIDEO_ARCHIVE_POST_SECONDS", 60);
+      const window = archiveWindow(detection.detectedAt, preSeconds, postSeconds);
+      await archives.create({ id: randomUUID(), tenantId, cameraId: detection.cameraId, plotCode: detection.plotCode, source: "AI_EVENT", eventId: record.id, eventType: detection.eventType ?? "PEST", eventAt: detection.detectedAt, preSeconds, postSeconds, startedAt: window.startedAt, endedAt: window.endedAt, storageKey: "", playbackUrl: "", status: "PENDING", message: "流媒体服务未接入，片段待生成", note: "", createdAt: new Date().toISOString() });
+    } catch (archiveError) { console.warn("录像留档登记失败（不阻断识别事件）:", archiveError instanceof Error ? archiveError.message : archiveError); }
     const result = await forward(detection, forwardOptions);
     record = (result.forwarded ? await aiEvents.markForwarded(tenantId, record.id, new Date().toISOString(), result.status, result.message) : await aiEvents.markFailed(tenantId, record.id, result.status, result.message)) ?? record;
     send(res, record.forwarded ? 201 : 202, record, traceId, result.message); return;
