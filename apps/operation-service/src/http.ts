@@ -7,6 +7,9 @@ import { parseNavigationRequest, planNavigation } from "./navigation.js";
 import type { NavPlan } from "./navigation.js";
 import { CoverageError, parseCoverageRequest, planCoverage } from "./coverage.js";
 import type { CoveragePlan } from "./coverage.js";
+import { parseVariableRateRequest, planVariableRate } from "./variable-rate.js";
+import { InMemoryVariableRatePlanRepository } from "./variable-rate.repository.js";
+import type { VariableRatePlanRepository } from "./variable-rate.repository.js";
 
 import { canTransition, InMemoryTaskRepository, TASK_ARCHIVE_FILTERS, TASK_PRIORITIES, TASK_STATUSES, TASK_TYPES } from "./task.repository.js";
 import type { Task, TaskArchiveFilter, TaskPriority, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType } from "./task.repository.js";
@@ -94,8 +97,9 @@ function resultOf(value: unknown): TaskResult {
   if (typeof result.finishedAreaMu !== "number" || !Number.isFinite(result.finishedAreaMu) || result.finishedAreaMu < 0) throw new InputError("实际作业面积必须为非负数");
   return { outcome: result.outcome as TaskResult["outcome"], finishedAreaMu: result.finishedAreaMu, notes: text(result.notes, "作业说明", 2000) };
 }
-export function createOperationHttpServer(options: { tasks?: TaskRepository } = {}): Server {
+export function createOperationHttpServer(options: { tasks?: TaskRepository; variablePlans?: VariableRatePlanRepository } = {}): Server {
   const tasks = options.tasks ?? new InMemoryTaskRepository(demoTasks.map((task) => ({ ...task, version: 1 })));
+  const variablePlans = options.variablePlans ?? new InMemoryVariableRatePlanRepository();
   const navPlans = new Map<string, NavPlan[]>();
   const coveragePlans = new Map<string, CoveragePlan[]>();
   return createServer(async (req, res) => {
@@ -192,6 +196,15 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository } = 
         send(res, 200, plan, traceId); return;
       }
       if (req.method === "GET" && url.pathname === "/api/v1/operations/coverage-plans") { send(res, 200, coveragePlans.get(tenantId) ?? [], traceId); return; }
+      // 变量播种/施肥（A15）：覆盖路径 + A14 长势网格逐带定速率，方案落库留痕供生产档案复盘
+      if (req.method === "POST" && url.pathname === "/api/v1/operations/variable-rate-plan") {
+        const parsed = parseVariableRateRequest(await json(req));
+        if (!parsed.ok || !parsed.input) throw new InputError(parsed.errors.join("；"));
+        const plan = planVariableRate(parsed.input);
+        await variablePlans.save({ id: plan.planId, tenantId, plotCode: plan.plotCode, operationType: plan.operationType, metric: plan.metric, plan, createdAt: new Date().toISOString() });
+        send(res, 200, plan, traceId); return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/v1/operations/variable-rate-plans") { send(res, 200, await variablePlans.list(tenantId), traceId); return; }
       send(res, 404, null, traceId, "接口不存在");
     } catch (error) {
       const invalid = error instanceof InputError || error instanceof CoverageError || error instanceof SyntaxError || error instanceof URIError;

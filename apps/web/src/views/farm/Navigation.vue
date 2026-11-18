@@ -47,6 +47,31 @@
           <el-form-item>
             <el-checkbox v-model="withStart">从起点计入场里程</el-checkbox>
           </el-form-item>
+          <el-form-item>
+            <el-checkbox v-model="variableRate">变量速率（按长势分区定播种/施肥量）</el-checkbox>
+          </el-form-item>
+          <template v-if="variableRate">
+            <el-form-item label="作业类型">
+              <el-select v-model="variableOperation" size="small" style="width: 120px">
+                <el-option label="变量施肥" value="FERTILIZATION" />
+                <el-option label="变量播种" value="SEEDING" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="长势指标">
+              <el-select v-model="rateMetric" size="small" style="width: 120px">
+                <el-option v-for="m in rateMetricOptions" :key="m.value" :label="m.label" :value="m.value" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="基础/最低/最高速率">
+              <el-input-number v-model="baseRateKgMu" :min="0" :max="200" :step="1" :precision="1" size="small" />
+              <el-input-number v-model="minRateKgMu" :min="0" :max="200" :step="1" :precision="1" size="small" />
+              <el-input-number v-model="maxRateKgMu" :min="0" :max="200" :step="1" :precision="1" size="small" />
+              <span class="nav-unit">公斤/亩</span>
+            </el-form-item>
+            <el-form-item>
+              <el-checkbox v-model="invertRate">低值高率（弱苗补肥口径）</el-checkbox>
+            </el-form-item>
+          </template>
         </template>
 
         <el-form-item>
@@ -54,7 +79,7 @@
             {{ picking ? '在地图上点选起点…' : '地图拾取起点' }}
           </el-button>
           <el-button size="small" type="primary" :loading="planning" :disabled="!canPlan" @click="plan">
-            {{ mode === 'transfer' ? '规划路线' : '规划作业带' }}
+            {{ mode === 'transfer' ? '规划路线' : variableRate ? '规划变量作业' : '规划作业带' }}
           </el-button>
           <el-button size="small" :disabled="!planResult && !coverageResult" @click="clearPlan">清除方案</el-button>
         </el-form-item>
@@ -139,6 +164,12 @@
               <el-descriptions-item label="预计耗时">{{ coverageResult.durationMin.toFixed(0) }} 分钟</el-descriptions-item>
               <el-descriptions-item label="覆盖倍数">{{ coverageResult.coverageRatio }}</el-descriptions-item>
             </el-descriptions>
+            <el-descriptions v-if="variableResult" :column="4" size="small" border class="nav-desc">
+              <el-descriptions-item label="作业类型">{{ variableResult.operationType === 'SEEDING' ? '变量播种' : '变量施肥' }}</el-descriptions-item>
+              <el-descriptions-item label="总用量">{{ variableResult.totalAmountKg.toFixed(1) }} 公斤</el-descriptions-item>
+              <el-descriptions-item label="加权平均速率">{{ variableResult.avgRateKgMu }} 公斤/亩</el-descriptions-item>
+              <el-descriptions-item label="速率区间">{{ variableResult.minRateKgMu }}~{{ variableResult.maxRateKgMu }} 公斤/亩</el-descriptions-item>
+            </el-descriptions>
             <el-table :data="coverageResult.lanes" size="small" border max-height="196">
               <el-table-column prop="index" label="顺序" width="60" align="center" />
               <el-table-column label="线段" width="80" align="center">
@@ -153,6 +184,12 @@
               <el-table-column label="端点">
                 <template #default="{ row }">{{ pointText(row.coordinates[0]) }} → {{ pointText(row.coordinates[1]) }}</template>
               </el-table-column>
+              <el-table-column v-if="variableResult" label="速率(公斤/亩)" width="110" align="right">
+                <template #default="{ row }">{{ variableLaneOf(row.index)?.rateKgMu ?? '—' }}</template>
+              </el-table-column>
+              <el-table-column v-if="variableResult" label="用量(公斤)" width="100" align="right">
+                <template #default="{ row }">{{ variableLaneOf(row.index)?.amountKg ?? '—' }}</template>
+              </el-table-column>
             </el-table>
           </template>
         </template>
@@ -166,8 +203,8 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 
 import { ElMessage } from 'element-plus'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { operationApi, plotApi } from '@/api'
-import type { CoveragePlan, GeoLineString, GeoPolygon, NavPlan } from '@/api'
+import { operationApi, plotApi, telemetryApi } from '@/api'
+import type { CoveragePlan, CoverageRequest, GeoLineString, GeoPolygon, NavPlan, VariableRatePlan } from '@/api'
 import type { Plot } from '@/types'
 import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
 import { baseMapCrs, baseMapMaxZoom, createBaseLayer, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
@@ -196,6 +233,22 @@ const workSpeedKmh = ref(6)
 const turnSpeedKmh = ref(8)
 const withStart = ref(false)
 
+/** 变量速率（A15）：先拉 A14 长势网格，再逐作业带映射播种/施肥速率；空网格由服务端降级为均一基础速率 */
+const variableRate = ref(false)
+const variableOperation = ref<'SEEDING' | 'FERTILIZATION'>('FERTILIZATION')
+const rateMetricOptions = [
+  { label: '覆盖度', value: 'canopyCoverage' },
+  { label: '株高', value: 'plantHeight' },
+  { label: '叶色', value: 'leafColor' },
+  { label: '均匀度', value: 'uniformity' },
+]
+const rateMetric = ref('canopyCoverage')
+const baseRateKgMu = ref(15)
+const minRateKgMu = ref(10)
+const maxRateKgMu = ref(25)
+const invertRate = ref(true)
+const variableResult = ref<VariableRatePlan | null>(null)
+
 const allPlots = ref<Plot[]>([])
 const candidates = ref<Plot[]>([])
 const selected = ref<Plot[]>([])
@@ -218,13 +271,21 @@ let roadLayer: any = null
 let routeLayer: any = null
 
 const canPlan = computed(() => (mode.value === 'transfer' ? selected.value.length > 0 : !!targetPlot.value))
-const warnings = computed(() => coverageResult.value?.warnings ?? planResult.value?.warnings ?? [])
+const warnings = computed(() => variableResult.value?.warnings ?? coverageResult.value?.warnings ?? planResult.value?.warnings ?? [])
 const summary = computed(() => {
   if (planResult.value) return `总里程 ${planResult.value.distanceM.toFixed(0)} 米 · 约 ${planResult.value.durationMin.toFixed(0)} 分钟`
   const plan = coverageResult.value
-  if (plan) return `${plan.laneCount} 条作业带 · 总里程 ${plan.totalDistanceM.toFixed(0)} 米 · 约 ${plan.durationMin.toFixed(0)} 分钟`
+  if (plan) {
+    const base = `${plan.laneCount} 条作业带 · 总里程 ${plan.totalDistanceM.toFixed(0)} 米 · 约 ${plan.durationMin.toFixed(0)} 分钟`
+    return variableResult.value ? `${base} · 总用量 ${variableResult.value.totalAmountKg.toFixed(1)} 公斤` : base
+  }
   return ''
 })
+
+/** 逐带速率表与作业带按 index 对齐 */
+function variableLaneOf(index: number) {
+  return variableResult.value?.lanes.find((lane) => lane.index === index)
+}
 
 function label(html: string, background = '#00d4ff'): any {
   return L.divIcon({ className: 'nav-label', html: `<span style="background:${background}">${html}</span>`, iconSize: [0, 0] })
@@ -378,6 +439,7 @@ function onTargetChange(row: Plot | null) {
 function onModeChange() {
   planResult.value = null
   coverageResult.value = null
+  variableResult.value = null
   selected.value = []
   targetPlot.value = null
   tableRef.value?.clearSelection?.()
@@ -414,7 +476,7 @@ async function planCoverageNow() {
     ElMessage.warning('重叠必须小于幅宽，否则作业带没有间距')
     return
   }
-  coverageResult.value = await operationApi.planCoverage({
+  const payload: CoverageRequest = {
     plotCode: plot.parcelCode,
     boundary,
     implementWidthM: implementWidthM.value,
@@ -425,7 +487,30 @@ async function planCoverageNow() {
     ...(Number(plot.areaMu) > 0 ? { areaMu: Number(plot.areaMu) } : {}),
     ...(autoHeading.value ? {} : { headingDeg: headingDeg.value }),
     ...(withStart.value ? { start: { lng: Number(start.lng), lat: Number(start.lat) } } : {}),
-  })
+  }
+  if (variableRate.value) {
+    if (minRateKgMu.value > maxRateKgMu.value) {
+      ElMessage.warning('最低速率不能大于最高速率')
+      return
+    }
+    // 先拉 A14 长势网格（边界由服务端读地块库），再转逐带速率；空网格服务端降级为均一基础速率
+    const grid = await telemetryApi.getGrowthGrid({ plotCode: plot.parcelCode, metric: rateMetric.value, cellSizeM: 10 })
+    const plan = await operationApi.planVariableRate({
+      ...payload,
+      operationType: variableOperation.value,
+      metric: rateMetric.value,
+      baseRateKgMu: baseRateKgMu.value,
+      minRateKgMu: minRateKgMu.value,
+      maxRateKgMu: maxRateKgMu.value,
+      invert: invertRate.value,
+      rateGrid: { cellSizeM: grid.cellSizeM, minValue: grid.minValue, maxValue: grid.maxValue, cells: grid.cells.map((cell) => ({ center: cell.center, value: cell.value })) },
+    })
+    variableResult.value = plan
+    coverageResult.value = plan.coverage
+    return
+  }
+  variableResult.value = null
+  coverageResult.value = await operationApi.planCoverage(payload)
 }
 
 async function plan() {
@@ -444,6 +529,7 @@ async function plan() {
 function clearPlan() {
   planResult.value = null
   coverageResult.value = null
+  variableResult.value = null
   stopPoints.value = []
   renderPlan()
 }

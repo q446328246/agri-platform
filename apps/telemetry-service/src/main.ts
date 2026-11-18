@@ -49,6 +49,7 @@ async function bootstrap(): Promise<void> {
         qualityLogs: new SqlQualityLogRepository(client),
         outbox,
         publisher,
+        db: client,
         tenantId,
         publishEvents: process.env.TELEMETRY_PUBLISH_EVENTS === "true",
       };

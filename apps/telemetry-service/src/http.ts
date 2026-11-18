@@ -25,6 +25,10 @@ import { InMemoryQualityLogRepository } from "./quality-log.repository.js";
 import type { QualityLogRepository } from "./quality-log.repository.js";
 import { breaches, DEFAULT_TELEMETRY_RULES, InMemoryRuleRepository, RULE_SEVERITY } from "./rule.repository.js";
 import type { RuleLevel, RuleRepository, TelemetryRule } from "./rule.repository.js";
+import { GrowthGridError, planGrowthGrid } from "./growth-grid.js";
+import type { GrowthSample } from "./growth-grid.js";
+import type { PrismaClientLike } from "@agri/db";
+import type { GeoPolygon } from "@agri/contracts";
 
 /** 阈值规则由 telemetry_rules 表维护，缺省回落到默认规则集 */
 function defaultRules(): RuleRepository {
@@ -41,6 +45,8 @@ export interface TelemetryDependencies {
   qualityLogs?: QualityLogRepository;
   outbox?: OutboxStore;
   publisher?: EventPublisher;
+  /** SQL 客户端：长势网格端点跨读设备安装坐标与地块边界（同库只读）；内存模式缺省降级 */
+  db?: PrismaClientLike;
   tenantId?: string;
   /** 遥测越限/虫情事件可选发布；缺省不发布，保持仅落库 */
   publishEvents?: boolean;
@@ -316,6 +322,7 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
   const growth = dependencies?.growth ?? new InMemoryGrowthStageRepository();
   const disasters = dependencies?.disasters ?? new InMemoryDisasterRepository();
   const qualityLogs = dependencies?.qualityLogs ?? new InMemoryQualityLogRepository();
+  const db = dependencies?.db;
   const tenantId = dependencies?.tenantId ?? "tenant-demo";
   const publisher = dependencies?.publisher ?? new InMemoryEventPublisher();
   setDefaultPublisher(publisher);
@@ -363,6 +370,68 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
       if (req.method === "GET" && url.pathname === "/api/v1/telemetry/history/series") {
         const points: ReadingPoint[] = await readings.historySeries(historyQuery(url.searchParams));
         send(res, 200, points, traceId);
+        return;
+      }
+
+      // 地块内网格长势分布（A14）：设备最新读数 + 安装坐标做 IDW 插值，附生育期档案供时间轴回看；
+      // samples 参数是 B 类多光谱反演结果的覆盖口，给了就不走设备读数
+      if (req.method === "GET" && url.pathname === "/api/v1/telemetry/growth-grid") {
+        const plotCode = trimmed(url.searchParams, "plotCode");
+        const metric = trimmed(url.searchParams, "metric");
+        if (!plotCode || !metric) { send(res, 400, null, traceId, "plotCode 与 metric 必填"); return; }
+        const cellRaw = trimmed(url.searchParams, "cellSizeM");
+        const cellSizeM = cellRaw ? Number(cellRaw) : undefined;
+        if (cellSizeM !== undefined && !Number.isFinite(cellSizeM)) { send(res, 400, null, traceId, "cellSizeM 需为数字"); return; }
+
+        // 边界：优先取调用方传入（前端已有地块几何），其次同库读 plot_records；都没有才报错
+        let boundary: GeoPolygon | null = null;
+        const boundaryRaw = trimmed(url.searchParams, "boundary");
+        if (boundaryRaw) {
+          try {
+            const parsed = JSON.parse(boundaryRaw) as GeoPolygon;
+            if (parsed?.type === "Polygon" && Array.isArray(parsed.coordinates)) boundary = parsed;
+          } catch { /* 落到下方统一报错 */ }
+          if (!boundary) { send(res, 400, null, traceId, "boundary 需为合法 GeoJSON Polygon"); return; }
+        } else if (db) {
+          const rows = await db.$queryRawUnsafe<Record<string, unknown>[]>(
+            `SELECT geom FROM plot_records WHERE parcel_code = $1 AND deleted_at IS NULL LIMIT 1`, plotCode);
+          if (rows.length === 0) { send(res, 404, null, traceId, "地块不存在"); return; }
+          const geom = rows[0]!.geom as GeoPolygon;
+          if (geom?.type === "Polygon" && Array.isArray(geom.coordinates)) boundary = geom;
+          if (!boundary) { send(res, 400, null, traceId, "地块未登记边界几何，无法铺网格"); return; }
+        } else {
+          send(res, 400, null, traceId, "未装配数据库时需随请求传 boundary（GeoJSON Polygon）"); return;
+        }
+
+        // 样本：B 类反演覆盖口优先；否则拿该地块该指标的最新干净读数配设备安装坐标
+        let samples: GrowthSample[] = [];
+        const samplesRaw = trimmed(url.searchParams, "samples");
+        if (samplesRaw) {
+          try {
+            const parsed: unknown = JSON.parse(samplesRaw);
+            if (!Array.isArray(parsed)) throw new Error("not array");
+            samples = parsed.map((item) => {
+              const record = (item ?? {}) as Record<string, unknown>;
+              return { lng: Number(record.lng), lat: Number(record.lat), value: Number(record.value), ...(typeof record.deviceId === "string" ? { deviceId: record.deviceId } : {}) };
+            });
+          } catch { send(res, 400, null, traceId, "samples 需为 [{lng, lat, value}] JSON 数组"); return; }
+        } else {
+          const latest = (await readings.latest()).filter((row) => row.plotCode === plotCode && row.metric === metric);
+          if (db && latest.length > 0) {
+            const devices = await db.$queryRawUnsafe<Record<string, unknown>[]>(
+              `SELECT id, install_lng, install_lat FROM devices WHERE install_lng IS NOT NULL AND install_lat IS NOT NULL`);
+            const coordOf = new Map(devices.map((row) => [String(row.id), { lng: Number(row.install_lng), lat: Number(row.install_lat) }]));
+            samples = latest.flatMap((row) => {
+              const coord = coordOf.get(row.deviceId);
+              return coord ? [{ lng: coord.lng, lat: coord.lat, value: row.value, deviceId: row.deviceId }] : [];
+            });
+          }
+          // 内存模式或设备未登记坐标：samples 为空，planGrowthGrid 自行降级不编造数据
+        }
+
+        const grid = planGrowthGrid({ plotCode, metric, boundary, samples, ...(cellSizeM !== undefined ? { cellSizeM } : {}) });
+        const stages = await growth.list(plotCode);
+        send(res, 200, { ...grid, growthStages: stages }, traceId);
         return;
       }
 

@@ -534,6 +534,16 @@ export const telemetryApi = {
   getGrowthStages(plotCode?: string): Promise<GrowthStage[]> {
     return get<GrowthStage[]>('/telemetry/growth-stages', cleanParams(plotCode ? { plotCode } : undefined))
   },
+  /** 地块内网格长势分布（A14）：设备最新读数 + 安装坐标 IDW 插值；samples 为 B 类反演结果覆盖口 */
+  getGrowthGrid(params: { plotCode: string; metric: string; cellSizeM?: number; boundary?: GeoPolygon; samples?: Array<{ lng: number; lat: number; value: number; deviceId?: string }> }): Promise<GrowthGrid> {
+    return get<GrowthGrid>('/telemetry/growth-grid', cleanParams({
+      plotCode: params.plotCode,
+      metric: params.metric,
+      cellSizeM: params.cellSizeM,
+      boundary: params.boundary ? JSON.stringify(params.boundary) : undefined,
+      samples: params.samples ? JSON.stringify(params.samples) : undefined,
+    }))
+  },
   saveGrowthStage(data: GrowthStageInput): Promise<GrowthStage> {
     return post<GrowthStage>('/telemetry/growth-stages', data)
   },
@@ -681,6 +691,27 @@ export interface GrowthStageInput {
   note?: string
 }
 
+/** 地块内网格长势分布（A14）：cells 为空即无数据降级，前端显示等待上报而不是假长势 */
+export interface GrowthGridCell {
+  center: number[]
+  corners: number[][]
+  value: number
+}
+
+export interface GrowthGrid {
+  plotCode: string
+  metric: string
+  cellSizeM: number
+  rows: number
+  cols: number
+  cells: GrowthGridCell[]
+  samples: Array<{ lng: number; lat: number; value: number; deviceId?: string }>
+  minValue: number | null
+  maxValue: number | null
+  warnings: string[]
+  growthStages: GrowthStage[]
+}
+
 /** 灾种编码（开发方案 6.4）：干旱/洪涝/低温冻害/大风倒伏/冰雹/病虫害 */
 export type DisasterType = 'drought' | 'flood' | 'frost' | 'wind' | 'hail' | 'pest'
 /** 处置状态：已上报 / 已核查 / 已处置 / 已归档 */
@@ -814,6 +845,22 @@ export const operationApi = {
   /** 最近的覆盖方案（进程内保留最近 20 条） */
   getCoveragePlans(): Promise<CoveragePlan[]> {
     return get<CoveragePlan[]>('/operations/coverage-plans')
+  },
+  /** 变量播种/施肥方案（A15）：覆盖路径 + 长势网格逐带定速率，rateGrid 由 getGrowthGrid 结果转来 */
+  planVariableRate(data: CoverageRequest & {
+    operationType: 'SEEDING' | 'FERTILIZATION'
+    metric?: string
+    baseRateKgMu: number
+    minRateKgMu: number
+    maxRateKgMu: number
+    invert?: boolean
+    rateGrid?: { cellSizeM: number; minValue?: number | null; maxValue?: number | null; cells: Array<{ center: number[]; value: number }> }
+  }): Promise<VariableRatePlan> {
+    return post<VariableRatePlan>('/operations/variable-rate-plan', data)
+  },
+  /** 最近的变量方案留痕（SQL 模式落库，内存模式保留最近 20 条） */
+  getVariableRatePlans(): Promise<VariableRatePlanRecord[]> {
+    return get<VariableRatePlanRecord[]>('/operations/variable-rate-plans')
   }
 }
 
@@ -897,6 +944,47 @@ export interface CoveragePlan {
   coverageRatio: number
   path: GeoLineString
   warnings: string[]
+}
+
+/** 变量作业逐带速率（A15）：index 与覆盖方案作业带一一对应 */
+export interface VariableRateLane {
+  index: number
+  pass: number
+  lengthM: number
+  rateKgMu: number
+  areaMu: number
+  amountKg: number
+  avgGridValue: number | null
+}
+
+export interface VariableRatePlan {
+  planId: string
+  plotCode: string
+  operationType: 'SEEDING' | 'FERTILIZATION'
+  metric: string
+  invert: boolean
+  baseRateKgMu: number
+  minRateKgMu: number
+  maxRateKgMu: number
+  coverage: CoveragePlan
+  lanes: VariableRateLane[]
+  totalAmountKg: number
+  avgRateKgMu: number
+  workDistanceM: number
+  transferDistanceM: number
+  totalDistanceM: number
+  durationMin: number
+  warnings: string[]
+}
+
+export interface VariableRatePlanRecord {
+  id: string
+  tenantId: string
+  plotCode: string
+  operationType: 'SEEDING' | 'FERTILIZATION'
+  metric: string
+  plan: VariableRatePlan
+  createdAt: string
 }
 
 export const controlApi = {

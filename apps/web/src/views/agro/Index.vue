@@ -62,6 +62,31 @@
 
           <div class="growth-block">
             <div class="flex-between mb-16">
+              <h4>长势分布热力</h4>
+              <div class="history-controls">
+                <el-select v-model="gridMetric" style="width: 150px" @change="loadGrowthGrid">
+                  <el-option v-for="m in seedlingMetricOptions" :key="m.value" :label="m.label" :value="m.value" />
+                </el-select>
+                <el-input-number v-model="gridCellSizeM" :min="2" :max="100" :step="2" style="width: 130px" />
+                <span class="rule-hint">格边长（米）</span>
+                <el-button type="primary" :loading="gridLoading" :disabled="!growthPlotCode" @click="loadGrowthGrid">生成热力</el-button>
+              </div>
+            </div>
+            <el-alert v-for="(warning, index) in growthGrid?.warnings ?? []" :key="index" :title="warning" type="warning" :closable="false" class="grid-warning" />
+            <div v-show="hasGridCells">
+              <div ref="gridMapEl" class="grid-map"></div>
+              <div class="grid-legend">
+                <span>{{ growthGrid?.minValue ?? '—' }}</span>
+                <span class="grid-legend__bar"></span>
+                <span>{{ growthGrid?.maxValue ?? '—' }} {{ gridUnit }}</span>
+                <span class="rule-hint">{{ growthGrid?.cells.length ?? 0 }} 格 · {{ growthGrid?.samples.length ?? 0 }} 个样本 · IDW 插值 · 生育期：{{ gridStageText }}</span>
+              </div>
+            </div>
+            <el-empty v-if="!gridLoading && !hasGridCells" description="暂无网格长势数据：等待登记了安装坐标的田间设备上报读数，多光谱反演接入后自动覆盖" />
+          </div>
+
+          <div class="growth-block">
+            <div class="flex-between mb-16">
               <h4>生育期时间轴</h4>
               <span v-if="growthPlotCode" class="rule-hint">{{ growthPlotCode }}</span>
             </div>
@@ -491,8 +516,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -501,7 +528,8 @@ import { TooltipComponent, LegendComponent, GridComponent } from 'echarts/compon
 import { operationApi, plotApi, telemetryApi } from '@/api'
 import { useUserStore } from '@/stores'
 import { formatDateTime } from '@/utils'
-import type { PestEvent, TelemetryAlert, TelemetryHistoryPoint, TelemetryRule, TelemetryRuleInput, GrowthStage, GrowthStageInput, PestStats, PestTrendPoint, GovernanceStatus, DisasterRecord, DisasterStats, DisasterType, DisasterStatus, DisasterSeverity } from '@/api'
+import { baseMapCrs, baseMapMaxZoom, createBaseLayer, readStoredBaseMap } from '@/utils/basemap'
+import type { PestEvent, TelemetryAlert, TelemetryHistoryPoint, TelemetryRule, TelemetryRuleInput, GrowthStage, GrowthStageInput, GrowthGrid, PestStats, PestTrendPoint, GovernanceStatus, DisasterRecord, DisasterStats, DisasterType, DisasterStatus, DisasterSeverity } from '@/api'
 
 use([CanvasRenderer, LineChart, TooltipComponent, LegendComponent, GridComponent])
 
@@ -1058,10 +1086,11 @@ async function loadSoilHistory() {
   }
 }
 
-/** 切到苗情页拉取选定地块的生育期档案与长势历史曲线 */
+/** 切到苗情页拉取选定地块的生育期档案、长势历史曲线与网格热力 */
 async function reloadSeedling() {
   await loadGrowth()
   await loadSeedlingHistory()
+  await loadGrowthGrid()
 }
 
 async function loadGrowth() {
@@ -1097,6 +1126,83 @@ async function loadSeedlingHistory() {
     seedlingValues.value = []
     seedlingHistoryLoaded.value = false
   }
+}
+
+/** 长势分布热力（A14）：遥测样本 IDW 插值到地块内网格，空数据降级为等待上报提示，不编造长势 */
+const gridMetric = ref('canopyCoverage')
+const gridCellSizeM = ref(10)
+const gridLoading = ref(false)
+const growthGrid = ref<GrowthGrid | null>(null)
+const gridMapEl = ref<HTMLElement | null>(null)
+const gridBaseMapKey = readStoredBaseMap()
+let gridMap: any = null
+let gridLayer: any = null
+
+const hasGridCells = computed(() => (growthGrid.value?.cells.length ?? 0) > 0)
+const gridUnit = computed(() => seedlingMetricOptions.find((m) => m.value === growthGrid.value?.metric)?.unit ?? '')
+/** 当前生育期：实测已开始未结束优先，否则取最近一次实测开始的生育期 */
+const gridStageText = computed(() => {
+  const stages = growthGrid.value?.growthStages ?? []
+  const active = stages.find((stage) => stage.actualStartAt && !stage.actualEndAt)
+  const latest = [...stages].filter((stage) => stage.actualStartAt).sort((a, b) => (a.actualStartAt! < b.actualStartAt! ? 1 : -1))[0]
+  const stage = active ?? latest
+  return stage ? growthStageLabel(stage.stage) : '未登记'
+})
+
+async function loadGrowthGrid() {
+  if (!growthPlotCode.value) { growthGrid.value = null; return }
+  gridLoading.value = true
+  try {
+    // 边界不传由服务端读地块库，样本缺省用最新遥测读数配设备安装坐标
+    growthGrid.value = await telemetryApi.getGrowthGrid({ plotCode: growthPlotCode.value, metric: gridMetric.value, cellSizeM: gridCellSizeM.value })
+    await nextTick()
+    renderGrowthGrid()
+  } catch (error) {
+    growthGrid.value = null
+    ElMessage.error(error instanceof Error ? error.message : '长势热力加载失败')
+  } finally {
+    gridLoading.value = false
+  }
+}
+
+/** 色阶：低值红→中值黄→高值绿，min=max 时统一按高值显示（服务端已给均一警告） */
+function gridColor(value: number): string {
+  const min = growthGrid.value?.minValue ?? 0
+  const max = growthGrid.value?.maxValue ?? 1
+  const ratio = max > min ? Math.min(1, Math.max(0, (value - min) / (max - min))) : 1
+  return `hsl(${Math.round(ratio * 120)}, 75%, 45%)`
+}
+
+/** 热力图懒初始化：首次有格数据才建图，视野由格点包络决定，不硬编码中心坐标 */
+function renderGrowthGrid() {
+  const grid = growthGrid.value
+  if (!grid || grid.cells.length === 0 || !gridMapEl.value) return
+  if (!gridMap) {
+    gridMap = L.map(gridMapEl.value, { attributionControl: false, maxZoom: baseMapMaxZoom(gridBaseMapKey), crs: baseMapCrs(gridBaseMapKey) })
+    createBaseLayer(gridBaseMapKey)?.addTo(gridMap)
+  }
+  if (gridLayer) gridMap.removeLayer(gridLayer)
+  gridLayer = L.layerGroup()
+  const bounds = L.latLngBounds([])
+  const unit = seedlingMetricOptions.find((m) => m.value === grid.metric)?.unit ?? ''
+  for (const cell of grid.cells) {
+    // 服务端 corners 为 [经度, 纬度]，Leaflet 画多边形用 [纬度, 经度]
+    const ring = cell.corners.map(([lng, lat]) => [Number(lat), Number(lng)] as [number, number])
+    const color = gridColor(cell.value)
+    L.polygon(ring, { color, weight: 0.5, fillColor: color, fillOpacity: 0.55 })
+      .bindTooltip(`${metricLabel(grid.metric)} ${cell.value}${unit}`)
+      .addTo(gridLayer)
+    for (const point of ring) bounds.extend(point)
+  }
+  for (const sample of grid.samples) {
+    L.circleMarker([sample.lat, sample.lng], { radius: 5, color: '#fff', weight: 2, fillColor: '#303133', fillOpacity: 0.9 })
+      .bindTooltip(`样本点${sample.deviceId ? ` ${sample.deviceId}` : ''} · ${sample.value}${unit}`)
+      .addTo(gridLayer)
+    bounds.extend([sample.lat, sample.lng])
+  }
+  gridLayer.addTo(gridMap)
+  gridMap.invalidateSize()
+  if (bounds.isValid()) gridMap.fitBounds(bounds, { padding: [24, 24] })
 }
 
 function openGrowthCreate() {
@@ -1291,6 +1397,12 @@ onMounted(async () => {
   growthPlotCode.value = query.plotCode || plotOptions.value[0]?.parcelCode || ''
   await reloadSeedling()
 })
+
+onBeforeUnmount(() => {
+  gridMap?.remove()
+  gridMap = null
+  gridLayer = null
+})
 </script>
 
 <style scoped lang="scss">
@@ -1307,6 +1419,10 @@ onMounted(async () => {
 .history-controls { display: flex; align-items: center; gap: 12px; }
 .soil-history { margin-top: 20px; }
 .growth-block { margin-top: 20px; }
+.grid-map { height: 360px; width: 100%; border: 1px solid #e4e7ed; border-radius: 6px; }
+.grid-warning { margin-bottom: 8px; }
+.grid-legend { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: #606266; }
+.grid-legend__bar { width: 160px; height: 10px; border-radius: 5px; background: linear-gradient(to right, hsl(0, 75%, 45%), hsl(60, 75%, 45%), hsl(120, 75%, 45%)); }
 .pest-stat-cards { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
 .pest-stat { display: flex; flex-direction: column; gap: 4px; min-width: 96px; padding: 12px 16px; background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; }
 .pest-stat span { color: #606266; font-size: 13px; }
