@@ -23,6 +23,8 @@ export class TestNode {
   parent: TestNode | null = null;
   children: TestNode[] = [];
   props: Record<string, any> = {};
+  /** v-show 等 runtime-dom 指令读写 el.style，结构桩给一个可写的空对象即可 */
+  style: Record<string, any> = {};
   constructor(public tag: string, public textContent = "") {}
   append(...nodes: TestNode[]) {
     nodes.forEach((node) => {

@@ -48,7 +48,7 @@ describe("遥测服务 HTTP 接口", () => {
 
       const history = await send(base, "GET", "/api/v1/telemetry/history?deviceId=device-soil-003&metric=soilMoisture&from=2026-11-01T01:30:00Z&to=2026-11-01T02:30:00Z");
       expect(history.body.data).toHaveLength(1);
-      expect(history.body.data[0].recordedAt).toBe("2026-11-01T02:00:00Z");
+      expect(history.body.data[0].recordedAt).toBe("2026-11-01T02:00:00.000Z");
 
       const series = await send(base, "GET", "/api/v1/telemetry/history/series?deviceId=device-soil-003&metric=soilMoisture");
       expect(series.body.data.map((point: { value: number }) => point.value)).toEqual([42, 42, 18]);

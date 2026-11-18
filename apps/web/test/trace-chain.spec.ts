@@ -38,6 +38,7 @@ function mountTrace() {
     "@/api": { traceApi },
     "@/stores": { useUserStore: () => ({ hasPermission: () => true, userInfo: { name: "管理员" } }) },
     "@/utils": utils,
+    "@/utils/export": { exportCsv: vi.fn() },
   });
   cleanups.push(view.unmount);
   return { ...view, getRecords, getChain, createRecord, message };

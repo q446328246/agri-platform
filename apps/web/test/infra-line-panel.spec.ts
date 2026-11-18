@@ -21,6 +21,7 @@ function mountPanel(lines: any[], plots: any[]) {
   const getInfraLines = vi.spyOn(plotApi, "getInfraLines").mockResolvedValue(lines as any);
   vi.spyOn(plotApi, "getList").mockResolvedValue({ items: plots, total: plots.length } as any);
   const view = mountView(new URL("../src/components/InfraLinePanel.vue", import.meta.url), {
+    "element-plus": { ElMessage: { success: vi.fn(), warning: vi.fn(), error: vi.fn(), info: vi.fn() }, ElMessageBox: { confirm: vi.fn().mockResolvedValue(true) } },
     "@/api": { plotApi },
     "@/stores": { useUserStore: () => ({ permissions: [] }) },
     "@/utils/permission": permissionUtils,

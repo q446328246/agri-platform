@@ -37,5 +37,11 @@ export default defineConfig({
     include: ["packages/**/test/**/*.spec.ts", "apps/**/test/**/*.spec.ts"],
     environment: "node",
     reporters: ["default"],
+    // 大量 HTTP 用例真起服务打真端口：默认吃满 CPU 核数时 Windows 下会出现
+    // 瞬时 fetch failed / 首用例超时的并行争抢（单文件跑均绿），限 4 个 fork 保稳定。
+    poolOptions: { forks: { maxForks: 4 } },
+    // 限流后仍偶发连接级 fetch failed（请求未达服务即断，非业务断言失败，
+    // 漂移于各 HTTP 用例且单文件跑均绿）：给一次重试兑底 Windows 环回瞬时抖动。
+    retry: 1,
   },
 });

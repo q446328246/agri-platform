@@ -768,7 +768,7 @@
 - **迁移（已写未应用，部署待点名）**：`054_device_install_location.sql`（devices 加 install_lng/install_lat 可空列：未登记坐标的设备不参与插值，不拿地块中心冒充；演示种子按绑定地块外环顶点均值重心落点，与 coverage planeOf 同口径，同地块多设备东西错开 0.00004° 防 IDW 样本重合）；`055_variable_rate_plans.sql`（新表 variable_rate_plans：TEXT 主键/租户/地块/operation_type CHECK 两码/metric/plan JSONB/created_at + 租户时间组合索引，变量方案涉投入品用量须落库留痕供生产档案复盘）。
 - **A14 地块内网格长势热力**：telemetry-service 新 `growth-grid.ts` 纯函数 `planGrowthGrid`：等距圆柱局部平面（换算常数与 coverage/shared 逐字相同），格心奇偶规则判内（含内环），IDW 权重 1/d²、重合样本取均值；默认格 10m、范围 2~100m、上限 4000 格；**空样本返回空网格+降级警告不编造长势**，单样本给均一警告。新端点 `GET /api/v1/telemetry/growth-grid`：plotCode+metric 必填，boundary 缺省读 plot_records.geom（JSONB），**samples 查询参数为 B 类多光谱反演覆盖口**，缺省用最新读数配设备安装坐标组样本；返回附 growthStages；main.ts 装配 db。前端四情页苗情 tab 新增「长势分布热力」块：指标/格边长/生成按钮 + Leaflet 热力图懒初始化（视野由格点包络决定不硬编码中心），红→黄→绿色阶与图例、样本点标记、warnings 展示、空数据降级提示，随地块选择联动。
 - **A15 网格级变量播种/施肥**：operation-service 新 `variable-rate.ts`：复用 planCoverage 铺带（方向/间距/蛇形/里程不另算一套），沿每带按网格分辨率采样，格心分桶哈希 3×3 邻桶取最近值（超一格距不算命中）；格值归一后线性映射到 [minRate, maxRate]，invert 低值高率（弱苗补肥口径），未命中按基础速率兜底，**空网格降级为均一基础速率并警告**；逐带速率/扫过面积/用量 + 总用量与面积加权平均速率。`parseVariableRateRequest` 复用覆盖入参校验；新 `variable-rate.repository.ts` 双实现（SQL 落 055 表、内存保留 20 条不塞种子）；`POST/GET /api/v1/operations/variable-rate-plan(s)`；main.ts SQL 装配。前端 Navigation.vue 覆盖模式加变量速率选项（作业类型/长势指标/基础-最低-最高速率/低值高率），先拉 A14 网格再转逐带速率，结果面板增用量汇总与逐带速率/用量列。
-- **单测（已写未跑）**：`test/variable-rate.spec.ts` 九用例——里程/耗时与单独覆盖规划逐项一致、南北向逐带速率随格值单调且落区间内、invert 关于区间中点对称、总用量等于逐带之和与面积加权均率、格值均一取中点、空网格降级、参数校验、HTTP 留痕回查与租户隔离。
+- **单测（续十全量跑全过）**：`test/variable-rate.spec.ts` 九用例——里程/耗时与单独覆盖规划逐项一致、南北向逐带速率随格值单调且落区间内、invert 关于区间中点对称、总用量等于逐带之和与面积加权均率、格值均一取中点、空网格降级、参数校验、HTTP 留痕回查与租户隔离。
 - **交付口径**：本地 `tsc -b`（operation/telemetry）+ `vue-tsc`（web）类型预检全过；单元测试/冒烟/浏览器实操未跑，镜像未重建；迁移 054/055 未应用（P4 部署未被点名）。**A14 验收前需点名补遥测演示种子或接真实上报（046 后曲线为空），否则热力与变量方案均走空数据降级提示**。
 
 ### 2026-11-18（续五）：P4 部署收口 + 遥测演示种子（迁移 054–056 已应用，用户点名）
@@ -778,7 +778,7 @@
 - **只读核验（`.runtime/verify-p4.mjs`）12 项全 PASS**：growth-grid 三点梯度出格（3×6 网格 15 格、值域 55.88~72.09）/苗情四指标全出格/两样本地块出差异/无设备地块诚实降级/缺 metric 400；latest 与墒情曲线恢复；variable-rate-plan invert 正反两口径逐带速率差异与排序反转（11 带东→西 11.6→22.6 公斤/亩，总用量 37.4 公斤）/留痕 SQL 回查/非法速率 400；前端 bundle 扫 38 chunk 命中四个 P4 标记。variable-rate-plan 的 POST 为方案演算留痕（核验副产物，落了几条演示方案），未动任何既有业务数据。
 - **核验暴露的两处方向口径问题（均已修）**：① 覆盖铺带 heading 0 时垂直轴指向西，**作业带自东向西排**——首轮核验与单测的方向断言写反（误以为西→东），按实际几何修正 verify-p4 与 variable-rate.spec 用例②③（首带在东=强苗，invert 后末带西侧弱苗拿高速率）；业务代码本身映射正确无需改。② **页面默认「自动选向」只保里程最短，可能恰与长势梯度平行**（实测自动选 90° 时逐带极差仅 0.02 公斤/亩）：Navigation.vue 新增提示——变量方案逐带极差 <1 公斤/亩时显示 info 告警引导取消自动选手工调方向（让作业带垂直于长势差异方向）；vue-tsc 预检过后按最小重建策略 edge 单目标重建换装（`docker build --target edge` + `up -d edge`，本次 compose 连带重启了 postgres/app 均恢复 Healthy），线上 bundle 命中新提示文案，复跑核验仍 12/12 PASS。
 - **页面目视确认未完成（如实记录）**：浏览器子代理因 IDE 原生浏览器视图隐藏（viewport 0×0）叠加自签证书拦截页无法交互而受阻，未产出截图。已用**页面等价核验**（`.runtime/verify-p4-page-equiv.mjs`，按四情页 loadGrowthGrid 与导航页 planCoverageNow 的真实编排与默认参数复现）证明数据链路：热力块 15 格可出图无警告；变量方案默认参数下自动选向 90° 逐带几乎无差异（新提示会引导调方向），手工方向 0° 时差异显著。目视出图待浏览器面板可用后补确认。
-- **迁移号口径更新**：056 被遥测种子占用，P5 A13 顺延为 057。单测九用例仍已写未跑（方向断言已按实际铺带口径修正）。
+- **迁移号口径更新**：056 被遥测种子占用，P5 A13 顺延为 057。单测九用例已于续十全量跑全过（方向断言已按实际铺带口径修正）。
 
 ### 2026-11-18（续六）：P5 视频与移动交付（A13 分屏+录像留档 + A17 移动端 H5，迁移 057 已写未应用）
 
@@ -787,7 +787,7 @@
 - **A13 多画面分屏前端**：video/Index.vue 实时监看页签改 1/2/4/9 分屏（CSS grid）：每屏独立换台下拉 + 截图/云台/全屏/刷新；**播放器实例按 `slot-${index}` 键管理，切换分屏先 teardownSlots 逐屏 destroyEngine 再重建，单屏换台先销毁旧引擎，onUnmounted 全量销毁——分屏切换不泄漏播放器实例**；在线可播摄像机优先自动分配，空位诚实显示「未分配摄像机」（不新增演示摄像机，避开 video-http.spec 的 ONLINE total===3 断言）。新增「录像留档」页签：筛选表格 + 人工补登对话框 + 回放对话框（ARCHIVED 才有片源，PENDING 明示待生成）。
 - **A17 移动端 H5**：新建独立工程 `apps/mobile`（@agri/mobile，Vue3+Vite+TS，**不引 UI 库手写 m-* 样式体系，不混入 apps/web 桌面布局**）：fetch 封装（401 自动回登录）、hash 路由 + vite base '/m/'、localStorage 键 `agri_mobile_token/user` 与桌面端隔离互不踢线；登录页 + 权限过滤 tabbar（与桌面 checkPermission 同口径）；三业务页——**驾驶舱**（地块/面积/在线设备/进行中任务四统计卡 + 待处置告警前 5 条，Promise.allSettled 单源失败不拖垮整页）、**巡田**（地块/事件筛选 + 分页加载 + 巡田登记弹层，事件限人工白名单排除灌溉/施肥完成两设备专属码）、**任务回执**（状态 chips 筛选 + 详情弹层：待执行→开工/取消，进行中→提交回执（outcome/完成面积/备注）/取消，version 乐观锁 409 提示并刷新，写操作按 operation:write 控权）；375px 宽可用（max-width 640 居中，弹层/安全区适配）。
 - **部署接线（随下次点名部署生效）**：Dockerfile build 阶段追加 `pnpm --filter @agri/mobile build`，edge 阶段 COPY mobile/dist → /usr/share/nginx/html/m；nginx 新增 `location /m/` alias 块（index 不缓存，带哈希静态资源由既有正则 location 接管长缓存）；pnpm-lock.yaml 已收录 @agri/mobile importer（依赖版本与 web 完全一致复用既有解析，Docker --frozen-lockfile 可用）。
-- **单测（已写未跑）**：`video-service/test/recording-archive.spec.ts` 六用例——仓储筛选/租户隔离、settle COALESCE 保留未提供字段、archiveWindow 边界、AI 自动留档窗口断言、人工补登 400/404、internal settle 401/400/404/200。
+- **单测（续十全量跑全过）**：`video-service/test/recording-archive.spec.ts` 六用例——仓储筛选/租户隔离、settle COALESCE 保留未提供字段、archiveWindow 边界、AI 自动留档窗口断言、人工补登 400/404、internal settle 401/400/404/200。
 - **交付口径**：本地 `tsc -b`（全部后端）+ `vue-tsc`（web + mobile）三项类型预检全过；单元测试/冒烟/浏览器实操未跑，镜像未重建；迁移 057 未应用（P5 部署未被点名）。至此 A 类 12 项排期全部交付，P5 部署待点名。
 
 ### 2026-11-18（续七）：P5 部署收口（迁移 057 已应用，用户点名「下一步」）
@@ -796,14 +796,14 @@
 - **最小化重建**：本批涉后端 video-service + 双前端 + Dockerfile，需双目标：`docker build --target app` 与 `--target edge` 分别构建（build 阶段共享缓存，mobile vite 构建与 /m/ COPY 均执行）+ `compose --profile app up -d`（不带 --build）换装；app Healthy / edge Up，postgres/minio 未重启保持 Healthy。
 - **只读核验（`.runtime/verify-p5.mjs`）15 项全 PASS**：留档列表分页结构/非法 source·status 400；人工补登幽灵摄像机 404/非法 eventAt 400/窗口超 600 秒 400；补登落 MANUAL/PENDING 档案（窗口 90 秒、无伪造回放地址）与筛选回查；**内部回填接口不经网关暴露**（网关无 /internal 路由），用 docker exec 在 app 容器内直连 video-service 核验错凭证 401/非法状态 400/幽灵档案 404/FAILED 回填 200，回填后经网关回查 FAILED；ONLINE 摄像机 total===3 回归（未新增演示摄像机）；桌面 bundle 扫 38 chunk 命中录像留档/未分配摄像机/人工补登三标记；**移动端 https://localhost/m/ 入口可达**（viewport + 入口 js），扫 5 chunk 命中驾驶舱/巡田登记/任务回执三标记，依赖 API（plots/stats、farm-tasks、trace/records）可用。
 - **核验副产物（如实记录）**：一条 MANUAL 演示档案（note「P5 部署核验演示档案」）经内部接口回填为 FAILED（message「流媒体服务未接入」诚实终态），未动任何既有业务数据。
-- **未做（如实记录）**：单测六用例仍已写未跑；浏览器目视未做（自签证书 + IDE 视图限制，与 P4 同口径）；分屏切换不泄漏与 375px 观感待用户浏览器验收。
+- **未做（如实记录）**：单测六用例已于续十全量跑全过；浏览器目视未做（自签证书 + IDE 视图限制，与 P4 同口径）；分屏切换不泄漏与 375px 观感待用户浏览器验收。
 
 ### 2026-11-18（续八）：A 类最后两项缺口收口——任务时间/天气冲突提示 + 数据字典/资产目录
 
 - **任务时间窗重叠提示（8.7）**：`conflictsOf` 由「同地块/负责人/设备命中才提示」泛化为**重叠即提示**：无共用资源也给一条「计划时间窗重叠」缘由，只提示不阻断；SQL 侧 conflicts 候选去掉资源 OR 预筛（只留租户/在册/未结束/排过时间），内存侧候选取全租户任务，双仓储仍共用同一纯函数。`GET /farm-tasks/:id/conflicts` 数组契约不变。
 - **恶劣天气冲突提示（8.4/8.7）**：新 `operation-service/weather-conflict.ts` 纯函数 `weatherConflictsOf`：阈值与 weather-service `ADVISE_THRESHOLDS` 同源（降雨概率 50%/雨量 8mm/风速 8m/s/风力 4 级/最高温 33°C/最低温 5°C，两处修改须同步，不跨服务引源码）；农场日历日固定东八区，计划窗 [开始, 结束??开始] 与预报日求交逐日判定：灌溉雨→推迟、施肥雨→顺延、喷药风→CRITICAL/雨→改期/高温→避午间、耕整/播种/除草雨→泥泞改期、播种低温→冻害；未排时间/预报未覆盖（七日之外）/缺测诚实返回空数组。取数 `createWeatherForecastFetcher`（与决策侧同一接入模式：身份头透传、2 秒超时、失败 undefined，要素缺测整条跳过不补 0），main.ts 注入 `WEATHER_SERVICE_URL`。创建 201 响应附 `weatherConflicts`，新增 `GET /farm-tasks/:id/weather-conflicts` 供改期后回查。前端 Task.vue：创建提示合并排期/天气冲突，详情弹层新增「天气适宜性」区块（CRITICAL/WARNING 分级 tag，空态区分未排时间/预报未覆盖）。
 - **数据字典/资产目录（11.1/11.4）**：迁移 `058_data_catalog.sql` **已应用部署（续九）**：`platform_data_assets`（五类 SPATIAL/DEVICE/TELEMETRY/BUSINESS/STATS，code 取真实表名，租户内唯一）+ `platform_data_dictionary`（(租户,资产,指标) 唯一杜绝同指标多口径），种子 26 资产 + 26 字典条目只登记真实存在的表与指标（单位对照 contracts payload 与四情页指标目录，waterVolume 核实为 m³）。`data-catalog.repository.ts` 双仓储同口径（构造函数默认空，种子由服务工厂/迁移注入）；八端点 CRUD：资产编码/字典 assetCode·metricKey 不可改（改口径应新建）、重码/重键 409、删资产引用守卫 409、非法分类/编码 400、写操作全审计留痕（dataAsset.*/dataDictionary.*）。权限码 `system:data` 三处接线：contracts `PERMISSION_CATALOG`、gateway authz 两前缀、platform `pathPermissions`。前端新 `system/DataCatalog.vue`（资产/字典双页签，统一查询条+分页+新建/编辑/删除，编码类字段编辑时禁用），路由 `/system/data-catalog` + 一张图 panelComps/menuGroups 系统管理组登记（perm 过滤）。
-- **单测（已写未跑）**：`operation-service/test/weather-conflict.spec.ts` 十六用例（纯函数各类型判定/东八区窗交集/缺测不判、conflictsOf 泛化重叠、HTTP 创建注入/失败降级/回查 404·200、fetcher 缺测过滤与降级）；`platform-service/test/data-catalog.spec.ts` 十用例（双仓储口径/种子对齐/租户隔离、HTTP CRUD/400·409·404/引用守卫/审计留痕）。
+- **单测（续十全量跑全过）**：`operation-service/test/weather-conflict.spec.ts` 十六用例（纯函数各类型判定/东八区窗交集/缺测不判、conflictsOf 泛化重叠、HTTP 创建注入/失败降级/回查 404·200、fetcher 缺测过滤与降级）；`platform-service/test/data-catalog.spec.ts` 十用例（双仓储口径/种子对齐/租户隔离、HTTP CRUD/400·409·404/引用守卫/审计留痕）。
 - **文档修正**：审计表 A14/A15 行「迁移 054/055 已写未应用」为过时措辞（P4 部署时已应用），改为「已应用部署」；A5/A11 行随本批划完成。至此 A 类 18 项代码侧缺口全部收口。
 - **交付口径**：后端 `tsc -b` 与 web `vue-tsc` 类型预检全过；单测/冒烟/浏览器实操未跑；迁移 058 已于续九部署应用，双目标镜像重建换装，只读核验 20 项全 PASS（见续九节）。
 
@@ -815,7 +815,16 @@
 - **只读核验（`.runtime/verify-xu8.mjs`）20 项全 PASS**：数据资产种子 26/SPATIAL 筛选 3/非法分类 400/未登录 401/改 code 400/删资产引用守卫 409；字典种子 26/readings 18 指标/soilMoisture %·waterVolume m³ 口径/重键 409/幽灵资产 404/权限目录含 system:data；创建排窗任务响应附 conflicts+weatherConflicts 数组、未排时间任务诚实空数组、weather-conflicts 回查与创建口径一致、幽灵任务 404、conflicts 数组契约不变；回归任务列表与 admin ["*"]；桌面 bundle 命中数据目录/资产目录/天气适宜性三标记。
 - **核验脚本首跑 14/6 的根因与修正（如实记录）**：部署库任务表为空（046 清史后未重灌，内存种子 task-demo-NNN 只在内存模式注入），且 /plots 响应字段为 parcelCode 非 code；改为动态创建两条核验任务（排窗 SPRAYING/未排时间 IRRIGATION）后回查再归档，拒绝路径零写入不变。
 - **核验副产物（如实记录）**：两条「部署核验演示任务」验证后 DELETE 归档（与地块同口径软删，行留表里列表/详情读不到），未动任何既有业务数据。
-- **未做（如实记录）**：单测十六+十用例仍已写未跑；浏览器目视未做（自签证书 + IDE 视图限制，与 P5 同口径）；数据目录页与天气适宜性区块观感待用户浏览器验收。
+- **未做（如实记录）**：单测十六+十用例已于续十全量跑全过；浏览器目视未做（自签证书 + IDE 视图限制，与 P5 同口径）；数据目录页与天气适宜性区块观感待用户浏览器验收。
+
+### 2026-11-18（续十）：全量单测执行与历史积压收口（726 用例全绿）
+
+- **执行**：`pnpm exec vitest run` 全量 **726 用例 = 708 通过 + 18 跳过（it.skip）+ 0 失败**；续八 16+10 用例、P4 九用例、P5 六用例等历史积压全部跑过。
+- **首跑 37 失败两类修复（只改测试与测试基建，未动业务码）**：
+  - 31 例 view-harness 缺依赖注入：P4 四情页加 Leaflet 热力、P2 财务/溯源加 exportCsv、管线面板加 element-plus 后旧 spec 注入表未跟上——新增共享 `apps/web/test/map-stubs.ts`（leaflet/basemap 结构桩），五个 agro spec 补 leaflet+basemap、finance/trace 补 exportCsv 桩、InfraLinePanel 补 element-plus 桩；TestNode 补 `style` 空对象支持 v-show（P4 热力块新增）。
+  - 6 例断言口径过时（业务行为符合规范，测试随更新）：telemetry recordedAt 经 toIsoTimestamp 统一毫秒式；toDetection 补还原 eventType（P2 七类事件）；MESSAGE_TEMPLATE_TOPICS 补登记 telemetry.ai.detected；video 重试提示优先透传服务端 forwardMessage；finance getSummary 拉两次（汇总卡 + 监管报表）。
+- **并行争抢治理（如实记录）**：默认吃满核数（20 线程）并行时 Windows 下连接级 fetch failed / 首用例超时漂移于各 HTTP 用例（单文件跑均绿）→ vitest.config 限 `maxForks: 4` + `retry: 1` 兑底（均带注释说明）；终次全量跑全绿且 0 次重试。
+- **交付口径**：`tsc -b` 类型预检过；本批无前端 src 改动（vue-tsc 不在范围）；无业务码变更无需重建镜像；浏览器目视仍未做。
 
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
@@ -859,7 +868,7 @@
 | ~~P3~~ ✅ | A8 | 指令授权地块+授权时间窗范围校验（三重管控升四重） | 051 | 2.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：空表放行、超范围人工下发 403；管理三端点 + 前端授权对话框 |
 | ~~P3~~ ✅ | A18 | EC/pH 偏离规则种子+决策联动肥液配比调整处方 | 052/053 | 2d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：依赖 A11 质量标记防误触发；处方幂等按事件、人工确认路径；053 修规则唯一键并入方向 |
 | ~~P4 空间与变量~~ ✅ | A14 | 地块内网格长势分布热力层（IDW 插值遥测+生育期），多光谱输入留 B 类接口 | 054 | 3d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：空数据降级；验收前置已解决（056 补种 8 台演示采样节点构成空间梯度，热力出图已经页面等价核验证明，目视截图待浏览器面板可用） |
-| ~~P4~~ ✅ | A15 | 网格级变量播种/施肥方案（分区速率表+coverage 逐带速率输出） | 055 | 4d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：逐带速率差异与 invert 反转线上验证；单测已写未跑（方向断言已按铺带自东向西口径修正）；依赖 A14 网格基础 |
+| ~~P4~~ ✅ | A15 | 网格级变量播种/施肥方案（分区速率表+coverage 逐带速率输出） | 055 | 4d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：逐带速率差异与 invert 反转线上验证；单测续十全量跑全过（方向断言已按铺带自东向西口径修正）；依赖 A14 网格基础 |
 | ~~P5 视频与移动~~ ✅ | A13 | 2/4/9 分屏监看+逐屏截图/PTZ；录像留档仅留接口与档案表（片源依赖 B 类流媒体） | 057 | 3d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：分屏切换 teardownSlots 逐屏销毁不泄漏播放器实例；AI 事件自动留档 best-effort + 内部回填接口 |
 | ~~P5~~ ✅ | A17 | 移动端 H5 响应式优先（驾驶舱/巡田/任务回执三页），小程序另立项评估 | 无 | 10d | ✅ 已交付并部署（/m/ 上线，核验 PASS）：独立 apps/mobile 工程不混桌面布局，375px 宽可用 |
 

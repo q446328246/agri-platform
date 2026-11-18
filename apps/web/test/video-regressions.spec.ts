@@ -144,7 +144,8 @@ describe("AI 识别事件重试", () => {
 
     await state.retryAiEvent(state.aiEvents[0]);
     expect(retryAiEvent).toHaveBeenCalledWith("ai-1");
-    expect(message.success).toHaveBeenCalledWith("转发成功，已生成虫情告警");
+    // 提示优先透传服务端 forwardMessage（P2 口径），不再前端拼接文案
+    expect(message.success).toHaveBeenCalledWith("已生成虫情告警");
     expect(videoApi.getAiEvents).toHaveBeenCalledTimes(2);
 
     retryAiEvent.mockResolvedValue({ ...aiEvent, forwarded: false, forwardMessage: "遥测服务返回 503" } as any);

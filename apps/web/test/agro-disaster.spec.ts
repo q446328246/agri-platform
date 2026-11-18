@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as types from "../src/types/index.js";
 import { evaluateTs, flushView, mountView } from "./view-harness.js";
+import { basemapStub, leafletStub } from "./map-stubs.js";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -55,6 +56,8 @@ function mountAgro() {
     "echarts/renderers": { CanvasRenderer: {} },
     "echarts/charts": { LineChart: {} },
     "echarts/components": { TooltipComponent: {}, LegendComponent: {}, GridComponent: {} },
+    leaflet: leafletStub(),
+    "@/utils/basemap": basemapStub(),
   });
   cleanups.push(view.unmount);
   return { ...view, telemetryApi, getDisasters, getDisasterStats, createDisaster, supplementDisaster, message };

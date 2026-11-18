@@ -63,7 +63,7 @@ describe("InMemoryAiEventRepository", () => {
   it("toDetection 还原转发所需字段", () => {
     const detection = toDetection(aiEvent({ imageFileId: "file-1" }));
     expect(detection).toEqual({
-      cameraId: "camera-001", plotCode: "P-001", pestType: "稻飞虱", level: 2, confidence: 0.9,
+      cameraId: "camera-001", plotCode: "P-001", eventType: "PEST", pestType: "稻飞虱", level: 2, confidence: 0.9,
       detectedAt: "2026-11-10T02:00:00.000Z", imageFileId: "file-1",
     });
     expect(toDetection(aiEvent()).imageFileId).toBeUndefined();

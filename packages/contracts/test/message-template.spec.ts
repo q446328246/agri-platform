@@ -201,6 +201,7 @@ describe("消息模板与去重键", () => {
     expect(MESSAGE_TEMPLATE_TOPICS).toEqual([
       EventTopic.TelemetryThresholdBreached,
       EventTopic.TelemetryPestDetected,
+      EventTopic.TelemetryAiDetected,
       EventTopic.DecisionPrescriptionIssued,
       EventTopic.PlotCreated,
       EventTopic.ControlCommandTimeout,

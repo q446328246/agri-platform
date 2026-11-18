@@ -38,9 +38,19 @@ function mountFinance() {
   const message = { success: vi.fn(), warning: vi.fn(), error: vi.fn(), info: vi.fn() };
   const view = mountView(new URL("../src/views/finance/Index.vue", import.meta.url), {
     "element-plus": { ElMessage: message, ElMessageBox: { confirm: vi.fn().mockResolvedValue(true) } },
-    "@/api": { financeApi },
+    "@/api": {
+      financeApi,
+      // 监管统计报表（P2）挂载即拉五源，给空数据桩避免 undefined 调用
+      plotApi: { getStats: vi.fn().mockResolvedValue({ totalPlots: 0, totalAreaMu: 0, soilTypes: [] }) },
+      operationApi: { getTasks: vi.fn().mockResolvedValue({ items: [], total: 0 }) },
+      telemetryApi: {
+        getPestStats: vi.fn().mockResolvedValue({ total: 0, pending: 0, byLevel: [], byType: [] }),
+        getDisasterStats: vi.fn().mockResolvedValue({ total: 0, open: 0, affectedAreaMu: 0 }),
+      },
+    },
     "@/stores": { useUserStore: () => ({ hasPermission: () => true }) },
-    "@/utils": { formatDateTime: (value: string) => value },
+    "@/utils": { formatDateTime: (value: string) => value, getTaskStatusText: (value: string) => value },
+    "@/utils/export": { exportCsv: vi.fn() },
     "vue-echarts": { name: "VChart", render: () => null },
     "echarts/core": { use: () => {} },
     "echarts/renderers": { CanvasRenderer: {} },
@@ -56,7 +66,8 @@ describe("财务核算报表", () => {
     const { getEntries, getSummary, getReport, state } = mountFinance();
     await flushView();
     expect(getEntries).toHaveBeenCalledTimes(1);
-    expect(getSummary).toHaveBeenCalledTimes(1);
+    // 汇总拉两次：收支汇总卡一次 + 监管统计报表（P2）投入产出板块一次
+    expect(getSummary).toHaveBeenCalledTimes(2);
     expect(getReport).toHaveBeenCalledTimes(1);
     expect(state.report).toMatchObject(reportFixture);
   });
