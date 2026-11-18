@@ -802,10 +802,20 @@
 
 - **任务时间窗重叠提示（8.7）**：`conflictsOf` 由「同地块/负责人/设备命中才提示」泛化为**重叠即提示**：无共用资源也给一条「计划时间窗重叠」缘由，只提示不阻断；SQL 侧 conflicts 候选去掉资源 OR 预筛（只留租户/在册/未结束/排过时间），内存侧候选取全租户任务，双仓储仍共用同一纯函数。`GET /farm-tasks/:id/conflicts` 数组契约不变。
 - **恶劣天气冲突提示（8.4/8.7）**：新 `operation-service/weather-conflict.ts` 纯函数 `weatherConflictsOf`：阈值与 weather-service `ADVISE_THRESHOLDS` 同源（降雨概率 50%/雨量 8mm/风速 8m/s/风力 4 级/最高温 33°C/最低温 5°C，两处修改须同步，不跨服务引源码）；农场日历日固定东八区，计划窗 [开始, 结束??开始] 与预报日求交逐日判定：灌溉雨→推迟、施肥雨→顺延、喷药风→CRITICAL/雨→改期/高温→避午间、耕整/播种/除草雨→泥泞改期、播种低温→冻害；未排时间/预报未覆盖（七日之外）/缺测诚实返回空数组。取数 `createWeatherForecastFetcher`（与决策侧同一接入模式：身份头透传、2 秒超时、失败 undefined，要素缺测整条跳过不补 0），main.ts 注入 `WEATHER_SERVICE_URL`。创建 201 响应附 `weatherConflicts`，新增 `GET /farm-tasks/:id/weather-conflicts` 供改期后回查。前端 Task.vue：创建提示合并排期/天气冲突，详情弹层新增「天气适宜性」区块（CRITICAL/WARNING 分级 tag，空态区分未排时间/预报未覆盖）。
-- **数据字典/资产目录（11.1/11.4）**：迁移 `058_data_catalog.sql` **已写未应用**：`platform_data_assets`（五类 SPATIAL/DEVICE/TELEMETRY/BUSINESS/STATS，code 取真实表名，租户内唯一）+ `platform_data_dictionary`（(租户,资产,指标) 唯一杜绝同指标多口径），种子 26 资产 + 26 字典条目只登记真实存在的表与指标（单位对照 contracts payload 与四情页指标目录，waterVolume 核实为 m³）。`data-catalog.repository.ts` 双仓储同口径（构造函数默认空，种子由服务工厂/迁移注入）；八端点 CRUD：资产编码/字典 assetCode·metricKey 不可改（改口径应新建）、重码/重键 409、删资产引用守卫 409、非法分类/编码 400、写操作全审计留痕（dataAsset.*/dataDictionary.*）。权限码 `system:data` 三处接线：contracts `PERMISSION_CATALOG`、gateway authz 两前缀、platform `pathPermissions`。前端新 `system/DataCatalog.vue`（资产/字典双页签，统一查询条+分页+新建/编辑/删除，编码类字段编辑时禁用），路由 `/system/data-catalog` + 一张图 panelComps/menuGroups 系统管理组登记（perm 过滤）。
+- **数据字典/资产目录（11.1/11.4）**：迁移 `058_data_catalog.sql` **已应用部署（续九）**：`platform_data_assets`（五类 SPATIAL/DEVICE/TELEMETRY/BUSINESS/STATS，code 取真实表名，租户内唯一）+ `platform_data_dictionary`（(租户,资产,指标) 唯一杜绝同指标多口径），种子 26 资产 + 26 字典条目只登记真实存在的表与指标（单位对照 contracts payload 与四情页指标目录，waterVolume 核实为 m³）。`data-catalog.repository.ts` 双仓储同口径（构造函数默认空，种子由服务工厂/迁移注入）；八端点 CRUD：资产编码/字典 assetCode·metricKey 不可改（改口径应新建）、重码/重键 409、删资产引用守卫 409、非法分类/编码 400、写操作全审计留痕（dataAsset.*/dataDictionary.*）。权限码 `system:data` 三处接线：contracts `PERMISSION_CATALOG`、gateway authz 两前缀、platform `pathPermissions`。前端新 `system/DataCatalog.vue`（资产/字典双页签，统一查询条+分页+新建/编辑/删除，编码类字段编辑时禁用），路由 `/system/data-catalog` + 一张图 panelComps/menuGroups 系统管理组登记（perm 过滤）。
 - **单测（已写未跑）**：`operation-service/test/weather-conflict.spec.ts` 十六用例（纯函数各类型判定/东八区窗交集/缺测不判、conflictsOf 泛化重叠、HTTP 创建注入/失败降级/回查 404·200、fetcher 缺测过滤与降级）；`platform-service/test/data-catalog.spec.ts` 十用例（双仓储口径/种子对齐/租户隔离、HTTP CRUD/400·409·404/引用守卫/审计留痕）。
 - **文档修正**：审计表 A14/A15 行「迁移 054/055 已写未应用」为过时措辞（P4 部署时已应用），改为「已应用部署」；A5/A11 行随本批划完成。至此 A 类 18 项代码侧缺口全部收口。
-- **交付口径**：后端 `tsc -b` 与 web `vue-tsc` 类型预检全过；单测/冒烟/浏览器实操未跑；迁移 058 未应用；镜像未重建，部署待点名。
+- **交付口径**：后端 `tsc -b` 与 web `vue-tsc` 类型预检全过；单测/冒烟/浏览器实操未跑；迁移 058 已于续九部署应用，双目标镜像重建换装，只读核验 20 项全 PASS（见续九节）。
+
+### 2026-11-18（续九）：续八部署收口（迁移 058 已应用，用户点名「下一步」）
+
+- **迁移应用**：`node scripts/migrate-postgres.mjs` 应用 058（platform_data_assets + platform_data_dictionary，40ms），种子 26 资产 + 26 字典条目随迁移落库。
+- **构建网络绕行（如实记录）**：容器内 registry.npmjs.org 大包（element-plus/hls.js/typescript）tarball 下载持续超时，原样重试三次均败；实测 **pnpm 11 不认 `npm_config_*` 环境变量**（export 后仍走 npmjs），改用临时构建文件 `.runtime/Dockerfile.xu8`（与根 Dockerfile 一致，仅两处 install 前 `pnpm config set registry https://registry.npmmirror.com` + fetch-retries/fetch-timeout 写全局配置）构建成功；不改仓库 `.npmrc`（避免 bust COPY 层缓存与污染提交），临时文件用完已删不进提交。
+- **最小化重建与换装**：`docker build --target app` / `--target edge` 分别构建（build 阶段共享缓存），镜像内验证含 weather-conflict.js / data-catalog.repository.js / 058 迁移文件；`compose --profile app up -d`（不带 --build）换装，app Healthy / edge Up，postgres/minio 未重启保持 Healthy。admin 通配权限由 platform 启动期幂等 seed，新权限码 system:data 自动覆盖无需补迁移。
+- **只读核验（`.runtime/verify-xu8.mjs`）20 项全 PASS**：数据资产种子 26/SPATIAL 筛选 3/非法分类 400/未登录 401/改 code 400/删资产引用守卫 409；字典种子 26/readings 18 指标/soilMoisture %·waterVolume m³ 口径/重键 409/幽灵资产 404/权限目录含 system:data；创建排窗任务响应附 conflicts+weatherConflicts 数组、未排时间任务诚实空数组、weather-conflicts 回查与创建口径一致、幽灵任务 404、conflicts 数组契约不变；回归任务列表与 admin ["*"]；桌面 bundle 命中数据目录/资产目录/天气适宜性三标记。
+- **核验脚本首跑 14/6 的根因与修正（如实记录）**：部署库任务表为空（046 清史后未重灌，内存种子 task-demo-NNN 只在内存模式注入），且 /plots 响应字段为 parcelCode 非 code；改为动态创建两条核验任务（排窗 SPRAYING/未排时间 IRRIGATION）后回查再归档，拒绝路径零写入不变。
+- **核验副产物（如实记录）**：两条「部署核验演示任务」验证后 DELETE 归档（与地块同口径软删，行留表里列表/详情读不到），未动任何既有业务数据。
+- **未做（如实记录）**：单测十六+十用例仍已写未跑；浏览器目视未做（自签证书 + IDE 视图限制，与 P5 同口径）；数据目录页与天气适宜性区块观感待用户浏览器验收。
 
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
@@ -825,7 +835,7 @@
 | A8 | 14.3 范围管控 | ~~指令无「授权地块 + 授权时间段」范围校验~~ **已完成**（2026-11-18 P3，迁移 `051` 已应用部署：授权表设备/地块通配 + 时间窗闭区间，空表放行、超范围人工下发 403，管理三端点） | `authorization.repository.ts` + `/control/authorizations` |
 | A9 | 4.1 地块流转 | ~~变更历史无流转（权属变更）动作~~ **已完成**（2026-11-17，迁移 `043` + `/plots/:code/transfer` + 详情页流转入口） | `plot_change_logs` 动作枚举含 TRANSFER |
 | A10 | 4.4 线路属性 | ~~线路台账无宽度、限速、适用机型、启用/停用、模板复用~~ **已完成**（2026-11-18 P2，迁移 `047` 已应用部署）；轨迹采集生成线路仍无（依赖农机 T-Box，B 类） | `infra-line.repository.ts` 五字段 + `/infra-lines/from-template` + 台账表单筛选 |
-| A11 | 11.4 数据质量治理 | ~~遥测上报无可疑标记、补值剔除与异常日志~~ **已完成**（2026-11-18 P2，迁移 `049` 已应用部署：三类标记+曲线汇总剔除+异常日志端点）；**数据字典/资产目录已完成**（2026-11-18 续八，迁移 `058` 已写未应用） | `telemetry-service/quality.ts` + `/telemetry/quality-logs` + Monitor 异常日志卡 + `platform-service/data-catalog.repository.ts` |
+| A11 | 11.4 数据质量治理 | ~~遥测上报无可疑标记、补值剔除与异常日志~~ **已完成**（2026-11-18 P2，迁移 `049` 已应用部署：三类标记+曲线汇总剔除+异常日志端点）；**数据字典/资产目录已完成**（2026-11-18 续八，迁移 `058` 已应用部署） | `telemetry-service/quality.ts` + `/telemetry/quality-logs` + Monitor 异常日志卡 + `platform-service/data-catalog.repository.ts` |
 | A12 | 7.3 视频 AI 事件契约 | ~~AI 事件仅虫情一类~~ **已完成**（2026-11-18 P2，迁移 `048` 已应用部署：七类事件+条件必填+按类型转发+消息模板）；模型本体仍 B 类 | `video-service/ai-event.ts` 白名单 + telemetry `/ai-events` + contracts `AiDetectedPayload` |
 | A13 | 7.1 / 7.2 多画面与录像留档 | ~~单路播放 + 截图，无多画面分屏监看；无告警时刻前后录像片段自动留档~~ **已完成**（2026-11-18 P5，迁移 `057` 已应用部署：1/2/4/9 分屏逐屏截图/PTZ + 留档档案表 + AI 事件自动留档 + 内部回填接口）；片源生成属 B 类流媒体 | `video/Index.vue` 分屏 + `recording-archive.repository.ts` + `/video/recording-archives` |
 | A14 | 6.2 长势分布图 | ~~四情页有生育期时间轴与提前/滞后对比，无地块内空间长势分布图~~ **已完成**（2026-11-18 P4，迁移 `054` 已应用部署：设备安装坐标 + IDW 网格热力端点 + 四情页热力块，空数据降级）；反演输入（多光谱影像）属 B 类，samples 覆盖口已留 | `telemetry-service/growth-grid.ts` + `/telemetry/growth-grid` + `agro/Index.vue` 热力块 |
@@ -844,7 +854,7 @@
 | ~~P1~~ ✅ | A1 | 地图测距/测面（临时层+实时 tooltip）、图幅导出 PNG、大屏投放模式（隐菜单面板+字号放大） | 无 | 2d | ✅ 已交付：测面复用 polygonAreaMu 同公式；导出含边界，可跨域源含底图（谷歌/高德退矢量图幅） |
 | ~~P2 台账与契约~~ ✅ | A10 | 线路宽度/限速/适用机型/启用停用/模板复用 | 047 | 2d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：CHECK 与 contracts MachineType 同步；台账表单与筛选可用 |
 | ~~P2~~ ✅ | A12 | AI 事件类型扩 PERSON_INTRUSION/MACHINE_STATUS/FLOOD/LODGING/FIRE/SMOKE，pestType 改条件必填+消息转发 | 048 | 1.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：契约与网关回调登记同步；模型本体仍 B 类 |
-| ~~P2~~ ✅ | A11 | 遥测质量标记（超量程/连续不变/时间戳异常）+曲线与汇总剔除+异常日志端点 | 049 | 2.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：三类标记纯函数可注入冒烟；数据字典/资产目录另列（后于 2026-11-18 续八补齐，迁移 058 已写未应用） |
+| ~~P2~~ ✅ | A11 | 遥测质量标记（超量程/连续不变/时间戳异常）+曲线与汇总剔除+异常日志端点 | 049 | 2.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：三类标记纯函数可注入冒烟；数据字典/资产目录另列（后于 2026-11-18 续八补齐，迁移 058 已应用部署） |
 | ~~P3 控制深化~~ ✅ | A7 | 指令扩 PAUSE/RESUME/RETURN_HOME/POWER_OFF/TOOL_SWITCH/TILLAGE | 050 | 3d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：PAUSED 状态机 + PAUSE/RESUME 同事务联动；contracts payload 同步 |
 | ~~P3~~ ✅ | A8 | 指令授权地块+授权时间窗范围校验（三重管控升四重） | 051 | 2.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：空表放行、超范围人工下发 403；管理三端点 + 前端授权对话框 |
 | ~~P3~~ ✅ | A18 | EC/pH 偏离规则种子+决策联动肥液配比调整处方 | 052/053 | 2d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：依赖 A11 质量标记防误触发；处方幂等按事件、人工确认路径；053 修规则唯一键并入方向 |
