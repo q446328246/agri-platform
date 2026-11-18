@@ -284,7 +284,8 @@ export function createPlotHttpServer(
           return;
         }
         const parsed = parseLineAttributes(input);
-        if (parsed.error) {
+        // 用 !== undefined 判错而不是真值判断：error 类型是 string，空串为假值时无法收窄联合类型，attrs 会被认为可能缺失
+        if (parsed.error !== undefined) {
           send(response, 400, null, requestTraceId, parsed.error);
           return;
         }
@@ -414,7 +415,8 @@ export function createPlotHttpServer(
           patch.plotCode = plotCode;
         }
         const parsed = parseLineAttributes(input);
-        if (parsed.error) {
+        // 用 !== undefined 判错而不是真值判断：error 类型是 string，空串为假值时无法收窄联合类型，attrs 会被认为可能缺失
+        if (parsed.error !== undefined) {
           send(response, 400, null, requestTraceId, parsed.error);
           return;
         }
