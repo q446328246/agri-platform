@@ -747,16 +747,21 @@
   - 构建暴露类型修复：首次双目标构建在镜像内 `tsc -b` 报 plot-service `http.ts` 十处 TS18048——`parseLineAttributes` 返回联合类型的 `error: string` 可为空串，`if (parsed.error)` 真值判断无法收窄，`parsed.attrs` 被认为可能缺失；POST/PUT 两处改 `parsed.error !== undefined` 后本地 `tsc -b` 通过，重建成功（app Healthy / edge Started，四容器在线）。
   - 只读核验：`.runtime/verify-p2.mjs` 经 https://localhost 网关 **14 项全 PASS**——线路 enabled/template/machine 筛选与非法枚举 400、from-template 缺参 400/幽灵模板 404、quality-logs 列表/flag 筛选/非法 flag 400、video ai-events eventType 筛选/非法 400、消息列表；前端 bundle 递归扫 37 个分块命中全部六个 P2 标记（监管统计报表/质量异常日志/派单/从模板建档/设模板/事件类型）。写路径（派单/模板建档/上报打标）未实操，留待浏览器验收；单元测试仍未跑。
 
-### 2026-11-18（续三）：P3 控制深化交付（A7/A8/A18 + 伴随 A5/A6，迁移 050–052 已写未应用）
+### 2026-11-18（续三）：P3 控制深化交付（A7/A8/A18 + 伴随 A5/A6，迁移 050–052，已部署）
 
-- **迁移（已写未应用，部署待点名）**：`050_control_command_types_pause_schedule.sql`（指令 type CHECK 扩十一码、status CHECK 扩七态含 PAUSED、`scheduled_at` 可空列、在途部分索引重建含 PAUSED）；`051_control_authorizations.sql`（新表 control_authorizations：device_id/plot_code 可空=通配、valid_from/valid_to 闭区间 CHECK、两索引）；`052_ec_ph_rules_task_device.sql`（三条 EC/pH 全局规则种子 ON CONFLICT DO NOTHING + operation_tasks 加 device_id 可空列 + 部分索引）。
+- **迁移（已应用）**：`050_control_command_types_pause_schedule.sql`（指令 type CHECK 扩十一码、status CHECK 扩七态含 PAUSED、`scheduled_at` 可空列、在途部分索引重建含 PAUSED）；`051_control_authorizations.sql`（新表 control_authorizations：device_id/plot_code 可空=通配、valid_from/valid_to 闭区间 CHECK、两索引）；`052_ec_ph_rules_task_device.sql`（三条 EC/pH 全局规则种子 ON CONFLICT DO NOTHING + operation_tasks 加 device_id 可空列 + 部分索引）。
 - **A7 指令十一码与暂停/恢复**：CONTROL_STATUSES 七态，TRANSITIONS：SENT/ACKED→PAUSED、PAUSED→ACKED/DONE/FAILED；PAUSED 属在途（PENDING_STATUSES），超时收口照常覆盖；设备可自主上报 PAUSED 回执。PAUSE/RESUME 创建必填 `parameters.targetCommandId`（400），目标须存在（404）且同设备（400），PAUSE 目标须 SENT/ACKED、RESUME 目标须 PAUSED（409）；DONE 回执**同事务**联动目标跃迁（PAUSE→PAUSED、RESUME→ACKED），联动失败整体 409 供设备重试；目标已处期望状态跳过联动，同态回执幂等返回先于联动校验（防重复 DONE 误报 409）。POWER_OFF 与 ESTOP 同列 CONFIRM_REQUIRED_TYPES（DONE 必须 result.confirmed===true）。contracts `CommandTimeoutPayload.commandType` 同步扩码。
 - **A6 定时执行（伴随）**：创建可带 `scheduledAt`（未来 ISO，过去时刻/非法 400）；`/device/pending` 加 dueOnly 过滤 `(scheduled_at IS NULL OR scheduled_at <= now())`，到点自然被领取无需独立定时器；超时起点改 `COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at))`，page/listOverdue/ORDER BY 三处同口径。
 - **A8 作业授权范围管控**：新 `authorization.repository.ts`（SQL/InMemory 双实现 + coversOf 闭区间纯函数）；**空表=未启用放行**，count>0 且不覆盖→403「超出作业授权范围」；只约束人工下发，事件自动指令不受限。新端点 `GET/POST/DELETE /api/v1/control/authorizations`（网关 /control 前缀权限映射已覆盖；未装配仓储 501；POST/DELETE 需 x-user-id 否则 409；note≤200 字、窗口止>起 400）。
 - **A18 EC/pH 偏离联动**：`METRIC_RANGES` 补 soilEc [0,20000]；三条全局规则种子（soilEc above 2500 / soilPh above 8.5 / soilPh below 5.5，WARNING，**不动默认七条规则数组**保存量测试）；新 `ec-ph-adjust.ts` 纯函数 `adjustEcPh`：偏离比 r=clamp(|value−threshold|/threshold,0,1)，调整量 dosagePercent=min(30, r×50)%（保守封顶）；DILUTE→MAT-WATER-IRRIGATION / CONCENTRATE→MAT-FERT-NITROGEN / ACIDIFY→MAT-AMEND-ACID / ALKALIZE→MAT-AMEND-LIME（后两码新增，平台无农资字典表，沿 rule.engine 编码约定）。decision consumer 新 handler 消费 TelemetryThresholdBreached：处方 id=`rx-ecph-${eventId}` 先查后写幂等，同事务 outbox 发 DecisionPrescriptionIssued→control 既有 fertilization envelopeBlocked 路径人工确认；内存模式（无 issuance 装配）不发布；告警消息由既有越限模板覆盖不另发。
 - **A5 设备自动排队（伴随）**：任务可选绑 `deviceId`；新端点 `GET /api/v1/farm-tasks/queue?deviceId=`（缺参 400，路由置于 detailMatch 之前防被当任务 id）返回在册未结束任务 + position 位次；排序 优先级 HIGH→NORMAL→LOW → scheduledAt ASC NULLS LAST → createdAt → id，`queueCompare` 纯函数与 SQL ORDER BY CASE 同口径；conflictsOf 增同设备 reason「同设备计划时间重叠，将按队列顺序执行」（只提示不阻断）。
 - **前端**：utils 十一码文案 + PAUSED 已暂停/warning；api reportReceipt 扩 PAUSED、授权三方法 + ControlAuthorization 类型、getTaskQueue；device/List.vue 下发对话框十一码下拉 + PAUSE/RESUME 目标指令选择器（本机在途按状态过滤，与服务端同口径）+ 定时执行 datetime picker（过去时刻禁选）；device/Commands.vue 类型筛选十一码/状态 + PAUSED/回执 radio + PAUSED（PAUSED 行默认 ACKED 恢复语义）/定时执行列/作业授权对话框（列表通配显「全部」+ 建档 datetimerange 转 ISO + 删除二次确认）；farm/Task.vue 执行设备选填 + 列表/详情设备字段 + 设备任务队列对话框（位次表）+ 冲突提示含同设备；device/Monitor.vue 补土壤EC 卡片（μS/cm）与 soilEc/soilPh 趋势选项。
-- **交付口径**：**未跑验证**（无测试/构建/冒烟/浏览器实操，静态检查器不可用）；迁移 050–052 已写未应用、镜像未重建。**部署前须先应用 050–052**（新后端 SQL 引用新列，待用户点名）。测试兼容性已静态核实：control 无精确枚举数组断言、telemetry 无 METRIC_RANGES 断言、decision 无 topics 断言、operation 测试用真实仓储无自定义 mock。
+- **交付口径**：交付时未跑验证（无测试/冒烟/浏览器实操）；镜像重建与迁移应用随下方部署留痕完成。
+- **部署验证（2026-11-18，用户点名「部署 P3 并启动 P4」）**：
+  - 迁移：`node scripts/migrate-postgres.mjs` 应用 `050`–`052` 全部成功（22/22/9ms）。
+  - 构建暴露类型修复两处：首次双目标构建在镜像内 `tsc -b` 报 contracts `message-template.ts` TS2740——`COMMAND_TYPE_LABELS` 的 Record 键随 `CommandTimeoutPayload.commandType` 扩十一码后缺六码，补齐 PAUSE/RESUME/RETURN_HOME/POWER_OFF/TOOL_SWITCH/TILLAGE 中文标签，顺带 POWER_OFF 超时级别与 ESTOP 同升 CRITICAL（安全语义一致）；本地 `vue-tsc` 又报 farm/Task.vue TS2379（exactOptionalPropertyTypes 下显式 `deviceId: undefined` 不合法），改条件展开。本地 `tsc -b` + `vue-tsc` 双预检通过后重建成功（app Healthy / edge Started）。
+  - 只读核验暴露种子缺陷：`.runtime/verify-p3.mjs` 首轮 12/13，唯一失败项 `rule-soil-ph-low` 缺失——020 的唯一键 `(metric, plot_code, level)` 不含方向，pH 上下限两条同 WARNING 级规则冲突键相同，052 的 `ON CONFLICT DO NOTHING` 把第二条静默吞掉，碱化调理处方链路缺触发规则。**修复（迁移 `053_rule_key_direction.sql`）**：唯一键扩为 `(metric, plot_code, level, direction)` 四元组并补种三条 EC/pH 规则；`SqlRuleRepository.save`/`InMemoryRuleRepository.save` 冲突键同步改四元组（方向升为键字段不再参与 DO UPDATE）；前端四情页规则编辑锁定方向、新建查重与提示文案同步。分级语义不变：同指标同地块同方向仍每级一条。
+  - 修复后第三次重建双镜像（先 build 再应用 053（8ms）再 up -d，缩短新旧键切换窗口），复跑核验 **13 项全 PASS**——授权列表/建档缺窗口 400/止早于起 400/幽灵删除 404、commands PAUSE+PAUSED 筛选/非法类型 400、PAUSE 缺目标 400/幽灵目标 404、scheduledAt 过去时刻 400、任务队列缺参 400/位次结构、三条 EC/pH 规则种子；前端 bundle 递归扫 37 个分块命中全部七个 P3 标记（作业授权/设备任务队列/定时执行/已暂停/切换机具/返航/土壤EC）。写路径（下发/回执/授权建档）未实操，留待浏览器验收；单元测试仍未跑。
 
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
@@ -770,10 +775,10 @@
 | A2 | 5.4 快捷入口 | ~~无「一键巡田 / 快捷灌溉 / 作业计划 / 设备列表 / 报表中心」入口簇~~ **已完成**（2026-11-18，P1；报表中心路由投入产出页，监管统计报表本体已随 A4/P2 落在该页） | 驾驶舱 quick-cluster 五入口经 checkPermission 过滤 |
 | A3 | 5.4 告警处置 | ~~消息中心无「派单处置 / 忽略」操作~~ **已完成**（忽略 2026-11-17 迁移 `041`；派单 2026-11-18 P2 迁移 `048`，仅告警可派、与忽略互斥） | `message-service` `/messages/:id/ignore` + `/messages/:id/dispatch` + 前端派单对话框 |
 | A4 | 2.1 / 5.4 报表导出 | ~~仅地块列表支持 CSV 导出~~ **已完成**（投入产出与溯源导出 2026-11-17；监管统计报表与报表中心 2026-11-18 P2，五源前端聚合+CSV） | `finance/Index.vue` 监管统计报表卡、`trace/Index.vue` 引用 `exportCsv` |
-| A5 | 8.7 任务调度 | ~~无优先级设置、冲突检测~~ **优先级与同地块/负责人冲突提示已完成**（2026-11-17，迁移 `042`）；**设备自动排队已完成**（2026-11-18 P3，迁移 `052` 已写未应用：device_id + queue 端点位次 + 同设备冲突提示）；时间/天气冲突未做 | `task.repository.ts` `conflictsOf`/`queueCompare` + 创建响应 `conflicts` + `/farm-tasks/queue` |
-| A6 | 8.4 / 9.4 定时与自动停灌 | ~~「达到上限自动停止」未联动~~ **上限自动停灌已完成**（2026-11-17，迁移 `040`，只撤 QUEUED，在途走急停）；**定时执行已完成**（2026-11-18 P3，迁移 `050` 已写未应用：scheduledAt + dueOnly 到点领取，无独立定时器） | `control-service/consumer.ts` above 分支 + `/commands/:id/cancel` + `/device/pending` dueOnly |
-| A7 | 8.1 / 8.8 指令类型与应急 | ~~指令仅五类；无暂停/续作、返航、断电、切换机具~~ **已完成**（2026-11-18 P3，迁移 `050` 已写未应用：十一码 + PAUSED 状态机 + PAUSE/RESUME 同事务联动 + POWER_OFF 到位确认） | 迁移 `050` CHECK 与 `contracts/events/payload.ts` 同口径 |
-| A8 | 14.3 范围管控 | ~~指令无「授权地块 + 授权时间段」范围校验~~ **已完成**（2026-11-18 P3，迁移 `051` 已写未应用：授权表设备/地块通配 + 时间窗闭区间，空表放行、超范围人工下发 403，管理三端点） | `authorization.repository.ts` + `/control/authorizations` |
+| A5 | 8.7 任务调度 | ~~无优先级设置、冲突检测~~ **优先级与同地块/负责人冲突提示已完成**（2026-11-17，迁移 `042`）；**设备自动排队已完成**（2026-11-18 P3，迁移 `052` 已应用部署：device_id + queue 端点位次 + 同设备冲突提示）；时间/天气冲突未做 | `task.repository.ts` `conflictsOf`/`queueCompare` + 创建响应 `conflicts` + `/farm-tasks/queue` |
+| A6 | 8.4 / 9.4 定时与自动停灌 | ~~「达到上限自动停止」未联动~~ **上限自动停灌已完成**（2026-11-17，迁移 `040`，只撤 QUEUED，在途走急停）；**定时执行已完成**（2026-11-18 P3，迁移 `050` 已应用部署：scheduledAt + dueOnly 到点领取，无独立定时器） | `control-service/consumer.ts` above 分支 + `/commands/:id/cancel` + `/device/pending` dueOnly |
+| A7 | 8.1 / 8.8 指令类型与应急 | ~~指令仅五类；无暂停/续作、返航、断电、切换机具~~ **已完成**（2026-11-18 P3，迁移 `050` 已应用部署：十一码 + PAUSED 状态机 + PAUSE/RESUME 同事务联动 + POWER_OFF 到位确认） | 迁移 `050` CHECK 与 `contracts/events/payload.ts` 同口径 |
+| A8 | 14.3 范围管控 | ~~指令无「授权地块 + 授权时间段」范围校验~~ **已完成**（2026-11-18 P3，迁移 `051` 已应用部署：授权表设备/地块通配 + 时间窗闭区间，空表放行、超范围人工下发 403，管理三端点） | `authorization.repository.ts` + `/control/authorizations` |
 | A9 | 4.1 地块流转 | ~~变更历史无流转（权属变更）动作~~ **已完成**（2026-11-17，迁移 `043` + `/plots/:code/transfer` + 详情页流转入口） | `plot_change_logs` 动作枚举含 TRANSFER |
 | A10 | 4.4 线路属性 | ~~线路台账无宽度、限速、适用机型、启用/停用、模板复用~~ **已完成**（2026-11-18 P2，迁移 `047` 已应用部署）；轨迹采集生成线路仍无（依赖农机 T-Box，B 类） | `infra-line.repository.ts` 五字段 + `/infra-lines/from-template` + 台账表单筛选 |
 | A11 | 11.4 数据质量治理 | ~~遥测上报无可疑标记、补值剔除与异常日志~~ **已完成**（2026-11-18 P2，迁移 `049` 已应用部署：三类标记+曲线汇总剔除+异常日志端点）；数据字典/资产目录另列 | `telemetry-service/quality.ts` + `/telemetry/quality-logs` + Monitor 异常日志卡 |
@@ -783,11 +788,11 @@
 | A15 | 8.3 / 9.3 变量作业 | 无变量播种与地块内网格级变量施肥方案 | `operation-service/coverage.ts` 为全地块均匀牛耕式布带 |
 | A16 | 14.4 审计留存策略 | ~~审计日志无「留存 ≥6 个月」的归档/清理策略~~ **已完成**（2026-11-17，180 天硬底线 + 启动/周期清扫 + 策略观测端点） | `role.repository.ts` `purgeBefore` + `main.ts` 清扫定时器 |
 | A17 | 2.4 移动端 | 仅 Web SPA，无小程序/混合应用 | `apps/` 下无移动端工程 |
-| A18 | 6.1 / 9.2 EC/pH 闭环 | ~~无肥液 EC/pH 偏离自动调整配比联动~~ **已完成**（2026-11-18 P3，迁移 `052` 已写未应用：三条规则种子 + adjustEcPh 保守配比处方同事务签发，幂等按事件）；传感与执行硬件属 B 类 | `ec-ph-adjust.ts` + decision consumer onThresholdBreached + 迁移 `052` 种子 |
+| A18 | 6.1 / 9.2 EC/pH 闭环 | ~~无肥液 EC/pH 偏离自动调整配比联动~~ **已完成**（2026-11-18 P3，迁移 `052`/`053` 已应用部署：三条规则种子 + adjustEcPh 保守配比处方同事务签发，幂等按事件）；传感与执行硬件属 B 类 | `ec-ph-adjust.ts` + decision consumer onThresholdBreached + 迁移 `052`/`053` 种子 |
 
 ### A 类剩余 12 项缺口排期（2026-11-18 用户点名）
 
-> 口径：12 项 = 审计表未划完成行（A1/A2/A7/A8/A10/A11/A12/A13/A14/A15/A17/A18）；按依赖与价值分五批，批内可并行、批间顺序交付；每批独立可部署（纯前端批走 edge 单目标，迁移批应用待点名）。估时为单人开发人日，含自验不含 B 类外部联调。**P1（A1/A2）已于 2026-11-18 交付并部署；P2（A10/A12/A11 + 伴随 A3/A4）同日交付并经点名部署（迁移 047–049 已应用，只读核验 14 项 PASS）；P3（A7/A8/A18 + 伴随 A5 排队/A6 定时）同日交付（迁移 050–052 已写未应用，未跑验证，部署待点名），剩 4 项（A13/A14/A15/A17）待启动。**
+> 口径：12 项 = 审计表未划完成行（A1/A2/A7/A8/A10/A11/A12/A13/A14/A15/A17/A18）；按依赖与价值分五批，批内可并行、批间顺序交付；每批独立可部署（纯前端批走 edge 单目标，迁移批应用待点名）。估时为单人开发人日，含自验不含 B 类外部联调。**P1（A1/A2）已于 2026-11-18 交付并部署；P2（A10/A12/A11 + 伴随 A3/A4）同日交付并经点名部署（迁移 047–049 已应用，只读核验 14 项 PASS）；P3（A7/A8/A18 + 伴随 A5 排队/A6 定时）同日交付并经点名部署（迁移 050–053 已应用，只读核验 13 项 PASS，053 为部署核验暴露的规则唯一键修复），剩 4 项（A13/A14/A15/A17）待启动。P4 迁移号因 053 被部署修复占用顺延为 054/055，P5 A13 顺延为 056。**
 
 | 批次 | 项 | 内容摘要 | 迁移 | 估时 | 依赖/验收要点 |
 | --- | --- | --- | --- | --- | --- |
@@ -796,16 +801,16 @@
 | ~~P2 台账与契约~~ ✅ | A10 | 线路宽度/限速/适用机型/启用停用/模板复用 | 047 | 2d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：CHECK 与 contracts MachineType 同步；台账表单与筛选可用 |
 | ~~P2~~ ✅ | A12 | AI 事件类型扩 PERSON_INTRUSION/MACHINE_STATUS/FLOOD/LODGING/FIRE/SMOKE，pestType 改条件必填+消息转发 | 048 | 1.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：契约与网关回调登记同步；模型本体仍 B 类 |
 | ~~P2~~ ✅ | A11 | 遥测质量标记（超量程/连续不变/时间戳异常）+曲线与汇总剔除+异常日志端点 | 049 | 2.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：三类标记纯函数可注入冒烟；数据字典/资产目录另列 |
-| ~~P3 控制深化~~ ✅ | A7 | 指令扩 PAUSE/RESUME/RETURN_HOME/POWER_OFF/TOOL_SWITCH/TILLAGE | 050 | 3d | ✅ 已交付（迁移已写未应用，部署待点名，未跑验证）：PAUSED 状态机 + PAUSE/RESUME 同事务联动；contracts payload 同步 |
-| ~~P3~~ ✅ | A8 | 指令授权地块+授权时间窗范围校验（三重管控升四重） | 051 | 2.5d | ✅ 已交付（迁移已写未应用，部署待点名，未跑验证）：空表放行、超范围人工下发 403；管理三端点 + 前端授权对话框 |
-| ~~P3~~ ✅ | A18 | EC/pH 偏离规则种子+决策联动肥液配比调整处方 | 052 | 2d | ✅ 已交付（迁移已写未应用，部署待点名，未跑验证）：依赖 A11 质量标记防误触发；处方幂等按事件、人工确认路径 |
-| P4 空间与变量 | A14 | 地块内网格长势分布热力层（IDW 插值遥测+生育期），多光谱输入留 B 类接口 | 053 | 3d | 空数据降级；**验收前需点名补遥测演示种子或接真实上报（046 后曲线为空）** |
-| P4 | A15 | 网格级变量播种/施肥方案（分区速率表+coverage 逐带速率输出） | 054 | 4d | 变量路径里程与速率汇总单测；依赖 A14 网格基础 |
-| P5 视频与移动 | A13 | 2/4/9 分屏监看+逐屏截图/PTZ；录像留档仅留接口与档案表（片源依赖 B 类流媒体） | 055 | 3d | 分屏切换不泄漏播放器实例 |
+| ~~P3 控制深化~~ ✅ | A7 | 指令扩 PAUSE/RESUME/RETURN_HOME/POWER_OFF/TOOL_SWITCH/TILLAGE | 050 | 3d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：PAUSED 状态机 + PAUSE/RESUME 同事务联动；contracts payload 同步 |
+| ~~P3~~ ✅ | A8 | 指令授权地块+授权时间窗范围校验（三重管控升四重） | 051 | 2.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：空表放行、超范围人工下发 403；管理三端点 + 前端授权对话框 |
+| ~~P3~~ ✅ | A18 | EC/pH 偏离规则种子+决策联动肥液配比调整处方 | 052/053 | 2d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：依赖 A11 质量标记防误触发；处方幂等按事件、人工确认路径；053 修规则唯一键并入方向 |
+| P4 空间与变量 | A14 | 地块内网格长势分布热力层（IDW 插值遥测+生育期），多光谱输入留 B 类接口 | 054 | 3d | 空数据降级；**验收前需点名补遥测演示种子或接真实上报（046 后曲线为空）** |
+| P4 | A15 | 网格级变量播种/施肥方案（分区速率表+coverage 逐带速率输出） | 055 | 4d | 变量路径里程与速率汇总单测；依赖 A14 网格基础 |
+| P5 视频与移动 | A13 | 2/4/9 分屏监看+逐屏截图/PTZ；录像留档仅留接口与档案表（片源依赖 B 类流媒体） | 056 | 3d | 分屏切换不泄漏播放器实例 |
 | P5 | A17 | 移动端 H5 响应式优先（驾驶舱/巡田/任务回执三页），小程序另立项评估 | 无 | 10d | 375px 宽可用；独立工程不混入 apps/web 桌面布局 |
 
-- **合计**：12 项主 list ≈36 人日（P1 3 / P2 6 / P3 7.5 / P4 7 / P5 13，含批次内并行压缩空间）；P1/P2 已交付并部署、P3 已交付待部署，剩 ≈20 人日（P4 7 / P5 13）。
-- **伴随小项**（部分完成行的残留，不计入 12 项）：~~A3 派单处置（1d，随 P2）~~ ✅、~~A4 监管统计报表与报表中心本体（2d，随 P2）~~ ✅（均 2026-11-18 交付）、~~A5 自动排队（1d，随 P3）~~ ✅、~~A6 定时执行调度器（1.5d，随 P3）~~ ✅（均 2026-11-18 交付，迁移待应用）。
+- **合计**：12 项主 list ≈36 人日（P1 3 / P2 6 / P3 7.5 / P4 7 / P5 13，含批次内并行压缩空间）；P1/P2/P3 已交付并部署，剩 ≈20 人日（P4 7 / P5 13）。
+- **伴随小项**（部分完成行的残留，不计入 12 项）：~~A3 派单处置（1d，随 P2）~~ ✅、~~A4 监管统计报表与报表中心本体（2d，随 P2）~~ ✅（均 2026-11-18 交付）、~~A5 自动排队（1d，随 P3）~~ ✅、~~A6 定时执行调度器（1.5d，随 P3）~~ ✅（均 2026-11-18 交付，迁移已应用）。
 - **顺序理由**：P1 无迁移零风险先见效果；P2 为 P3/P4 提供质量标记与契约基础；A18 挂 P3 末因依赖 A11；P4 依赖数据积累故置后；P5 重且部分悬 B 类殿后。
 
 ### B. 外部依赖（需现场 / 第三方条件，平台侧接口已就绪或已留痕）
@@ -833,7 +838,7 @@
 
 > **交付口径（2026-11-11 起，用户长期要求）**：改完直接 `git commit` + `git push`，**不再**跑单元测试 / `tsc -b` / `pnpm build` / `smoke-*` 冒烟 / 浏览器实操验证，**不再**重建或重新部署 `app`、`edge` 镜像。迁移文件照常编写，只在用户点名时才应用到库；风险较高的改动收工时注明「未跑验证」即可。
 
-首版业务链路已闭环，剩余工作是业务子项补齐与外部依赖对接。**代码侧可补齐的功能缺口见上方「未完成功能清单（2026-11-17）」A 类 18 项，其中 6 项（A3 忽略 / A4 导出 / A5 优先级与冲突提示 / A6 自动停灌 / A9 流转 / A16 审计留存）已于 2026-11-17 补齐，A1/A2 已于 2026-11-18 按 P1 交付并部署，A10/A12/A11 及伴随 A3 派单/A4 监管报表同日按 P2 交付并经点名部署（迁移 047–049 已应用，只读核验 14 项 PASS），A7/A8/A18 及伴随 A5 排队/A6 定时同日按 P3 交付（迁移 050–052 已写未应用，未跑验证，部署待点名），剩 4 项按 P4–P5 排期待启动；B 类外部依赖与下方第 10 条口径一致**：
+首版业务链路已闭环，剩余工作是业务子项补齐与外部依赖对接。**代码侧可补齐的功能缺口见上方「未完成功能清单（2026-11-17）」A 类 18 项，其中 6 项（A3 忽略 / A4 导出 / A5 优先级与冲突提示 / A6 自动停灌 / A9 流转 / A16 审计留存）已于 2026-11-17 补齐，A1/A2 已于 2026-11-18 按 P1 交付并部署，A10/A12/A11 及伴随 A3 派单/A4 监管报表同日按 P2 交付并经点名部署（迁移 047–049 已应用，只读核验 14 项 PASS），A7/A8/A18 及伴随 A5 排队/A6 定时同日按 P3 交付并经点名部署（迁移 050–053 已应用，只读核验 13 项 PASS），剩 4 项按 P4–P5 排期待启动；B 类外部依赖与下方第 10 条口径一致**：
 
 1. **已完成**：会话持久化与口令强散列（`007` 迁移 + `SessionRepository` + scrypt + `POST /auth/refresh`），旧 token 重启后仍有效，改密/删号即时回收会话。
 2. **已完成**：部署编排（`Dockerfile` 双目标、compose `app`/`edge`、HTTPS 终止、`AUTH_GUARD_MODE=enforce`、连接池与内部凭证配置）；已在本机完成镜像构建与容器实跑复验（详见「本机容器化部署实录」）。环境侧约束：`docker.io` 直连不可用，需先把基础镜像经镜像源拉取并重打 tag。
@@ -1195,3 +1200,4 @@
 | 2026-11-18 | P2 交付（A10/A12/A11 + A3/A4，迁移 047–049 编写） | **未跑验证**（按交付口径不跑测试/构建/冒烟，静态检查器不可用）；迁移未应用、镜像未重建；新后端 SQL 引用新列，部署前须先应用 047–049（待点名） |
 | 2026-11-18 | `node scripts/migrate-postgres.mjs` + `docker compose --profile app up -d --build` + `node .runtime/verify-p2.mjs`（P2 部署，用户点名） | 迁移 047–049 应用成功（31/16/27ms）；首次构建暴露 plot http.ts 联合类型收窄 TS18048，改 `!== undefined` 判错后本地 tsc -b 与镜像内构建通过，双镜像重建 app Healthy/edge Started；只读核验 **14 项全 PASS**（新端点筛选/非法枚举 400/模板校验 + 扫 37 chunk 命中六个 P2 标记） |
 | 2026-11-18 | P3 交付（A7/A8/A18 + A5/A6，迁移 050–052 编写） | **未跑验证**（按交付口径不跑测试/构建/冒烟，静态检查器不可用）；迁移未应用、镜像未重建；新后端 SQL 引用新列，部署前须先应用 050–052（待点名）；测试兼容性已静态核实（无精确枚举/量程/topics 断言冲突） |
+| 2026-11-18 | `node scripts/migrate-postgres.mjs` + `docker compose --profile app up -d --build` + `node .runtime/verify-p3.mjs`（P3 部署，用户点名） | 迁移 050–052 应用成功（22/22/9ms）；首次构建暴露 message-template.ts 六码缺失 TS2740 与 Task.vue TS2379，修复后双预检通过重建成功；首轮核验 12/13 暴露 pH 下限种子被三元组唯一键吞掉 → 迁移 053 四元组修复 + 仓储/前端同步，第三次重建后复跑 **13 项全 PASS**（扫 37 chunk 命中七个 P3 标记） |

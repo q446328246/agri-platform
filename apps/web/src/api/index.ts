@@ -496,7 +496,7 @@ export const telemetryApi = {
   getOverview(params?: { plotCode?: string; metric?: string; level?: MessageLevel; pestType?: string }): Promise<TelemetryOverview> {
     return get<TelemetryOverview>('/telemetry/overview', cleanParams(params))
   },
-  /** 阈值规则维护：按 (指标, 地块, 级别) 唯一；传 plotCode 时返回该地块专属 + 全局兜底 */
+  /** 阈值规则维护：按 (指标, 地块, 级别, 方向) 唯一；传 plotCode 时返回该地块专属 + 全局兜底 */
   getRules(plotCode?: string): Promise<TelemetryRule[]> {
     return get<TelemetryRule[]>('/telemetry/rules', cleanParams(plotCode ? { plotCode } : undefined))
   },

@@ -360,10 +360,11 @@
           <span class="rule-hint">留空为全局默认；地块专属规则优先于全局</span>
         </el-form-item>
         <el-form-item label="判定方向">
-          <el-radio-group v-model="ruleForm.direction">
+          <el-radio-group v-model="ruleForm.direction" :disabled="ruleEditing">
             <el-radio value="above">高于上限</el-radio>
             <el-radio value="below">低于下限</el-radio>
           </el-radio-group>
+          <span v-if="ruleEditing" class="rule-hint">方向也是唯一键的一部分，需要更换请新建一条</span>
         </el-form-item>
         <el-form-item label="阈值">
           <el-input-number v-model="ruleForm.threshold" :min="0" :max="1000" :step="1" />
@@ -373,7 +374,7 @@
           <el-select v-model="ruleForm.level" :disabled="ruleEditing" style="width: 160px">
             <el-option label="提示" value="INFO" /><el-option label="预警" value="WARNING" /><el-option label="告警" value="CRITICAL" />
           </el-select>
-          <span v-if="ruleEditing" class="rule-hint">指标 + 地块 + 级别是唯一键，需要更换请新建一条</span>
+          <span v-if="ruleEditing" class="rule-hint">指标 + 地块 + 级别 + 方向是唯一键，需要更换请新建一条</span>
         </el-form-item>
         <el-form-item label="告警文案">
           <el-input v-model="ruleForm.message" type="textarea" :rows="2" placeholder="留空则按「指标 越限告警」自动生成" />
@@ -1217,7 +1218,7 @@ async function submitPest() {
 
 function openRuleCreate() {
   ruleEditing.value = false
-  // 规则按 (指标, 地块, 级别) 唯一，新建默认落到土壤湿度全局提示级，避开已有的全局预警/告警默认
+  // 规则按 (指标, 地块, 级别, 方向) 唯一，新建默认落到土壤湿度全局提示级，避开已有的全局预警/告警默认
   ruleForm.metric = 'soilMoisture'
   ruleForm.plotCode = ''
   ruleForm.direction = 'below'
@@ -1242,8 +1243,8 @@ function openRuleEdit(row: TelemetryRule) {
 
 async function saveRule() {
   const plotCode = ruleForm.plotCode ?? ''
-  if (!ruleEditing.value && rules.value.some((item) => item.metric === ruleForm.metric && item.plotCode === plotCode && item.level === ruleForm.level)) {
-    ElMessage.warning('该指标在此地块上已有此级别的规则，请在列表里点「编辑」')
+  if (!ruleEditing.value && rules.value.some((item) => item.metric === ruleForm.metric && item.plotCode === plotCode && item.level === ruleForm.level && item.direction === ruleForm.direction)) {
+    ElMessage.warning('该指标在此地块上已有此级别此方向的规则，请在列表里点「编辑」')
     return
   }
   ruleSaving.value = true

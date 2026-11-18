@@ -237,13 +237,19 @@ const plotCreatedTemplate: MessageTemplate<PlotCreatedPayload> = {
   },
 };
 
-/** 指令类型中文名，缺省回落到类型编码 */
+/** 指令类型中文名，缺省回落到类型编码；十一码与迁移 050 的 CHECK 同源 */
 const COMMAND_TYPE_LABELS: Record<CommandTimeoutPayload["commandType"], string> = {
   SEEDING: "播种",
   IRRIGATION: "灌溉",
   WEEDING: "除草",
   FERTILIZATION: "施肥",
   ESTOP: "急停",
+  PAUSE: "暂停",
+  RESUME: "恢复",
+  RETURN_HOME: "返航",
+  POWER_OFF: "断电",
+  TOOL_SWITCH: "切换机具",
+  TILLAGE: "耕整地",
 };
 
 /**
@@ -259,8 +265,8 @@ const commandTimeoutTemplate: MessageTemplate<CommandTimeoutPayload> = {
     const type = COMMAND_TYPE_LABELS[payload.commandType] ?? payload.commandType;
     return {
       type: "ALERT",
-      // 急停收口意味着「没人确认设备停下来」，级别高于普通作业指令
-      level: payload.commandType === "ESTOP" ? "CRITICAL" : "WARNING",
+      // 急停/断电收口意味着「没人确认设备停下来」，级别高于普通作业指令
+      level: payload.commandType === "ESTOP" || payload.commandType === "POWER_OFF" ? "CRITICAL" : "WARNING",
       title: `指令超时未回执：${plotCode} ${type}`,
       content:
         `设备 ${payload.deviceId} 的${type}指令已等待 ${payload.pendingMin} 分钟，超过 ${payload.timeoutMin} 分钟未收到回执，系统已收口为失败。` +

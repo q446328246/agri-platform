@@ -397,7 +397,7 @@ async function submitCreate() {
     const created = await operationApi.createTask({
       ...createForm,
       // 空串是「不绑设备」，不能发给后端（服务端按选填非空串校验）
-      deviceId: createForm.deviceId.trim() || undefined
+      ...(createForm.deviceId.trim() ? { deviceId: createForm.deviceId.trim() } : {})
     })
     createVisible.value = false
     await fetchList()

@@ -8,7 +8,8 @@ import { toIsoTimestamp } from "@agri/shared";
  * 上报读数时按 metric 找命中的规则，方向决定是上限还是下限，级别决定告警与消息级别。
  *
  * 分级阈值（开发方案 6.1）：同一指标在同一地块上可配置「提示—预警—告警」三级，
- * 每级一条规则（uq_telemetry_rules_metric_plot_level）。plot_code 为空串表示全局默认，
+ * 每级每方向一条规则（uq_telemetry_rules_metric_plot_level_dir，迁移 053 把方向并入唯一键，
+ * 让 pH 这类「上下限双边界」指标能在同一级各放一条）。plot_code 为空串表示全局默认，
  * 地块未单独配置时回落到全局规则；上报命中多级时只按最严重的一级生成一条告警。
  */
 
@@ -47,7 +48,7 @@ export interface RuleRepository {
   list(): Promise<TelemetryRule[]>;
   /** 取指标在某地块上启用中的分级规则：地块专属优先，未配置则回落全局；返回命中的各级规则 */
   findEnabled(metric: string, plotCode?: string): Promise<TelemetryRule[]>;
-  /** 按 (指标, 地块, 级别) 幂等写入：存在则更新阈值与文案 */
+  /** 按 (指标, 地块, 级别, 方向) 幂等写入：存在则更新阈值与文案 */
   save(rule: TelemetryRule): Promise<TelemetryRule>;
   /** 删除规则：缺省级别时删除该指标在该地块上的全部各级规则 */
   remove(metric: string, plotCode?: string, level?: RuleLevel): Promise<boolean>;
@@ -74,9 +75,9 @@ export function breaches(rule: TelemetryRule, value: number): boolean {
   return rule.direction === "above" ? value > rule.threshold : value < rule.threshold;
 }
 
-/** 规则唯一键：指标 + 地块 + 级别 */
-function ruleKey(metric: string, plotCode: string, level: RuleLevel): string {
-  return `${metric}::${plotCode}::${level}`;
+/** 规则唯一键：指标 + 地块 + 级别 + 方向（方向入键后上下限可同级共存） */
+function ruleKey(metric: string, plotCode: string, level: RuleLevel, direction: RuleDirection): string {
+  return `${metric}::${plotCode}::${level}::${direction}`;
 }
 
 function toRule(row: Record<string, unknown>): TelemetryRule {
@@ -123,12 +124,12 @@ export class SqlRuleRepository implements RuleRepository {
   }
 
   async save(rule: TelemetryRule): Promise<TelemetryRule> {
-    // ON CONFLICT 保留的是原有行的 id（指标+地块+级别这一档只有一行），
+    // ON CONFLICT 保留的是原有行的 id（指标+地块+级别+方向这一档只有一行），
     // 所以返回值必须回读那一行：把调用方带来的新 id 原样返回，前端下一步按 id 操作就找不到规则了。
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `INSERT INTO telemetry_rules (id, metric, plot_code, direction, threshold, level, message, enabled, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (metric, plot_code, level) DO UPDATE SET direction = EXCLUDED.direction, threshold = EXCLUDED.threshold,
+       ON CONFLICT (metric, plot_code, level, direction) DO UPDATE SET threshold = EXCLUDED.threshold,
          message = EXCLUDED.message, enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at
        RETURNING id, metric, plot_code, direction, threshold, level, message, enabled, updated_at`,
       rule.id,
@@ -171,7 +172,7 @@ export class InMemoryRuleRepository implements RuleRepository {
   private readonly rows = new Map<string, TelemetryRule>();
 
   constructor(seed: TelemetryRule[] = []) {
-    for (const rule of seed) this.rows.set(ruleKey(rule.metric, rule.plotCode, rule.level), rule);
+    for (const rule of seed) this.rows.set(ruleKey(rule.metric, rule.plotCode, rule.level, rule.direction), rule);
   }
 
   async list(): Promise<TelemetryRule[]> {
@@ -188,13 +189,13 @@ export class InMemoryRuleRepository implements RuleRepository {
   }
 
   async save(rule: TelemetryRule): Promise<TelemetryRule> {
-    // 与 SQL 的 ON CONFLICT DO UPDATE 同一口径：同一档规则保留原有 id 与键字段，
-    // 只覆盖方向、阈值、文案、开关与更新时间。整行替换会让每次保存都换掉规则 id。
-    const existing = this.rows.get(ruleKey(rule.metric, rule.plotCode, rule.level));
+    // 与 SQL 的 ON CONFLICT DO UPDATE 同一口径：同一档规则保留原有 id 与键字段（含方向），
+    // 只覆盖阈值、文案、开关与更新时间。整行替换会让每次保存都换掉规则 id。
+    const existing = this.rows.get(ruleKey(rule.metric, rule.plotCode, rule.level, rule.direction));
     const saved: TelemetryRule = existing
-      ? { ...existing, direction: rule.direction, threshold: rule.threshold, message: rule.message, enabled: rule.enabled, updatedAt: rule.updatedAt }
+      ? { ...existing, threshold: rule.threshold, message: rule.message, enabled: rule.enabled, updatedAt: rule.updatedAt }
       : { ...rule };
-    this.rows.set(ruleKey(saved.metric, saved.plotCode, saved.level), saved);
+    this.rows.set(ruleKey(saved.metric, saved.plotCode, saved.level, saved.direction), saved);
     return { ...saved };
   }
 
@@ -212,7 +213,7 @@ export class InMemoryRuleRepository implements RuleRepository {
 
   async seed(rules: TelemetryRule[]): Promise<number> {
     if (this.rows.size > 0) return 0;
-    for (const rule of rules) this.rows.set(ruleKey(rule.metric, rule.plotCode, rule.level), rule);
+    for (const rule of rules) this.rows.set(ruleKey(rule.metric, rule.plotCode, rule.level, rule.direction), rule);
     return rules.length;
   }
 }
