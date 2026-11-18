@@ -729,7 +729,8 @@
 - **A1 测距/测面**：新增 `components/MapMeasure.vue`（无渲染组件，临时层+实时 tooltip）：单击加点、鼠标移动实时预览末段与累计值、双击结束（结果留图）、Esc/失焦取消；面积/长度直接复用 `utils/geo` 的 `polygonAreaMu`/`polylineLengthM`，与地块落库面积同一套公式（验收误差 <1% 天然满足）。工具行挂 `BaseMapSwitch` 第三行（测距/测面/导出/清除，`tools` 开关仅驾驶舱启用，弹出页地图不受影响）；测量与绘制互斥，测量期间信息卡穿透抑制，面板打开/底图重建自动收草稿。
 - **A1 图幅导出 PNG**：新增 `utils/mapExport.ts`：当前视野按设备像素比（≤2x）合成底图瓦片 + 矢量图层（地块/片区/管线/设备聚合点位/测量结果）+ 标题栏（底图名/时间戳）。瓦片经 fetch 跨域读取，屏幕落点走 Leaflet `_tileCoordsToNwSe` + `latLngToContainerPoint`，GCJ-02 定制投影与超原生级插值自动同系；源站不允许 CORS（谷歌/高德）时退化为深色底矢量图幅并明示提示，Esri/天地图等允许跨域的源导出含真实影像（验收「含边界与底图」在可跨域源上满足）。
 - **A1 大屏投放**：控制簇新增 ⛶ 钮：隐藏菜单/入口簇/图层面板/天气卡/底图工具条并关闭浮层面板，字号放大（状态条/tooltip/弹窗/设备徽标），尽量连带浏览器全屏（被拒不阻断）；Esc 或右上半透明「退出大屏」钮恢复。图层面板顺势下移到控制簇+入口簇之下，消除原有叠压。
-- **交付口径**：纯前端改动，未跑测试/构建/浏览器验证（静态复核：监听器增删配对、测量/绘制/框选三态互斥、noUnusedLocals 隐患已清）；**未重建镜像，待点名部署**（前端-only 走 edge 单目标路径）。
+- **交付口径**：纯前端改动，未跑测试/构建/浏览器验证（静态复核：监听器增删配对、测量/绘制/框选三态互斥、noUnusedLocals 隐患已清）。
+- **部署（同日用户点名）**：前端-only 走 edge 单目标路径——`docker build --target edge`（build 阶段随源码变动重跑：依赖 13.5s + tsc 7.1s + vue-tsc/vite 23.1s，镜像内类型检查与打包顺带通过）+ `compose --profile app up -d edge`（不带 --build，app/postgres/minio 未重启保持 Healthy）；天地图 Key 在 apps/web/.env，构建参数空传 unset 不覆盖。线上 bundle 递归核验 **9 项全 PASS**（扫 39 chunk：一键巡田/工具行类名/measure-tip/导出提示/退出大屏 + 缩放条与框选回归，网关 401 预期）。
 
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
@@ -760,7 +761,7 @@
 
 ### A 类剩余 12 项缺口排期（2026-11-18 用户点名）
 
-> 口径：12 项 = 审计表未划完成行（A1/A2/A7/A8/A10/A11/A12/A13/A14/A15/A17/A18）；按依赖与价值分五批，批内可并行、批间顺序交付；每批独立可部署（纯前端批走 edge 单目标，迁移批应用待点名）。估时为单人开发人日，含自验不含 B 类外部联调。**P1（A1/A2）已于 2026-11-18 交付（见同日续节），剩 10 项待启动；P1 代码未部署，待点名。**
+> 口径：12 项 = 审计表未划完成行（A1/A2/A7/A8/A10/A11/A12/A13/A14/A15/A17/A18）；按依赖与价值分五批，批内可并行、批间顺序交付；每批独立可部署（纯前端批走 edge 单目标，迁移批应用待点名）。估时为单人开发人日，含自验不含 B 类外部联调。**P1（A1/A2）已于 2026-11-18 交付并部署（见同日续节），剩 10 项待启动。**
 
 | 批次 | 项 | 内容摘要 | 迁移 | 估时 | 依赖/验收要点 |
 | --- | --- | --- | --- | --- | --- |
@@ -1164,3 +1165,4 @@
 | 2026-11-17 | `docker build --target edge` + `compose --profile app up -d edge` + `node .runtime/verify-edge-basemap.mjs`（续六仅前端部署） | compose `up --build edge` 连带重建 app 且其 PGDG curl 网络抖动 exit 18 中止 → 改单独 build edge 目标（0.6s 缓存）再 up；edge 换新 bundle、app 等三容器未重启保持 Healthy；只读核验 **5 项 PASS**（框选浮提示文案/Esc title/缩放条回归标记） |
 | 2026-11-18 | 迁移 `046_history_clear_demo_restore.sql` 应用（用户点名清历史+恢复口令） | 已应用（23ms）；历史七表+七辅表清空，devices 12 台/绑定 11 保留，四演示账号回种子散列、temp01 回 DISABLED |
 | 2026-11-18 | `node .runtime/verify-046.mjs` + `node scripts/smoke-demo-data.mjs` | 核验 **27 项全 PASS**（含网关实测 demo123 三账号 200 / temp01 403 / admin 200）；冒烟 **37 项全 PASS、0 WARN**（账号漂移消除，历史类改空列表可用口径） |
+| 2026-11-18 | `docker build --target edge` + `compose --profile app up -d edge` + `node .runtime/verify-edge-basemap.mjs`（P1 仅前端部署） | edge 单目标重建（镜像内 vue-tsc + vite 顺带通过）、app 等三容器未重启；线上 bundle 只读核验 **9 项全 PASS**（扫 39 chunk 含一键巡田/工具行/measure-tip/导出提示/退出大屏与缩放条框选回归） |
