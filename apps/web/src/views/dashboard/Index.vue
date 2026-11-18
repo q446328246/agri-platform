@@ -1,10 +1,10 @@
 <template>
-  <div class="cockpit" :class="{ drawing: !!activeShape }">
+  <div class="cockpit" :class="{ drawing: !!activeShape, bigscreen: bigScreen }">
     <!-- 全屏卫星底图 -->
     <div id="tianditu-map"></div>
 
-    <!-- 左侧功能菜单树：可跳转项走路由，图层项就地切换 -->
-    <aside class="func-menu" :class="{ collapsed: menuCollapsed }">
+    <!-- 左侧功能菜单树：可跳转项走路由，图层项就地切换；大屏投放时隐藏 -->
+    <aside v-show="!bigScreen" class="func-menu" :class="{ collapsed: menuCollapsed }">
       <div class="func-menu__head">
         <span class="brand-dot"></span>
         <span v-if="!menuCollapsed" class="brand-title">智耘蜀芯 · 一张图</span>
@@ -46,8 +46,11 @@
       </div>
     </aside>
 
-    <!-- 右上：控制簇（消息 / 用户） -->
-    <div class="ctl-cluster">
+    <!-- 右上：控制簇（快捷入口 / 消息 / 大屏 / 用户） -->
+    <div v-show="!bigScreen" class="ctl-cluster">
+      <button class="ctl-btn" type="button" title="大屏投放：隐藏菜单面板并放大字号，Esc 或右上角退出" @click="enterBigScreen">
+        <span class="ctl-ico">⛶</span>
+      </button>
       <button v-if="allowed('message:read')" class="ctl-btn" type="button" title="消息中心" @click="handleCommand('message')">
         <span class="ctl-ico">✉</span>
         <span v-if="unread > 0" class="ctl-badge">{{ unread > 99 ? '99+' : unread }}</span>
@@ -63,8 +66,24 @@
       </div>
     </div>
 
+    <!-- 快捷入口簇（A2）：高频业务一键直达，复用既有浮层面板；权限过滤与左侧菜单同口径 -->
+    <div v-show="!bigScreen" class="quick-cluster">
+      <button
+        v-for="entry in quickEntries.filter((q) => allowed(q.perm))"
+        :key="entry.label"
+        class="quick-btn"
+        :class="{ active: activePanel === entry.panel }"
+        type="button"
+        :title="entry.hint"
+        @click="openPanel(entry.panel, entry.label)"
+      >
+        <span class="quick-ico" v-html="entry.icon"></span>
+        <span>{{ entry.label }}</span>
+      </button>
+    </div>
+
     <!-- 右上：图层可视 + 管线图例（面板打开时隐藏） -->
-    <div v-if="!panelOpen" class="layer-panel">
+    <div v-if="!panelOpen && !bigScreen" class="layer-panel">
       <button class="layer-toggle" type="button" @click="layerOpen = !layerOpen">
         <span v-html="layersIcon"></span><span>图层可视</span><span class="group-caret" :class="{ open: layerOpen }">⌄</span>
       </button>
@@ -88,8 +107,22 @@
       </div>
     </div>
 
-    <!-- 底部居中：底图切换 + 精确缩放条（共享组件暗色覆盖），选择持久化 -->
-    <BaseMapSwitch v-if="!panelOpen" :model-value="baseMapKey" :map="mapHandle" @update:model-value="switchBaseMap" @custom-updated="onCustomUpdated" />
+    <!-- 底部居中：底图切换 + 精确缩放条 + 地图工具（测距/测面/导出/清除），选择持久化 -->
+    <BaseMapSwitch
+      v-if="!panelOpen && !bigScreen"
+      :model-value="baseMapKey"
+      :map="mapHandle"
+      :measuring="measureMode"
+      tools
+      @update:model-value="switchBaseMap"
+      @custom-updated="onCustomUpdated"
+      @measure="onMeasure"
+      @export-png="onExportPng"
+      @clear-measure="measureTool?.clear()"
+    />
+
+    <!-- 测距/测面：临时层 + 实时 tooltip，不入库；底图重建时随 map 句柄自动复位 -->
+    <MapMeasure ref="measureTool" :map="mapHandle" @active-change="measureMode = $event" />
 
     <!-- 地图绘制/改边界卡片：管线、地块、片区共用，单击地图落点，拖动顶点微调 -->
     <MapShapeEditor
@@ -102,7 +135,7 @@
     />
 
     <!-- 右下：天气卡片（面板打开时隐藏） -->
-    <div v-if="!panelOpen" class="weather-card">
+    <div v-if="!panelOpen && !bigScreen" class="weather-card">
       <div v-if="weather.alertTotal > 0" class="wx-alert" :title="`活跃预警 ${weather.alertTotal} 条`">
         <span class="wx-alert-dot"></span>预警 {{ weather.alertTotal }}
       </div>
@@ -154,6 +187,9 @@
       </div>
     </div>
 
+    <!-- 大屏投放退出钮：隐菜单后唯一常驻控件，Esc 同样可退 -->
+    <button v-if="bigScreen" class="bigscreen-exit" type="button" title="退出大屏投放（Esc）" @click="exitBigScreen">⛶ 退出大屏</button>
+
     <!-- 左下状态条 -->
     <div class="map-status"><span class="status-dot"></span><span>{{ baseMapLabel }}</span><i></i><span>{{ mapMessage }}</span></div>
   </div>
@@ -172,10 +208,13 @@ import type { MapShapeActive, MapShapeKind, MapShapeSaved, Plot } from '@/types'
 import { getPlotTypeText } from '@/utils'
 import { baseMapCrs, baseMapLabelOf, baseMapMaxZoom, createBaseLayer, createBaseLayers, isGcjBaseMap, readStoredBaseMap, storeBaseMap, type BaseMapKey } from '@/utils/basemap'
 import { parsePlotBoundaries, polygonAreaMu, type PlotBoundary, type PlotBoundarySource } from '@/utils/geo'
+import { exportMapPng } from '@/utils/mapExport'
 import { LINE_PANEL_BRIDGE, catColor, categorize, lineCategories, lineColorOf, lineTypeLabel } from '@/utils/infraLine'
 import type { LineCat, LinePanelBridge } from '@/utils/infraLine'
 import MapShapeEditor from '@/components/MapShapeEditor.vue'
 import BaseMapSwitch from '@/components/BaseMapSwitch.vue'
+import MapMeasure from '@/components/MapMeasure.vue'
+import type { MeasureMode } from '@/utils/measure'
 import { useUserStore } from '@/stores'
 import { checkPermission } from '@/utils/permission'
 
@@ -312,6 +351,19 @@ function allowed(perm?: string): boolean {
   return !perm || checkPermission(userStore.permissions, perm)
 }
 
+// ---------- 快捷入口簇（A2）：高频业务一键直达 ----------
+// 目标面板均已在 panelComps 登记（/farm/record、/device/irrigation、/farm/task、/device/list、/finance），
+// 新增入口时须同步登记；权限码与路由 meta.permission 一致，经 checkPermission 过滤。
+// 报表中心本体（监管统计报表）属 A4 随 P2 补齐，当前先路由到最接近的投入产出核算页。
+interface QuickEntry { label: string; panel: string; perm: string; hint: string; icon: string }
+const quickEntries: QuickEntry[] = [
+  { label: '一键巡田', panel: '/farm/record', perm: 'operation:read', hint: '巡田登记：打开农事记录，巡查事件随手记', icon: icon('M12 2C8 2 5 5 5 9c0 5 7 13 7 13s7-8 7-13c0-4-3-7-7-7Zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5Z') },
+  { label: '快捷灌溉', panel: '/device/irrigation', perm: 'device:control', hint: '水肥灌溉：智能灌溉策略与一键启停', icon: icon('M12 2s6 6.6 6 11a6 6 0 0 1-12 0c0-4.4 6-11 6-11Z') },
+  { label: '作业计划', panel: '/farm/task', perm: 'operation:read', hint: '农事任务：作业计划排期与派发', icon: icon('M7 2v2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2V2h-2v2H9V2H7Zm12 8H5V6h14v4Z') },
+  { label: '设备列表', panel: '/device/list', perm: 'device:read', hint: '设备台账：全部设备与在线状态', icon: icon('M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm4 14h8v2H8v-2Z') },
+  { label: '报表中心', panel: '/finance', perm: 'finance:read', hint: '投入产出核算与导出；监管统计报表建设中（P2）', icon: icon('M4 20h16v2H4v-2Zm2-8h3v7H6v-7Zm5-6h3v13h-3V6Zm5 3h3v10h-3V9Z') },
+]
+
 // ---------- 地图内浮层面板 ----------
 interface OpenPanel { key: string; title: string }
 const openPanels = ref<OpenPanel[]>([])
@@ -322,6 +374,8 @@ const panelOpen = computed(() => openPanels.value.length > 0)
 const isRoutePanel = computed(() => activePanel.value.startsWith('/'))
 function openPanel(key: string, title: string) {
   if (!panelComps[key]) return
+  // 面板打开后底图工具条隐藏，测量态若残留会看不到退出钮：先收草稿
+  measureTool.value?.cancel()
   if (!openPanels.value.some((p) => p.key === key)) openPanels.value.push({ key, title })
   activePanel.value = key
   panelMax.value = false
@@ -514,6 +568,8 @@ function suggestName(kind: MapShapeKind, lineType?: InfraLineType): string {
 function startDraw(item: MenuItem) {
   const editor = shapeEditor.value
   if (!editor || !item.draw || !map) return
+  // 测量与绘制互斥：先收测量草稿，避免两套加点监听同时吃点击
+  measureTool.value?.cancel()
   if (item.draw === 'line') {
     if (!item.layer) return
     // 绘制时打开同类图层，方便沿着已有管线接续
@@ -635,9 +691,9 @@ function nameTooltip(name: string, detail: string): HTMLElement {
   return box
 }
 
-/** 绘制/改边界期间让点击穿透到地图落点，不弹信息卡 */
+/** 绘制/改边界/测量期间让点击穿透到地图落点，不弹信息卡 */
 function showPopup(event: any, content: HTMLElement) {
-  if (activeShape.value || !map) return
+  if (activeShape.value || measureMode.value || !map) return
   L.popup({ maxWidth: 300 }).setLatLng(event.latlng).setContent(content).openOn(map)
 }
 
@@ -985,6 +1041,53 @@ function handleCommand(cmd: string) {
   else if (cmd === 'message') openPanel('/message', '消息中心')
 }
 
+// ---------- 地图工具（A1）：测距/测面 / 图幅导出 / 大屏投放 ----------
+const measureTool = ref<InstanceType<typeof MapMeasure> | null>(null)
+const measureMode = ref<MeasureMode | null>(null)
+function onMeasure(mode: MeasureMode) {
+  shapeEditor.value?.cancel()
+  measureTool.value?.toggle(mode)
+}
+
+const exporting = ref(false)
+async function onExportPng() {
+  if (!map || exporting.value) return
+  exporting.value = true
+  const pending = ElMessage({ message: '正在合成当前视野图幅…', duration: 0 })
+  try {
+    const { withBasemap } = await exportMapPng(map, baseMapLabel.value)
+    pending.close()
+    if (withBasemap) ElMessage.success('图幅已导出 PNG（含底图影像与地块边界）')
+    else ElMessage.warning('当前底图源不允许跨域读取，已导出矢量图幅（含边界/管线/设备）；换高清影像或天地图可含底图')
+  } catch {
+    pending.close()
+    ElMessage.error('图幅导出失败，请重试')
+  } finally {
+    exporting.value = false
+  }
+}
+
+// 大屏投放：隐菜单/面板/卡片，字号放大供投影；尽量连带浏览器全屏（被拒也不影响模式本身）
+const bigScreen = ref(false)
+function onBigScreenKey(e: KeyboardEvent) {
+  if (e.key === 'Escape') exitBigScreen()
+}
+function enterBigScreen() {
+  bigScreen.value = true
+  openPanels.value = []
+  activePanel.value = ''
+  measureTool.value?.cancel()
+  shapeEditor.value?.cancel()
+  window.addEventListener('keydown', onBigScreenKey)
+  document.documentElement.requestFullscreen?.().catch(() => { /* 全屏被拒时仅隐菜单放大字号 */ })
+}
+function exitBigScreen() {
+  if (!bigScreen.value) return
+  bigScreen.value = false
+  window.removeEventListener('keydown', onBigScreenKey)
+  if (document.fullscreenElement) void document.exitFullscreen().catch(() => { /* 已不在全屏则忽略 */ })
+}
+
 onMounted(initMap)
 onMounted(() => void loadPlots().then(() => loadDevices()))
 onMounted(() => void loadZones())
@@ -992,6 +1095,7 @@ onMounted(() => void loadLines())
 onMounted(() => void loadWeather())
 onMounted(() => { refreshUnread(); unreadTimer = setInterval(refreshUnread, 30000) })
 onUnmounted(() => {
+  window.removeEventListener('keydown', onBigScreenKey)
   mapHandle.value = null
   map?.remove()
   map = null
@@ -1030,8 +1134,8 @@ onUnmounted(() => {
 .menu-add:hover { background: rgba(0,150,199,.6); color: #fff; }
 .menu-add.active { background: #00d4ff; border-color: #00d4ff; color: #04121f; }
 
-/* 右上图层与图例 */
-.layer-panel { position: absolute; top: 16px; right: 16px; z-index: 500; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+/* 右上图层与图例：下移到控制簇与快捷入口簇之下，避免叠压 */
+.layer-panel { position: absolute; top: 104px; right: 16px; z-index: 500; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 .layer-toggle { display: flex; align-items: center; gap: 6px; padding: 7px 12px; border: 1px solid rgba(0,212,255,.34); border-radius: 3px; background: rgba(7,25,48,.86); color: #cdeeff; cursor: pointer; font-size: 12px; backdrop-filter: blur(8px); }
 .layer-pop { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: rgba(6,22,42,.92); border: 1px solid rgba(0,212,255,.28); border-radius: 4px; }
 .layer-opt { display: flex; align-items: center; gap: 8px; color: #b6d2de; font-size: 12px; cursor: pointer; }
@@ -1097,6 +1201,26 @@ onUnmounted(() => {
 .ctl-menu button:hover { background: rgba(0,98,133,.5); }
 .ctl-menu button.danger { color: #ff8a65; }
 
+/* 快捷入口簇（A2）：控制簇下方一行，高频业务一键直达 */
+.quick-cluster { position: absolute; top: 58px; right: 16px; z-index: 950; display: flex; align-items: center; gap: 8px; }
+.quick-btn { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border: 1px solid rgba(0,212,255,.34); border-radius: 4px; background: rgba(7,25,48,.86); color: #cdeeff; cursor: pointer; font-size: 12px; backdrop-filter: blur(8px); white-space: nowrap; }
+.quick-btn:hover { border-color: rgba(0,212,255,.7); background: rgba(0,98,133,.55); color: #fff; }
+.quick-btn.active { border-color: #00d4ff; background: rgba(0,212,255,.2); color: #7fe7ff; font-weight: 600; }
+.quick-ico { display: inline-flex; color: #00d4ff; }
+
+/* 大屏投放（A1）：菜单/面板/卡片已隐，字号放大供投影；退出钮常驻右上 */
+.bigscreen-exit { position: absolute; top: 14px; right: 16px; z-index: 1100; padding: 7px 14px; border: 1px solid rgba(0,212,255,.4); border-radius: 4px; background: rgba(7,25,48,.7); color: #cdeeff; cursor: pointer; font-size: 13px; opacity: .55; }
+.bigscreen-exit:hover { opacity: 1; background: rgba(0,98,133,.6); }
+.cockpit.bigscreen .map-status { left: 16px; font-size: 14px; padding: 8px 14px; }
+.cockpit.bigscreen :deep(.leaflet-tooltip) { font-size: 14px; }
+.cockpit.bigscreen :deep(.leaflet-popup-content) { font-size: 14px; }
+.cockpit.bigscreen :deep(.shape-pop-h), .cockpit.bigscreen :deep(.dev-pop-h) { font-size: 16px; }
+.cockpit.bigscreen :deep(.shape-pop-m) { font-size: 13px; }
+.cockpit.bigscreen :deep(.shape-pop-btn) { font-size: 13px; padding: 6px 12px; }
+.cockpit.bigscreen :deep(.dev-pin) { width: 28px; height: 28px; font-size: 14px; }
+.cockpit.bigscreen :deep(.dev-row) { font-size: 14px; }
+.cockpit.bigscreen :deep(.measure-tip) { font-size: 15px; }
+
 /* 地图内浮层面板 */
 .map-panel { position: absolute; top: 56px; right: 16px; bottom: 16px; z-index: 900; width: min(920px, 62vw); display: flex; flex-direction: column; background: rgba(6,22,42,.96); border: 1px solid rgba(0,212,255,.3); border-radius: 6px; box-shadow: 0 12px 40px rgba(0,0,0,.45); overflow: hidden; }
 .map-panel.max { left: 248px; width: auto; }
@@ -1151,11 +1275,14 @@ onUnmounted(() => {
   .map-panel { width: auto; left: 210px; }
   .map-panel.max { left: 200px; }
   .ctl-name { display: none; }
+  .quick-btn { padding: 0 8px; }
+  .quick-btn span:last-child { display: none; }
 }
 @media (max-width: 640px) {
   .func-menu { top: 10px; left: 10px; bottom: auto; max-height: 46%; width: 158px; }
   .func-menu.collapsed { width: 42px; }
-  .layer-panel { top: 10px; right: 10px; }
+  .layer-panel { top: 96px; right: 10px; }
+  .quick-cluster { top: 52px; right: 10px; gap: 6px; }
   .weather-card { right: 10px; bottom: 10px; left: 10px; justify-content: space-between; }
   .basemap-switch { bottom: 122px; }
   .map-status { display: none; }

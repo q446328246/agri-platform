@@ -40,6 +40,24 @@
         @click="toggleBox"
       >框选</button>
     </div>
+    <div v-if="map && tools" class="basemap-switch__row basemap-switch__tools">
+      <button
+        type="button"
+        class="basemap-switch__tool"
+        :class="{ 'basemap-switch__tool--on': measuring === 'distance' }"
+        :title="measuring === 'distance' ? '退出测距（Esc）' : '测距：单击加点，双击结束，Esc 取消；临时测量不入库'"
+        @click="emit('measure', 'distance')"
+      >测距</button>
+      <button
+        type="button"
+        class="basemap-switch__tool"
+        :class="{ 'basemap-switch__tool--on': measuring === 'area' }"
+        :title="measuring === 'area' ? '退出测面（Esc）' : '测面：单击加点，双击结束；面积与地块台账同一套公式（亩）'"
+        @click="emit('measure', 'area')"
+      >测面</button>
+      <button type="button" class="basemap-switch__tool" title="导出当前视野 PNG（含底图与地块边界；底图源不允许跨域读取时导出矢量图幅）" @click="emit('export-png')">导出</button>
+      <button type="button" class="basemap-switch__tool" title="清除图上已完成的测量结果" @click="emit('clear-measure')">清除</button>
+    </div>
 
     <el-dialog v-model="dialogVisible" title="自定义影像源" width="480px" append-to-body :close-on-click-modal="false">
       <el-form label-width="92px" label-position="left" class="basemap-custom-form">
@@ -95,8 +113,14 @@ import {
 /** 亮色主题底图切换条：绝对定位浮于地图容器右上，父容器须 position: relative。
  *  与地图容器互为兄弟节点，点击不会落到 Leaflet 画布上（绘制态不会误加顶点）。
  *  第二行精确缩放条（滑杆/步进/级别徽标/框选放大）需父组件传入 map 实例才显示。 */
-const props = defineProps<{ modelValue: BaseMapKey; map?: any }>()
-const emit = defineEmits<{ (e: 'update:modelValue', value: BaseMapKey): void; (e: 'custom-updated'): void }>()
+const props = defineProps<{ modelValue: BaseMapKey; map?: any; measuring?: 'distance' | 'area' | null; tools?: boolean }>()
+const emit = defineEmits<{
+  (e: 'update:modelValue', value: BaseMapKey): void
+  (e: 'custom-updated'): void
+  (e: 'measure', mode: 'distance' | 'area'): void
+  (e: 'export-png'): void
+  (e: 'clear-measure'): void
+}>()
 
 const customCfg = ref(readCustomBaseMap())
 const options = computed(() =>
@@ -451,6 +475,33 @@ function removeCustom() {
   border-color: #409eff;
   background: #409eff;
   color: #fff;
+}
+
+.basemap-switch__tools {
+  padding: 2px 4px 3px;
+  border-top: 1px solid #ebeef5;
+}
+
+.basemap-switch__tool {
+  padding: 3px 7px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #fff;
+  color: #606266;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.basemap-switch__tool:hover {
+  border-color: #409eff;
+  color: #409eff;
+}
+
+.basemap-switch__tool--on {
+  border-color: #e6a23c;
+  background: #fdf6ec;
+  color: #e6a23c;
+  font-weight: 600;
 }
 
 .basemap-custom-form__hint {
