@@ -3,7 +3,7 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-11-18T02:51:36Z"
+exported_at: "2026-11-18T03:26:12Z"
 modules:
     "":
         dir_name: 无人农场 AI 平台 Monorepo 根工程
@@ -87,8 +87,8 @@ modules:
         related_to:
             - path: infrastructure
     shared_packages:
-        dir_name: '@agri 共享包集合（monorepo 依赖层）'
-        title: '@agri 共享包集合（monorepo 依赖层）'
+        dir_name: '@agri-platform 共享依赖包集合'
+        title: '@agri-platform 共享依赖包集合'
         scope:
             - packages/
         source_files: []
