@@ -136,6 +136,14 @@
             show-icon
             class="nav-warning"
           />
+          <el-alert
+            v-if="variableSpreadFlat"
+            title="逐带速率差异很小：作业方向可能与长势梯度平行（自动选向只保里程最短），取消「自动选」手工调方向，让作业带垂直于长势差异方向再规划"
+            type="info"
+            :closable="false"
+            show-icon
+            class="nav-warning"
+          />
           <el-table v-if="planResult" :data="planResult.legs" size="small" border max-height="236">
             <el-table-column type="index" label="#" width="46" />
             <el-table-column label="路段" min-width="170">
@@ -286,6 +294,14 @@ const summary = computed(() => {
 function variableLaneOf(index: number) {
   return variableResult.value?.lanes.find((lane) => lane.index === index)
 }
+
+/** 变量方案逐带速率极差过小时提示调方向：自动选向只保里程最短，可能恰与长势梯度平行 */
+const variableSpreadFlat = computed(() => {
+  const lanes = variableResult.value?.lanes ?? []
+  if (lanes.length < 2) return false
+  const rates = lanes.map((lane) => lane.rateKgMu)
+  return Math.max(...rates) - Math.min(...rates) < 1
+})
 
 function label(html: string, background = '#00d4ff'): any {
   return L.divIcon({ className: 'nav-label', html: `<span style="background:${background}">${html}</span>`, iconSize: [0, 0] })

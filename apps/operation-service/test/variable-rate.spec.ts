@@ -80,21 +80,22 @@ describe("变量速率规划", () => {
       expect(lane.rateKgMu).toBeLessThanOrEqual(25);
       expect(lane.avgGridValue).not.toBeNull();
     }
-    // heading 0 的作业带沿南北走、自西向东排：格值随经度升高，末带速率应高于首带
+    // heading 0 的垂直轴指向西，铺带自东向西排：格值随经度升高，首带（东）速率应高于末带（西）
     const first = plan.lanes[0]!;
     const last = plan.lanes[plan.lanes.length - 1]!;
-    expect(last.rateKgMu).toBeGreaterThan(first.rateKgMu);
-    expect(last.avgGridValue!).toBeGreaterThan(first.avgGridValue!);
+    expect(first.rateKgMu).toBeGreaterThan(last.rateKgMu);
+    expect(first.avgGridValue!).toBeGreaterThan(last.avgGridValue!);
   });
 
   it("invert 口径反转：弱苗区（低格值）反而拿到更高施肥速率", () => {
     const normal = planVariableRate(inputOf({ rateGrid: gradientGrid() }));
     const inverted = planVariableRate(inputOf({ rateGrid: gradientGrid(), invert: true }));
-    const firstNormal = normal.lanes[0]!.rateKgMu;
-    const firstInverted = inverted.lanes[0]!.rateKgMu;
-    expect(firstInverted).toBeGreaterThan(firstNormal);
+    // 铺带自东向西：末带在西侧弱苗区，invert 后应拿到比正常口径更高的速率
+    const lastNormal = normal.lanes[normal.lanes.length - 1]!.rateKgMu;
+    const lastInverted = inverted.lanes[inverted.lanes.length - 1]!.rateKgMu;
+    expect(lastInverted).toBeGreaterThan(lastNormal);
     // 同一带两种口径的速率关于区间中点对称
-    expect(firstInverted + firstNormal).toBeCloseTo(35, 0);
+    expect(lastInverted + lastNormal).toBeCloseTo(35, 0);
   });
 
   it("用量汇总：总用量等于逐带用量之和，平均速率按面积加权", () => {
