@@ -5,6 +5,9 @@
  * 设备台账（iot）、农事任务（operation）、控制指令（control）、决策处方（decision）、
  * 视频（video）、消息（message）、投入产出（finance）、溯源（trace）、系统管理（auth/platform）。
  *
+ * 迁移 046 起历史七表（任务/财务/溯源/遥测读数/告警/指令/处方）整体清空：
+ * 历史类断言改「空列表可用」（min 0，仅校验 200 与结构），台账/规则/虫情/消息/视频类保留下限。
+ *
  * 用法：
  *   node scripts/smoke-demo-data.mjs                       # 默认 https://localhost
  *   $env:BASE_URL="http://127.0.0.1:8080"; node scripts/smoke-demo-data.mjs
@@ -73,23 +76,24 @@ async function main() {
   // 设备与实时监控
   await check("设备台账", "/devices", 12);
   const overview = await check("四情总览", "/telemetry/overview", 4);
-  for (const [key, min] of [["latest", 20], ["alerts", 4], ["pests", 6], ["rules", 7]]) {
+  // latest/alerts 随 046 清空归零；pests/rules 属监测事件与规则保留
+  for (const [key, min] of [["latest", 0], ["alerts", 0], ["pests", 6], ["rules", 7]]) {
     const count = countOf(overview?.[key]);
     if (count < min) throw new Error(`四情总览缺少 ${key}：期望≥${min}，实际 ${count}`);
     results.push(`PASS 四情·${key.padEnd(9, " ")} ${String(count).padStart(5)} 条  GET /telemetry/overview → ${key}`);
   }
-  await check("最新读数", `/telemetry/latest?deviceId=device-soil-003`, 8);
-  await check("墒情曲线", `/telemetry/history/series?deviceId=device-soil-003&metric=soilMoisture`, 100);
-  await check("风速曲线", `/telemetry/history/series?deviceId=device-weather-001&metric=windSpeed`, 100);
-  await check("待处置告警", "/telemetry/alerts", 4);
+  await check("最新读数", `/telemetry/latest?deviceId=device-soil-003`, 0); // 046 清空
+  await check("墒情曲线", `/telemetry/history/series?deviceId=device-soil-003&metric=soilMoisture`, 0); // 046 清空
+  await check("风速曲线", `/telemetry/history/series?deviceId=device-weather-001&metric=windSpeed`, 0); // 046 清空
+  await check("待处置告警", "/telemetry/alerts", 0); // 046 清空
   await check("虫情记录", "/telemetry/pests", 6);
   await check("气象预报", "/weather/forecast", 1);
 
   // 农事、控制与决策
-  await check("农事任务", "/farm-tasks?page=1&size=20", 8);
-  await check("控制指令", "/control/commands?page=1&size=20", 6);
-  await check("决策规则", "/decision/rules", 5); // 服务默认 1 条 + 迁移 010 补 4 条
-  await check("处方记录", "/decision/prescriptions?page=1&size=20", 4);
+  await check("农事任务", "/farm-tasks?page=1&size=20", 0); // 046 清空
+  await check("控制指令", "/control/commands?page=1&size=20", 0); // 046 清空
+  await check("决策规则", "/decision/rules", 5); // 服务默认 1 条 + 迁移 010 补 4 条（规则不随 046 清）
+  await check("处方记录", "/decision/prescriptions?page=1&size=20", 0); // 046 清空
 
   // 视频、消息
   await check("摄像头", "/video/cameras?page=1&size=20", 4);
@@ -97,16 +101,17 @@ async function main() {
   await check("消息中心", "/messages?page=1&size=20", 10);
 
   // 核算与溯源
-  await check("投入产出", "/finance/entries", 90);
+  await check("投入产出", "/finance/entries", 0); // 046 清空
   const summary = await check("核算汇总", "/finance/summary", 1);
-  if (!(summary?.input > 0) || !(summary?.output > 0)) throw new Error(`核算汇总金额异常: ${JSON.stringify(summary)}`);
-  results.push(`PASS 核算金额      ${summary.input.toFixed(2)} 投入 / ${summary.output.toFixed(2)} 产出  GET /finance/summary`);
-  await check("按地块核算", `/finance/entries?plotCode=${WEST_1}`, 6);
-  await check("溯源档案", "/trace/records?page=1&size=50", 22);
-  await check("按地块溯源", `/trace/records?plotCode=${EAST_1}&page=1&size=50`, 6);
+  // 046 清空后金额归零：只断言结构为数值，不再断言 >0
+  if (typeof summary?.input !== "number" || typeof summary?.output !== "number") throw new Error(`核算汇总结构异常: ${JSON.stringify(summary)}`);
+  results.push(`PASS 核算结构      ${summary.input.toFixed(2)} 投入 / ${summary.output.toFixed(2)} 产出（046 空账）  GET /finance/summary`);
+  await check("按地块核算", `/finance/entries?plotCode=${WEST_1}`, 0); // 046 清空
+  await check("溯源档案", "/trace/records?page=1&size=50", 0); // 046 清空
+  await check("按地块溯源", `/trace/records?plotCode=${EAST_1}&page=1&size=50`, 0); // 046 清空
 
-  // 系统管理与演示账号：口令与启用状态可能被页面运维改过（改密/启用），
-  // 种子口令 demo123 登录失败只记 WARN 不判 FAIL；停用拦截仅在账号确为 DISABLED 时断言
+  // 系统管理与演示账号：046 已恢复种子口令 demo123 与 temp01 停用态；
+  // 自适应口径保留（后续页面改密/启用记 WARN 不判 FAIL），停用拦截仅在账号确为 DISABLED 时断言
   await check("用户列表", "/auth/users?page=1&size=20", 5);
   await check("角色列表", "/platform/roles", 4);
   await check("权限目录", "/platform/permissions", 1);

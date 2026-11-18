@@ -715,6 +715,14 @@
 - **修复**：`BaseMapSwitch.vue` 框选改一次性工具——mouseup 完成放大（或空点击）后立即 `stopBox()` 恢复拖移与双击缩放；Esc 与窗口失焦（alt-tab 拖拽中切走）取消并退出，防矩形与禁用态残留；激活期间地图内底部浮提示「框选放大：拖出矩形松开即放大 · Esc 取消」（pointer-events:none 不挡操作）；按钮 title 同步一次性语义。监听器（keydown/blur）随 cleanup 全量移除，地图重建 watch 仍统一 stopBox。
 - **交付与部署**：按长期口径修复提交后未跑单测/构建即推送；随后用户点名「根据修改代码构建（可只前端）」——本批仅前端改动，故只重建 edge 目标：`docker compose --profile app up -d --build edge` 会连带重建依赖 app（其末段 curl PGDG key 遇网络抖动 exit 18 中止，edge 镜像虽已产出但容器未更新），改用 `docker build --target edge -t agri-platform-edge:local .`（0.6s 全缓存命中含新源码的 vite 产物）+ `compose --profile app up -d edge`（不带 --build）单独换 edge 容器；app/postgres/minio 保持原容器 Healthy 未重启。`.runtime/verify-edge-basemap.mjs` 判别标记换本批新增物后 5 项 PASS（扫 39 个 chunk 含框选浮提示文案/「退出框选放大（Esc）」title/续五缩放条回归标记）。浏览器刷新即生效：框选松开即恢复拖移，Esc/失焦可取消。
 
+### 2026-11-18：业务历史七表清空 + 演示账号恢复种子态（迁移 046，用户点名）
+
+- **需求**：用户点名遗留三件——业务历史八表也清、demo123 口令恢复、A 类剩余 12 项排期。devices 口径经确认：**设备台账属资产域非业务历史，12 台设备与 11 个新地块绑定保留**；其余七表历史行整体清空。
+- **迁移 046**：清 `operation_tasks`/`finance_entries`/`trace_records`/`telemetry_readings`/`telemetry_alerts`/`control_commands`/`decision_prescriptions` 七表，连带清 outbox 队列/执行/结局/变更留痕七张辅表（防悬空与队列空转）；保留 devices/决策与遥测规则/虫情/灾情/视频事件/消息/事件总线/气象/季次/生育期/地块域/审计日志。同迁移恢复 010 种子态：四演示账号（agronomist/operator01/viewer01/temp01）password_hash 回种子兼容散列、temp01 回 DISABLED；登录成功后服务按 needsRehash 自动升级 scrypt（无需批量改密）。
+- **冒烟同步**：`smoke-demo-data.mjs` 历史类断言改「空列表可用」（min 0 仅校验 200 与结构），核算汇总改结构断言（046 空账金额归零）；台账/规则/虫情/消息/视频类下限保留；账号节自适应口径保留作后续页面运维兜底。
+- **验证**：应用 23ms；`.runtime/verify-046.mjs` **27 项全 PASS**（14 表清空/台账与规则保留/地块域 13-7-2 完好/账号种子态/网关实测 demo123 三账号 200、temp01 403、admin 不受影响）；`smoke-demo-data` **37 项全 PASS、0 WARN**（11-12 账号漂移消除）。**无应用代码改动，不需重建镜像**（SQL 模式实时读库）。
+- **页面观感变化**：任务/指令/处方/财务/溯源/遥测曲线与告警列表自此为空列表可用态；四情总览仅虫情与规则有样本；待新业务产生或另行点名补种子。
+
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
 > 口径：A 类是不依赖外部条件、可在现有代码上补齐的功能缺口；B 类依赖现场硬件 / 第三方系统 / 算法服务，与「下一步」第 10 条既有口径一致；C 类是已文档化的刻意架构偏差，不是漏实现。每条均经代码核实，不臆造。
@@ -741,6 +749,29 @@
 | A16 | 14.4 审计留存策略 | ~~审计日志无「留存 ≥6 个月」的归档/清理策略~~ **已完成**（2026-11-17，180 天硬底线 + 启动/周期清扫 + 策略观测端点） | `role.repository.ts` `purgeBefore` + `main.ts` 清扫定时器 |
 | A17 | 2.4 移动端 | 仅 Web SPA，无小程序/混合应用 | `apps/` 下无移动端工程 |
 | A18 | 6.1 / 9.2 EC/pH 闭环 | 通用 metric 可存 EC/pH/养分读数，但无肥液 EC/pH 偏离自动调整配比联动 | `telemetry_rules` 种子仅墒情/气温/风速/降雨/覆盖度；传感与执行硬件属 B 类 |
+
+### A 类剩余 12 项缺口排期（2026-11-18 用户点名）
+
+> 口径：12 项 = 审计表未划完成行（A1/A2/A7/A8/A10/A11/A12/A13/A14/A15/A17/A18）；按依赖与价值分五批，批内可并行、批间顺序交付；每批独立可部署（纯前端批走 edge 单目标，迁移批应用待点名）。估时为单人开发人日，含自验不含 B 类外部联调。
+
+| 批次 | 项 | 内容摘要 | 迁移 | 估时 | 依赖/验收要点 |
+| --- | --- | --- | --- | --- | --- |
+| P1 纯前端快赢 | A2 | 驾驶舱快捷入口簇（一键巡田/快捷灌溉/作业计划/设备列表/报表中心），路由既有面板/页 | 无 | 1d | 入口经 checkPermission 过滤；panelComps 登记同步 |
+| P1 | A1 | 地图测距/测面（临时层+实时 tooltip）、图幅导出 PNG、大屏投放模式（隐菜单面板+字号放大） | 无 | 2d | 测面与 polygonAreaMu 误差 <1%；导出含边界与底图 |
+| P2 台账与契约 | A10 | 线路宽度/限速/适用机型/启用停用/模板复用 | 047 | 2d | CHECK 与 contracts 同步；台账表单与筛选可用 |
+| P2 | A12 | AI 事件类型扩 PERSON_INTRUSION/MACHINE_STATUS/FLOOD/LODGING/FIRE/SMOKE，pestType 改条件必填+消息转发 | 048 | 1.5d | 契约单测+网关路由回归；模型本体仍 B 类 |
+| P2 | A11 | 遥测质量标记（超量程/连续不变/时间戳异常）+曲线与汇总剔除+异常日志端点 | 049 | 2.5d | 三类异常注入冒烟；数据字典/资产目录另列 |
+| P3 控制深化 | A7 | 指令扩 PAUSE/RESUME/RETURN_HOME/POWER_OFF/TOOL_SWITCH/TILLAGE | 050 | 3d | 状态机跃迁表单测+回执冒烟；contracts payload 同步 |
+| P3 | A8 | 指令授权地块+授权时间窗范围校验（三重管控升四重） | 051 | 2.5d | 超范围指令 403 冒烟 |
+| P3 | A18 | EC/pH 偏离规则种子+决策联动肥液配比调整处方 | 052 | 2d | 依赖 A11 质量标记防误触发；规则命中出处方冒烟 |
+| P4 空间与变量 | A14 | 地块内网格长势分布热力层（IDW 插值遥测+生育期），多光谱输入留 B 类接口 | 053 | 3d | 空数据降级；**验收前需点名补遥测演示种子或接真实上报（046 后曲线为空）** |
+| P4 | A15 | 网格级变量播种/施肥方案（分区速率表+coverage 逐带速率输出） | 054 | 4d | 变量路径里程与速率汇总单测；依赖 A14 网格基础 |
+| P5 视频与移动 | A13 | 2/4/9 分屏监看+逐屏截图/PTZ；录像留档仅留接口与档案表（片源依赖 B 类流媒体） | 055 | 3d | 分屏切换不泄漏播放器实例 |
+| P5 | A17 | 移动端 H5 响应式优先（驾驶舱/巡田/任务回执三页），小程序另立项评估 | 无 | 10d | 375px 宽可用；独立工程不混入 apps/web 桌面布局 |
+
+- **合计**：12 项主 list ≈36 人日（P1 3 / P2 6 / P3 7.5 / P4 7 / P5 13，含批次内并行压缩空间）。
+- **伴随小项**（部分完成行的残留，不计入 12 项）：A3 派单处置（消息中心操作，1d，随 P2）、A4 监管统计报表与报表中心本体（2d，随 P2）、A5 自动排队（1d，随 P3）、A6 定时执行调度器（1.5d，随 P3）。
+- **顺序理由**：P1 无迁移零风险先见效果；P2 为 P3/P4 提供质量标记与契约基础；A18 挂 P3 末因依赖 A11；P4 依赖数据积累故置后；P5 重且部分悬 B 类殿后。
 
 ### B. 外部依赖（需现场 / 第三方条件，平台侧接口已就绪或已留痕）
 
@@ -1123,3 +1154,5 @@
 | 2026-11-17 | `docker compose --profile app up -d --build` + `node .runtime/verify-edge-basemap.mjs` | 双目标镜像重建 135.7s、app Healthy；线上 bundle 只读核验 **5 项 PASS**（扫 40 个 chunk 含新切换条/片区包装容器标记，网关可达） |
 | 2026-11-17 | `docker compose --profile app up -d --build` + `node .runtime/verify-edge-basemap.mjs`（续五部署，判别标记换本批新增物） | 双目标镜像重建 278.5s（vite 26.5s 重跑）、四容器 Healthy/Up；线上 bundle 只读核验 **5 项 PASS**（扫 39 个 chunk 含 `basemap-switch__slider`/`agri-basemap-custom`/谷歌瓦片 URL，网关 401 预期） |
 | 2026-11-17 | `docker build --target edge` + `compose --profile app up -d edge` + `node .runtime/verify-edge-basemap.mjs`（续六仅前端部署） | compose `up --build edge` 连带重建 app 且其 PGDG curl 网络抖动 exit 18 中止 → 改单独 build edge 目标（0.6s 缓存）再 up；edge 换新 bundle、app 等三容器未重启保持 Healthy；只读核验 **5 项 PASS**（框选浮提示文案/Esc title/缩放条回归标记） |
+| 2026-11-18 | 迁移 `046_history_clear_demo_restore.sql` 应用（用户点名清历史+恢复口令） | 已应用（23ms）；历史七表+七辅表清空，devices 12 台/绑定 11 保留，四演示账号回种子散列、temp01 回 DISABLED |
+| 2026-11-18 | `node .runtime/verify-046.mjs` + `node scripts/smoke-demo-data.mjs` | 核验 **27 项全 PASS**（含网关实测 demo123 三账号 200 / temp01 403 / admin 200）；冒烟 **37 项全 PASS、0 WARN**（账号漂移消除，历史类改空列表可用口径） |
