@@ -5,6 +5,8 @@ import { PgClientAdapter, resolveDatabaseUrl } from '@agri/db';
 import { createPlatformHttpServer } from './http.js';
 import { InMemoryAuditRepository, InMemoryRoleRepository, resolveAuditRetentionDays, seedRoles, SqlAuditRepository, SqlRoleRepository } from './role.repository.js';
 import type { AuditRepository, RoleRepository } from './role.repository.js';
+import { InMemoryDataCatalogRepository, seedDataCatalog, SqlDataCatalogRepository } from './data-catalog.repository.js';
+import type { DataCatalogRepository } from './data-catalog.repository.js';
 
 /**
  * 平台服务启动。
@@ -29,18 +31,22 @@ async function bootstrap(): Promise<void> {
   let client: PgClientAdapter | undefined;
   let roles: RoleRepository;
   let audits: AuditRepository;
+  let catalog: DataCatalogRepository;
   if (mode === 'sql') {
     client = PgClientAdapter.fromUrl(resolveDatabaseUrl(process.env.DB_URL));
     await client.$connect();
     roles = new SqlRoleRepository(client);
     audits = new SqlAuditRepository(client);
     await roles.seed(seedRoles());
+    // 数据目录种子随迁移 058 落库（只写不应用，部署点名后生效），启动期不重复写入
+    catalog = new SqlDataCatalogRepository(client);
   } else {
     roles = new InMemoryRoleRepository(seedRoles());
     audits = new InMemoryAuditRepository();
+    catalog = new InMemoryDataCatalogRepository(seedDataCatalog());
   }
 
-  const server = createPlatformHttpServer({ roles, audits });
+  const server = createPlatformHttpServer({ roles, audits, catalog });
   server.listen(port, '127.0.0.1', () => console.log(`platform-service HTTP started on ${port}（${mode === 'sql' ? 'SQL 持久化' : '内存实现'}）`));
 
   // 审计留存清理：只删超过留存期的行，留存期内的审计一条不动

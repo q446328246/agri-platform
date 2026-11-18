@@ -67,7 +67,7 @@ export interface TaskRepository {
   remove(tenantId: string, id: string, deletedAt: string, actor?: string, traceId?: string): Promise<Task | null>;
   /** 任务变更历史（追加式留痕），归档任务也可回查 */
   history(tenantId: string, taskId: string): Promise<TaskChangeLog[]>;
-  /** 排程冲突提示：同地块、同负责人或同设备的在册任务计划时间重叠；只提示不阻断 */
+  /** 排程冲突提示：在册任务计划时间窗重叠（同地块/负责人/设备给具体缘由，其余也给时间重叠提示）；只提示不阻断 */
   conflicts(tenantId: string, probe: ConflictProbe): Promise<TaskConflict[]>;
   /** 设备任务队列（A5）：在册未结束（PENDING/RUNNING）按 优先级 → 计划开始 → 建档时间 排序 */
   queue(tenantId: string, deviceId: string): Promise<Task[]>;
@@ -82,7 +82,7 @@ export interface ConflictProbe {
   scheduledAt?: string;
   scheduledEndAt?: string;
 }
-/** 一条冲突：命中的在册任务与冲突缘由（同地块 / 同负责人） */
+/** 一条冲突：命中的在册任务与冲突缘由（同地块 / 同负责人 / 同设备 / 纯时间窗重叠） */
 export interface TaskConflict {
   task: Task;
   reasons: string[];
@@ -92,6 +92,8 @@ export interface TaskConflict {
  * 只看在册（未归档）且未结束（PENDING/RUNNING）的任务；双方都给了计划开始时间
  * 才比较，时间窗按 [开始, 结束 ?? 开始] 闭区间判重叠。没排时间的任务无从判断
  * 冲突，不猜；负责人/设备为空也不参与「同人/同机」判定。
+ * 方案 8.7 的时间冲突提示：重叠即提示，不再限于共用资源——同地块/负责人/设备
+ * 给具体缘由，都不命中时也给一条纯时间窗重叠提示，由调度人权衡是否改期。
  */
 export function conflictsOf(probe: ConflictProbe, rows: Task[]): TaskConflict[] {
   if (!probe.scheduledAt) return [];
@@ -112,7 +114,9 @@ export function conflictsOf(probe: ConflictProbe, rows: Task[]): TaskConflict[] 
     if (probe.assigneeName && row.assigneeName === probe.assigneeName) reasons.push("同负责人计划时间重叠");
     // 同设备重叠只提示不阻断：方案 8.7 的处置是自动排队，队列端点给出位次供调度人权衡
     if (probe.deviceId && row.deviceId === probe.deviceId) reasons.push("同设备计划时间重叠，将按队列顺序执行");
-    if (reasons.length > 0) hits.push({ task: row, reasons });
+    // 无共用资源也提示时间窗重叠（方案 8.7）：并行作业本身合理，只摆事实不阻断
+    if (reasons.length === 0) reasons.push("计划时间窗重叠");
+    hits.push({ task: row, reasons });
   }
   return hits;
 }
@@ -224,8 +228,8 @@ export class InMemoryTaskRepository implements TaskRepository {
     return this.changeLog.listByTask(tenantId, taskId);
   }
   async conflicts(tenantId: string, probe: ConflictProbe): Promise<TaskConflict[]> {
-    const candidates = this.tasks.filter((task) => task.tenantId === tenantId
-      && (task.plotCode === probe.plotCode || (probe.assigneeName !== undefined && task.assigneeName === probe.assigneeName) || (probe.deviceId !== undefined && task.deviceId === probe.deviceId)));
+    // 时间窗重叠不再限于共用资源：候选取全部本租户任务，重叠与缘由判定交给 conflictsOf
+    const candidates = this.tasks.filter((task) => task.tenantId === tenantId);
     return conflictsOf(probe, structuredClone(candidates));
   }
   async queue(tenantId: string, deviceId: string): Promise<Task[]> {
@@ -326,12 +330,12 @@ export class SqlTaskRepository implements TaskRepository {
     return this.changeLog.listByTask(tenantId, taskId);
   }
   async conflicts(tenantId: string, probe: ConflictProbe): Promise<TaskConflict[]> {
-    // 只捞可能命中的行（同地块、同负责人或同设备、在册未结束、排过时间），重叠判定与内存模式共用 conflictsOf
+    // 只捞可能命中的行（在册未结束、排过时间），重叠判定与内存模式共用 conflictsOf；
+    // 时间窗重叠提示不限于同地块/负责人/设备，故不再按资源预筛
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `SELECT * FROM operation_tasks
-       WHERE tenant_id = $1 AND deleted_at IS NULL AND status IN ('PENDING', 'RUNNING') AND scheduled_at IS NOT NULL
-         AND (plot_code = $2 OR ($3::text IS NOT NULL AND assignee_name = $3) OR ($4::text IS NOT NULL AND device_id = $4))`,
-      tenantId, probe.plotCode, probe.assigneeName ?? null, probe.deviceId ?? null,
+       WHERE tenant_id = $1 AND deleted_at IS NULL AND status IN ('PENDING', 'RUNNING') AND scheduled_at IS NOT NULL`,
+      tenantId,
     );
     return conflictsOf(probe, rows.map(fromRow));
   }

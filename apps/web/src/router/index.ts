@@ -190,6 +190,12 @@ const routes: RouteRecordRaw[] = [
             name: 'SystemBackup',
             component: () => import('@/views/system/Backup.vue'),
             meta: { title: '系统备份', permission: 'system:backup' }
+          },
+          {
+            path: 'data-catalog',
+            name: 'SystemDataCatalog',
+            component: () => import('@/views/system/DataCatalog.vue'),
+            meta: { title: '数据目录', permission: 'system:data' }
           }
         ]
       }

@@ -95,6 +95,8 @@ export function resolveRouteRule(method: string, pathname: string): RouteRule {
   if (matchesPrefix(path, "/api/v1/platform/roles")) return { kind: "permission", code: "system:role" };
   if (matchesPrefix(path, "/api/v1/platform/audit-logs")) return { kind: "permission", code: "system:audit" };
   if (matchesPrefix(path, "/api/v1/platform/backups")) return { kind: "permission", code: "system:backup" };
+  // 数据字典与资产目录（方案 11.4）：读写同码，与 platform-service 的 pathPermissions 同口径
+  if (matchesPrefix(path, "/api/v1/platform/data-assets") || matchesPrefix(path, "/api/v1/platform/data-dictionary")) return { kind: "permission", code: "system:data" };
   if (matchesPrefix(path, "/api/v1/platform/tenant") || matchesPrefix(path, "/api/v1/platform/permissions")) return { kind: "session" };
 
   // 管理员强制同步和风天气：同属于 weather 前缀但需更高权限，优先于 ROUTE_PERMISSIONS 判定

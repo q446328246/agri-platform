@@ -798,6 +798,15 @@
 - **核验副产物（如实记录）**：一条 MANUAL 演示档案（note「P5 部署核验演示档案」）经内部接口回填为 FAILED（message「流媒体服务未接入」诚实终态），未动任何既有业务数据。
 - **未做（如实记录）**：单测六用例仍已写未跑；浏览器目视未做（自签证书 + IDE 视图限制，与 P4 同口径）；分屏切换不泄漏与 375px 观感待用户浏览器验收。
 
+### 2026-11-18（续八）：A 类最后两项缺口收口——任务时间/天气冲突提示 + 数据字典/资产目录
+
+- **任务时间窗重叠提示（8.7）**：`conflictsOf` 由「同地块/负责人/设备命中才提示」泛化为**重叠即提示**：无共用资源也给一条「计划时间窗重叠」缘由，只提示不阻断；SQL 侧 conflicts 候选去掉资源 OR 预筛（只留租户/在册/未结束/排过时间），内存侧候选取全租户任务，双仓储仍共用同一纯函数。`GET /farm-tasks/:id/conflicts` 数组契约不变。
+- **恶劣天气冲突提示（8.4/8.7）**：新 `operation-service/weather-conflict.ts` 纯函数 `weatherConflictsOf`：阈值与 weather-service `ADVISE_THRESHOLDS` 同源（降雨概率 50%/雨量 8mm/风速 8m/s/风力 4 级/最高温 33°C/最低温 5°C，两处修改须同步，不跨服务引源码）；农场日历日固定东八区，计划窗 [开始, 结束??开始] 与预报日求交逐日判定：灌溉雨→推迟、施肥雨→顺延、喷药风→CRITICAL/雨→改期/高温→避午间、耕整/播种/除草雨→泥泞改期、播种低温→冻害；未排时间/预报未覆盖（七日之外）/缺测诚实返回空数组。取数 `createWeatherForecastFetcher`（与决策侧同一接入模式：身份头透传、2 秒超时、失败 undefined，要素缺测整条跳过不补 0），main.ts 注入 `WEATHER_SERVICE_URL`。创建 201 响应附 `weatherConflicts`，新增 `GET /farm-tasks/:id/weather-conflicts` 供改期后回查。前端 Task.vue：创建提示合并排期/天气冲突，详情弹层新增「天气适宜性」区块（CRITICAL/WARNING 分级 tag，空态区分未排时间/预报未覆盖）。
+- **数据字典/资产目录（11.1/11.4）**：迁移 `058_data_catalog.sql` **已写未应用**：`platform_data_assets`（五类 SPATIAL/DEVICE/TELEMETRY/BUSINESS/STATS，code 取真实表名，租户内唯一）+ `platform_data_dictionary`（(租户,资产,指标) 唯一杜绝同指标多口径），种子 26 资产 + 26 字典条目只登记真实存在的表与指标（单位对照 contracts payload 与四情页指标目录，waterVolume 核实为 m³）。`data-catalog.repository.ts` 双仓储同口径（构造函数默认空，种子由服务工厂/迁移注入）；八端点 CRUD：资产编码/字典 assetCode·metricKey 不可改（改口径应新建）、重码/重键 409、删资产引用守卫 409、非法分类/编码 400、写操作全审计留痕（dataAsset.*/dataDictionary.*）。权限码 `system:data` 三处接线：contracts `PERMISSION_CATALOG`、gateway authz 两前缀、platform `pathPermissions`。前端新 `system/DataCatalog.vue`（资产/字典双页签，统一查询条+分页+新建/编辑/删除，编码类字段编辑时禁用），路由 `/system/data-catalog` + 一张图 panelComps/menuGroups 系统管理组登记（perm 过滤）。
+- **单测（已写未跑）**：`operation-service/test/weather-conflict.spec.ts` 十六用例（纯函数各类型判定/东八区窗交集/缺测不判、conflictsOf 泛化重叠、HTTP 创建注入/失败降级/回查 404·200、fetcher 缺测过滤与降级）；`platform-service/test/data-catalog.spec.ts` 十用例（双仓储口径/种子对齐/租户隔离、HTTP CRUD/400·409·404/引用守卫/审计留痕）。
+- **文档修正**：审计表 A14/A15 行「迁移 054/055 已写未应用」为过时措辞（P4 部署时已应用），改为「已应用部署」；A5/A11 行随本批划完成。至此 A 类 18 项代码侧缺口全部收口。
+- **交付口径**：后端 `tsc -b` 与 web `vue-tsc` 类型预检全过；单测/冒烟/浏览器实操未跑；迁移 058 未应用；镜像未重建，部署待点名。
+
 ## 未完成功能清单（2026-11-17 对照开发方案审计）
 
 > 口径：A 类是不依赖外部条件、可在现有代码上补齐的功能缺口；B 类依赖现场硬件 / 第三方系统 / 算法服务，与「下一步」第 10 条既有口径一致；C 类是已文档化的刻意架构偏差，不是漏实现。每条均经代码核实，不臆造。
@@ -810,17 +819,17 @@
 | A2 | 5.4 快捷入口 | ~~无「一键巡田 / 快捷灌溉 / 作业计划 / 设备列表 / 报表中心」入口簇~~ **已完成**（2026-11-18，P1；报表中心路由投入产出页，监管统计报表本体已随 A4/P2 落在该页） | 驾驶舱 quick-cluster 五入口经 checkPermission 过滤 |
 | A3 | 5.4 告警处置 | ~~消息中心无「派单处置 / 忽略」操作~~ **已完成**（忽略 2026-11-17 迁移 `041`；派单 2026-11-18 P2 迁移 `048`，仅告警可派、与忽略互斥） | `message-service` `/messages/:id/ignore` + `/messages/:id/dispatch` + 前端派单对话框 |
 | A4 | 2.1 / 5.4 报表导出 | ~~仅地块列表支持 CSV 导出~~ **已完成**（投入产出与溯源导出 2026-11-17；监管统计报表与报表中心 2026-11-18 P2，五源前端聚合+CSV） | `finance/Index.vue` 监管统计报表卡、`trace/Index.vue` 引用 `exportCsv` |
-| A5 | 8.7 任务调度 | ~~无优先级设置、冲突检测~~ **优先级与同地块/负责人冲突提示已完成**（2026-11-17，迁移 `042`）；**设备自动排队已完成**（2026-11-18 P3，迁移 `052` 已应用部署：device_id + queue 端点位次 + 同设备冲突提示）；时间/天气冲突未做 | `task.repository.ts` `conflictsOf`/`queueCompare` + 创建响应 `conflicts` + `/farm-tasks/queue` |
+| A5 | 8.7 任务调度 | ~~无优先级设置、冲突检测~~ **优先级与同地块/负责人冲突提示已完成**（2026-11-17，迁移 `042`）；**设备自动排队已完成**（2026-11-18 P3，迁移 `052` 已应用部署：device_id + queue 端点位次 + 同设备冲突提示）；**时间窗重叠与恶劣天气冲突提示已完成**（2026-11-18 续八，无迁移：重叠即提示 + 七日预报逐日适宜性判定） | `task.repository.ts` `conflictsOf`/`queueCompare` + `weather-conflict.ts` + 创建响应 `conflicts`/`weatherConflicts` + `/farm-tasks/queue`、`/farm-tasks/:id/weather-conflicts` |
 | A6 | 8.4 / 9.4 定时与自动停灌 | ~~「达到上限自动停止」未联动~~ **上限自动停灌已完成**（2026-11-17，迁移 `040`，只撤 QUEUED，在途走急停）；**定时执行已完成**（2026-11-18 P3，迁移 `050` 已应用部署：scheduledAt + dueOnly 到点领取，无独立定时器） | `control-service/consumer.ts` above 分支 + `/commands/:id/cancel` + `/device/pending` dueOnly |
 | A7 | 8.1 / 8.8 指令类型与应急 | ~~指令仅五类；无暂停/续作、返航、断电、切换机具~~ **已完成**（2026-11-18 P3，迁移 `050` 已应用部署：十一码 + PAUSED 状态机 + PAUSE/RESUME 同事务联动 + POWER_OFF 到位确认） | 迁移 `050` CHECK 与 `contracts/events/payload.ts` 同口径 |
 | A8 | 14.3 范围管控 | ~~指令无「授权地块 + 授权时间段」范围校验~~ **已完成**（2026-11-18 P3，迁移 `051` 已应用部署：授权表设备/地块通配 + 时间窗闭区间，空表放行、超范围人工下发 403，管理三端点） | `authorization.repository.ts` + `/control/authorizations` |
 | A9 | 4.1 地块流转 | ~~变更历史无流转（权属变更）动作~~ **已完成**（2026-11-17，迁移 `043` + `/plots/:code/transfer` + 详情页流转入口） | `plot_change_logs` 动作枚举含 TRANSFER |
 | A10 | 4.4 线路属性 | ~~线路台账无宽度、限速、适用机型、启用/停用、模板复用~~ **已完成**（2026-11-18 P2，迁移 `047` 已应用部署）；轨迹采集生成线路仍无（依赖农机 T-Box，B 类） | `infra-line.repository.ts` 五字段 + `/infra-lines/from-template` + 台账表单筛选 |
-| A11 | 11.4 数据质量治理 | ~~遥测上报无可疑标记、补值剔除与异常日志~~ **已完成**（2026-11-18 P2，迁移 `049` 已应用部署：三类标记+曲线汇总剔除+异常日志端点）；数据字典/资产目录另列 | `telemetry-service/quality.ts` + `/telemetry/quality-logs` + Monitor 异常日志卡 |
+| A11 | 11.4 数据质量治理 | ~~遥测上报无可疑标记、补值剔除与异常日志~~ **已完成**（2026-11-18 P2，迁移 `049` 已应用部署：三类标记+曲线汇总剔除+异常日志端点）；**数据字典/资产目录已完成**（2026-11-18 续八，迁移 `058` 已写未应用） | `telemetry-service/quality.ts` + `/telemetry/quality-logs` + Monitor 异常日志卡 + `platform-service/data-catalog.repository.ts` |
 | A12 | 7.3 视频 AI 事件契约 | ~~AI 事件仅虫情一类~~ **已完成**（2026-11-18 P2，迁移 `048` 已应用部署：七类事件+条件必填+按类型转发+消息模板）；模型本体仍 B 类 | `video-service/ai-event.ts` 白名单 + telemetry `/ai-events` + contracts `AiDetectedPayload` |
 | A13 | 7.1 / 7.2 多画面与录像留档 | ~~单路播放 + 截图，无多画面分屏监看；无告警时刻前后录像片段自动留档~~ **已完成**（2026-11-18 P5，迁移 `057` 已应用部署：1/2/4/9 分屏逐屏截图/PTZ + 留档档案表 + AI 事件自动留档 + 内部回填接口）；片源生成属 B 类流媒体 | `video/Index.vue` 分屏 + `recording-archive.repository.ts` + `/video/recording-archives` |
-| A14 | 6.2 长势分布图 | ~~四情页有生育期时间轴与提前/滞后对比，无地块内空间长势分布图~~ **已完成**（2026-11-18 P4，迁移 `054` 已写未应用：设备安装坐标 + IDW 网格热力端点 + 四情页热力块，空数据降级）；反演输入（多光谱影像）属 B 类，samples 覆盖口已留 | `telemetry-service/growth-grid.ts` + `/telemetry/growth-grid` + `agro/Index.vue` 热力块 |
-| A15 | 8.3 / 9.3 变量作业 | ~~无变量播种与地块内网格级变量施肥方案~~ **已完成**（2026-11-18 P4，迁移 `055` 已写未应用：覆盖路径逐带速率映射 + 用量汇总 + 方案落库，空网格降级均一速率）；变量执行硬件属 B 类 | `operation-service/variable-rate.ts` + `/operations/variable-rate-plan` + Navigation.vue 变量选项 |
+| A14 | 6.2 长势分布图 | ~~四情页有生育期时间轴与提前/滞后对比，无地块内空间长势分布图~~ **已完成**（2026-11-18 P4，迁移 `054` 已应用部署：设备安装坐标 + IDW 网格热力端点 + 四情页热力块，空数据降级）；反演输入（多光谱影像）属 B 类，samples 覆盖口已留 | `telemetry-service/growth-grid.ts` + `/telemetry/growth-grid` + `agro/Index.vue` 热力块 |
+| A15 | 8.3 / 9.3 变量作业 | ~~无变量播种与地块内网格级变量施肥方案~~ **已完成**（2026-11-18 P4，迁移 `055` 已应用部署：覆盖路径逐带速率映射 + 用量汇总 + 方案落库，空网格降级均一速率）；变量执行硬件属 B 类 | `operation-service/variable-rate.ts` + `/operations/variable-rate-plan` + Navigation.vue 变量选项 |
 | A16 | 14.4 审计留存策略 | ~~审计日志无「留存 ≥6 个月」的归档/清理策略~~ **已完成**（2026-11-17，180 天硬底线 + 启动/周期清扫 + 策略观测端点） | `role.repository.ts` `purgeBefore` + `main.ts` 清扫定时器 |
 | A17 | 2.4 移动端 | ~~仅 Web SPA，无小程序/混合应用~~ **已完成**（2026-11-18 P5：独立 `apps/mobile` H5 工程，驾驶舱/巡田/任务回执三页，375px 宽可用，/m/ 子路径部署接线已留）；小程序另立项评估 | `apps/mobile`（Vue3+Vite，无 UI 库轻量样式） |
 | A18 | 6.1 / 9.2 EC/pH 闭环 | ~~无肥液 EC/pH 偏离自动调整配比联动~~ **已完成**（2026-11-18 P3，迁移 `052`/`053` 已应用部署：三条规则种子 + adjustEcPh 保守配比处方同事务签发，幂等按事件）；传感与执行硬件属 B 类 | `ec-ph-adjust.ts` + decision consumer onThresholdBreached + 迁移 `052`/`053` 种子 |
@@ -835,7 +844,7 @@
 | ~~P1~~ ✅ | A1 | 地图测距/测面（临时层+实时 tooltip）、图幅导出 PNG、大屏投放模式（隐菜单面板+字号放大） | 无 | 2d | ✅ 已交付：测面复用 polygonAreaMu 同公式；导出含边界，可跨域源含底图（谷歌/高德退矢量图幅） |
 | ~~P2 台账与契约~~ ✅ | A10 | 线路宽度/限速/适用机型/启用停用/模板复用 | 047 | 2d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：CHECK 与 contracts MachineType 同步；台账表单与筛选可用 |
 | ~~P2~~ ✅ | A12 | AI 事件类型扩 PERSON_INTRUSION/MACHINE_STATUS/FLOOD/LODGING/FIRE/SMOKE，pestType 改条件必填+消息转发 | 048 | 1.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：契约与网关回调登记同步；模型本体仍 B 类 |
-| ~~P2~~ ✅ | A11 | 遥测质量标记（超量程/连续不变/时间戳异常）+曲线与汇总剔除+异常日志端点 | 049 | 2.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：三类标记纯函数可注入冒烟；数据字典/资产目录另列 |
+| ~~P2~~ ✅ | A11 | 遥测质量标记（超量程/连续不变/时间戳异常）+曲线与汇总剔除+异常日志端点 | 049 | 2.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：三类标记纯函数可注入冒烟；数据字典/资产目录另列（后于 2026-11-18 续八补齐，迁移 058 已写未应用） |
 | ~~P3 控制深化~~ ✅ | A7 | 指令扩 PAUSE/RESUME/RETURN_HOME/POWER_OFF/TOOL_SWITCH/TILLAGE | 050 | 3d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：PAUSED 状态机 + PAUSE/RESUME 同事务联动；contracts payload 同步 |
 | ~~P3~~ ✅ | A8 | 指令授权地块+授权时间窗范围校验（三重管控升四重） | 051 | 2.5d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：空表放行、超范围人工下发 403；管理三端点 + 前端授权对话框 |
 | ~~P3~~ ✅ | A18 | EC/pH 偏离规则种子+决策联动肥液配比调整处方 | 052/053 | 2d | ✅ 已交付并部署（迁移已应用，只读核验 PASS）：依赖 A11 质量标记防误触发；处方幂等按事件、人工确认路径；053 修规则唯一键并入方向 |

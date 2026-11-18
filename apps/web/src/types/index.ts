@@ -540,6 +540,47 @@ export interface PlatformRole {
   updatedAt: string
 }
 
+// 数据字典与资产目录（platform-service，方案 11.4）：五类数据分类与后端白名单同源
+export type DataAssetCategory = 'SPATIAL' | 'DEVICE' | 'TELEMETRY' | 'BUSINESS' | 'STATS'
+
+export interface DataAsset {
+  id: string
+  tenantId: string
+  code: string
+  name: string
+  category: DataAssetCategory
+  description: string
+  sourceService: string
+  storage: string
+  updateFrequency: string
+  plotLinked: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DataDictionaryEntry {
+  id: string
+  tenantId: string
+  assetCode: string
+  metricKey: string
+  label: string
+  definition: string
+  unit: string
+  dataType: string
+  source: string
+  updateFrequency: string
+  createdAt: string
+  updatedAt: string
+}
+
+// 任务天气冲突提示（operation-service，方案 8.4/8.7）：计划窗内命中日的预报与不宜缘由
+export interface TaskWeatherConflict {
+  date: string
+  weather: string
+  level: 'WARNING' | 'CRITICAL'
+  reasons: string[]
+}
+
 // 系统备份（platform-service 备份接口，与 scripts/backup-system.mjs 的 manifest 对应）
 export interface BackupPart {
   name: string

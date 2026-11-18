@@ -13,6 +13,7 @@ import type {
   TelemetryHistoryPoint, TelemetryAlert,
   MessagePreference, MessageLevel,
   SystemUser, PlatformRole, PermissionGroup,
+  DataAsset, DataAssetCategory, DataDictionaryEntry, TaskWeatherConflict,
   BackupRecord, BackupRunResult,
 } from '@/types'
 
@@ -436,6 +437,35 @@ export const platformApi = {
   getPermissions(): Promise<PermissionGroup[]> {
     return get<PermissionGroup[]>('/platform/permissions')
   },
+  /** 数据资产目录（方案 11.4）：分类/关键词筛选 + 分页，非法分类后端 400 */
+  getDataAssets(params?: { page?: number; size?: number; keyword?: string; category?: DataAssetCategory }): Promise<PageResult<DataAsset>> {
+    return get<PageResult<DataAsset>>('/platform/data-assets', cleanParams(params))
+  },
+  createDataAsset(data: { code: string; name: string; category: DataAssetCategory; description?: string; sourceService?: string; storage?: string; updateFrequency?: string; plotLinked?: boolean }): Promise<DataAsset> {
+    return post<DataAsset>('/platform/data-assets', data)
+  },
+  /** 资产编码不可改（字典条目按编码引用），其余字段选填更新 */
+  updateDataAsset(id: string, data: { name?: string; category?: DataAssetCategory; description?: string; sourceService?: string; storage?: string; updateFrequency?: string; plotLinked?: boolean }): Promise<DataAsset> {
+    return put<DataAsset>(`/platform/data-assets/${encodeURIComponent(id)}`, data)
+  },
+  /** 资产下仍挂字典条目时后端 409，须先清理条目 */
+  deleteDataAsset(id: string): Promise<void> {
+    return del<void>(`/platform/data-assets/${encodeURIComponent(id)}`)
+  },
+  /** 数据字典：按资产/关键词筛选 + 分页 */
+  getDataDictionary(params?: { page?: number; size?: number; keyword?: string; assetCode?: string }): Promise<PageResult<DataDictionaryEntry>> {
+    return get<PageResult<DataDictionaryEntry>>('/platform/data-dictionary', cleanParams(params))
+  },
+  createDictionaryEntry(data: { assetCode: string; metricKey: string; label: string; definition?: string; unit?: string; dataType?: string; source?: string; updateFrequency?: string }): Promise<DataDictionaryEntry> {
+    return post<DataDictionaryEntry>('/platform/data-dictionary', data)
+  },
+  /** 所属资产与指标标识不可改，其余字段选填更新 */
+  updateDictionaryEntry(id: string, data: { label?: string; definition?: string; unit?: string; dataType?: string; source?: string; updateFrequency?: string }): Promise<DataDictionaryEntry> {
+    return put<DataDictionaryEntry>(`/platform/data-dictionary/${encodeURIComponent(id)}`, data)
+  },
+  deleteDictionaryEntry(id: string): Promise<void> {
+    return del<void>(`/platform/data-dictionary/${encodeURIComponent(id)}`)
+  },
   /** 备份清单：按创建时间倒序 */
   getBackups(): Promise<BackupRecord[]> {
     return get<BackupRecord[]>('/platform/backups')
@@ -801,7 +831,7 @@ export const operationApi = {
   getTasks(params?: { page?: number | undefined; size?: number | undefined; keyword?: string | undefined; status?: string | undefined; type?: string | undefined; plotCode?: string | undefined; deviceId?: string | undefined; priority?: string | undefined; from?: string | undefined; to?: string | undefined; archived?: 'NONE' | 'ONLY' | 'ALL' | undefined }): Promise<PageResult<any>> {
     return get<PageResult<any>>('/farm-tasks', cleanParams(params))
   },
-  /** 创建返回任务本体 + conflicts：同地块/同负责人/同设备计划时间重叠的在册任务，只提示不阻断 */
+  /** 创建返回任务本体 + conflicts + weatherConflicts：时间窗重叠的在册任务与计划窗内恶劣天气提示，只提示不阻断 */
   createTask(data: { plotCode: string; type: string; name: string; scheduledAt?: string; scheduledEndAt?: string; assigneeName?: string; deviceId?: string; priority?: string }): Promise<any> {
     return post<any>('/farm-tasks', data)
   },
@@ -809,9 +839,13 @@ export const operationApi = {
   getTaskQueue(deviceId: string): Promise<{ deviceId: string; items: Array<any & { position: number }> }> {
     return get<{ deviceId: string; items: Array<any & { position: number }> }>('/farm-tasks/queue', { deviceId })
   },
-  /** 单条任务的排期冲突：与创建时同一套判定，供详情页复核 */
+  /** 单条任务的排程冲突：与创建时同一套判定，供详情页复核 */
   getTaskConflicts(id: string): Promise<Array<{ task: any; reasons: string[] }>> {
     return get<Array<{ task: any; reasons: string[] }>>(`/farm-tasks/${encodeURIComponent(id)}/conflicts`)
+  },
+  /** 单条任务的天气适宜性（方案 8.4/8.7）：计划窗与七日预报求交，未排时间或预报未覆盖时为空 */
+  getTaskWeatherConflicts(id: string): Promise<TaskWeatherConflict[]> {
+    return get<TaskWeatherConflict[]>(`/farm-tasks/${encodeURIComponent(id)}/weather-conflicts`)
   },
   /** 单条任务详情：含 startedAt/completedAt 实际作业时间，不存在时服务端返回 404；
    *  includeArchived 只放行归档行的回查，状态流转与删除仍按在册口径 */

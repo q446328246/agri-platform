@@ -189,6 +189,15 @@
           <el-descriptions-item v-if="taskDetail.result?.notes" label="作业说明" :span="2">{{ taskDetail.result.notes }}</el-descriptions-item>
         </el-descriptions>
 
+        <div class="detail-subtitle">天气适宜性</div>
+        <div v-if="taskWeather.length" class="history-list">
+          <div v-for="item in taskWeather" :key="item.date" class="history-item">
+            <el-tag size="small" :type="item.level === 'CRITICAL' ? 'danger' : 'warning'">{{ item.date }} {{ item.weather }}</el-tag>
+            <span class="history-summary">{{ item.reasons.join('；') }}</span>
+          </div>
+        </div>
+        <el-empty v-else :description="taskDetail?.scheduledAt ? '计划窗内无不宜天气（或预报未覆盖/缺测）' : '任务未排时间，无窗可判'" :image-size="60" />
+
         <div class="detail-subtitle">该地块控制指令</div>
         <el-table v-if="taskCommands.length" :data="taskCommands" size="small" border>
           <el-table-column label="类型" width="80">
@@ -264,7 +273,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { FarmTaskQuery, FarmTaskStatus } from '@/types'
+import type { FarmTaskQuery, FarmTaskStatus, TaskWeatherConflict } from '@/types'
 import { formatDateTime, getControlOriginText, getControlOriginType, getControlStatusText, getControlStatusType, getControlTypeText, getTaskStatusText, getTaskStatusType } from '@/utils'
 import { controlApi, operationApi, plotApi } from '@/api'
 
@@ -401,11 +410,13 @@ async function submitCreate() {
     })
     createVisible.value = false
     await fetchList()
-    // 冲突只提示不阻断：把命中的任务与缘由摆出来，由调度人权衡抢排或改期
+    // 冲突只提示不阻断：把命中的任务与缘由、计划窗内恶劣天气摆出来，由调度人权衡抢排或改期
     const conflicts: Array<{ task: any; reasons: string[] }> = created?.conflicts ?? []
-    if (conflicts.length) {
+    const weatherConflicts: TaskWeatherConflict[] = created?.weatherConflicts ?? []
+    if (conflicts.length || weatherConflicts.length) {
       const lines = conflicts.map((c) => `「${c.task.name}」（${c.task.plotCode}${c.task.assigneeName ? ` · ${c.task.assigneeName}` : ''}${c.task.deviceId ? ` · ${c.task.deviceId}` : ''}）：${c.reasons.join('、')}`)
-      ElMessageBox.alert(lines.join('；'), '任务已创建，但存在排期冲突', { type: 'warning', confirmButtonText: '知道了' }).catch(() => {})
+      const weatherLines = weatherConflicts.map((w) => `${w.date} ${w.weather}：${w.reasons.join('、')}`)
+      ElMessageBox.alert([...lines, ...weatherLines].join('；'), '任务已创建，但存在排期/天气冲突', { type: 'warning', confirmButtonText: '知道了' }).catch(() => {})
     } else {
       ElMessage.success('任务已创建')
     }
@@ -421,6 +432,7 @@ const taskDetail = ref<any | null>(null)
 const taskPlot = ref<{ parcelCode: string; parcelName: string; areaMu: number } | null>(null)
 const taskCommands = ref<any[]>([])
 const taskHistory = ref<any[]>([])
+const taskWeather = ref<TaskWeatherConflict[]>([])
 
 /** 服务端用 RUNNING，页面与筛选统一显示「进行中」，与列表同口径 */
 function displayStatus(status: string): FarmTaskStatus {
@@ -434,6 +446,7 @@ async function showDetail(row: { id: string; deletedAt?: string }) {
   taskPlot.value = null
   taskCommands.value = []
   taskHistory.value = []
+  taskWeather.value = []
   try {
     const task = await operationApi.getTask(row.id, Boolean(row.deletedAt))
     taskDetail.value = task
@@ -446,6 +459,8 @@ async function showDetail(row: { id: string; deletedAt?: string }) {
     taskCommands.value = commands.items
     // 操作历史是审计对象，归档任务也要能回查；取不到只让历史区块显示空态
     taskHistory.value = await operationApi.getTaskHistory(row.id).catch(() => [])
+    // 天气适宜性（方案 8.4/8.7）：未排时间的任务无窗可判不请求；预报缺测时后端诚实返回空
+    taskWeather.value = task.scheduledAt ? await operationApi.getTaskWeatherConflicts(row.id).catch(() => []) : []
   } catch (error) {
     console.error('任务详情加载失败', error)
   } finally {

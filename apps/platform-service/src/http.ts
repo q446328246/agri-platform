@@ -8,6 +8,8 @@ import { authorizeRequest } from "@agri/shared";
 
 import { InMemoryAuditRepository, InMemoryRoleRepository, MIN_AUDIT_RETENTION_DAYS, resolveAuditRetentionDays, seedRoles } from "./role.repository.js";
 import type { AuditRecord, AuditRepository, RoleRecord, RoleRepository } from "./role.repository.js";
+import { DATA_ASSET_CATEGORIES, InMemoryDataCatalogRepository, seedDataCatalog } from "./data-catalog.repository.js";
+import type { DataAsset, DataAssetCategory, DataCatalogRepository, DataDictionaryEntry } from "./data-catalog.repository.js";
 import { backupArchive, listBackups, readBackup, readBackupPart, removeBackup, runBackup, runRestore } from "./backup.js";
 
 /**
@@ -20,6 +22,7 @@ import { backupArchive, listBackups, readBackup, readBackupPart, removeBackup, r
 export interface PlatformHttpOptions {
   roles?: RoleRepository;
   audits?: AuditRepository;
+  catalog?: DataCatalogRepository;
 }
 
 interface Tenant { id: string; name: string; code: string; status: "ACTIVE" | "DISABLED" }
@@ -36,7 +39,7 @@ const PLATFORM_POLICY = {
   write: "system:role",
   publicPaths: ["/api/v1/internal/platform/role-permissions"],
   sessionPaths: ["/api/v1/platform/tenant", "/api/v1/platform/permissions"],
-  pathPermissions: [{ prefix: "/api/v1/platform/audit-logs", permission: "system:audit" }, { prefix: "/api/v1/platform/audit-retention", permission: "system:audit" }, { prefix: "/api/v1/platform/backups", permission: "system:backup" }],
+  pathPermissions: [{ prefix: "/api/v1/platform/audit-logs", permission: "system:audit" }, { prefix: "/api/v1/platform/audit-retention", permission: "system:audit" }, { prefix: "/api/v1/platform/backups", permission: "system:backup" }, { prefix: "/api/v1/platform/data-assets", permission: "system:data" }, { prefix: "/api/v1/platform/data-dictionary", permission: "system:data" }],
 };
 
 /** 内部接口凭证：网关与管理脚本使用，不经公网暴露 */
@@ -52,6 +55,14 @@ function operator(request: IncomingMessage): string { return request.headers["x-
 function pageOf(query: URLSearchParams): { page: number; size: number } { return { page: Math.max(1, Number(query.get("page") || 1)), size: Math.min(200, Math.max(1, Number(query.get("size") || 20))) }; }
 function parseStatus(value: unknown): "ACTIVE" | "DISABLED" | null { const status = text(value); if (status === "ACTIVE" || status === "DISABLED") return status; return null; }
 
+/** 数据目录入参校验：超长/必填不合法直接抛错，由统一 catch 转 400，与角色接口同一口径 */
+function bounded(value: unknown, field: string, max: number, required = false): string {
+  const parsed = text(value);
+  if (required && !parsed) throw new Error(`${field}不能为空`);
+  if (parsed.length > max) throw new Error(`${field}不能超过${max}字`);
+  return parsed;
+}
+
 /** 校验角色权限：只接受权限目录里的编码，内置管理员固定为通配符 */
 function parsePermissions(value: unknown): { permissions: string[]; error?: string } {
   if (value === undefined) return { permissions: [] };
@@ -65,6 +76,7 @@ function parsePermissions(value: unknown): { permissions: string[]; error?: stri
 export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Server {
   const roles = options.roles ?? new InMemoryRoleRepository(seedRoles());
   const audits = options.audits ?? new InMemoryAuditRepository();
+  const catalog = options.catalog ?? new InMemoryDataCatalogRepository(seedDataCatalog());
   const audit = async (request: IncomingMessage, action: string, resource: string, detail: string): Promise<void> => {
     const record: AuditRecord = { id: `audit-${randomUUID().slice(0, 8)}`, tenantId: tenantOf(request), action, operator: operator(request), resource, detail, createdAt: new Date().toISOString() };
     await audits.create(record);
@@ -160,6 +172,118 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
       const retentionDays = resolveAuditRetentionDays();
       send(response, 200, { retentionDays, minRetentionDays: MIN_AUDIT_RETENTION_DAYS, purge: "expired-auto", env: "AUDIT_RETENTION_DAYS" }, traceId);
       return;
+    }
+    // 数据字典与资产目录（方案 11.4）：明确各数据的定义、单位、来源与更新频率，避免同指标多口径
+    if (request.method === "GET" && url.pathname === "/api/v1/platform/data-assets") {
+      const category = text(url.searchParams.get("category"));
+      if (category && !DATA_ASSET_CATEGORIES.includes(category as DataAssetCategory)) { send(response, 400, null, traceId, `资产分类需为 ${DATA_ASSET_CATEGORIES.join("/")}`); return; }
+      const keyword = text(url.searchParams.get("keyword"));
+      send(response, 200, await catalog.pageAssets(tenantOf(request), { ...pageOf(url.searchParams), ...(keyword ? { keyword } : {}), ...(category ? { category: category as DataAssetCategory } : {}) }), traceId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/v1/platform/data-assets") {
+      const body = await readJson(request);
+      const code = bounded(body.code, "资产编码", 64, true);
+      if (!/^[a-z][a-z0-9_]{2,63}$/.test(code)) { send(response, 400, null, traceId, "资产编码需以小写字母开头，3~64 位小写字母、数字或下划线（建议取真实表名）"); return; }
+      const name = bounded(body.name, "资产名称", 100, true);
+      const category = text(body.category);
+      if (!DATA_ASSET_CATEGORIES.includes(category as DataAssetCategory)) { send(response, 400, null, traceId, `资产分类需为 ${DATA_ASSET_CATEGORIES.join("/")}`); return; }
+      if (await catalog.findAssetByCode(tenantOf(request), code)) { send(response, 409, null, traceId, "资产编码已存在"); return; }
+      const now = new Date().toISOString();
+      const record: DataAsset = { id: `asset-${randomUUID().slice(0, 8)}`, tenantId: tenantOf(request), code, name, category: category as DataAssetCategory, description: bounded(body.description, "资产描述", 500), sourceService: bounded(body.sourceService, "来源服务", 100), storage: bounded(body.storage, "存储介质", 100), updateFrequency: bounded(body.updateFrequency, "更新频率", 100), plotLinked: body.plotLinked === true, createdAt: now, updatedAt: now };
+      const created = await catalog.createAsset(record);
+      await audit(request, "dataAsset.create", `dataAsset:${record.id}`, `登记数据资产 ${name}（${code}）`);
+      send(response, 201, created, traceId);
+      return;
+    }
+    const assetRoute = url.pathname.match(/^\/api\/v1\/platform\/data-assets\/([^/]+)$/);
+    if (assetRoute) {
+      const id = decodeURIComponent(assetRoute[1] ?? "");
+      const asset = await catalog.findAsset(tenantOf(request), id);
+      if (!asset) { send(response, 404, null, traceId, "数据资产不存在"); return; }
+      if (request.method === "PUT") {
+        const body = await readJson(request);
+        // 编码不可改：字典条目按 assetCode 引用，改编码会让存量条目悬空
+        if (body.code !== undefined && text(body.code) !== asset.code) { send(response, 400, null, traceId, "资产编码不可修改（字典条目按编码引用）"); return; }
+        if (body.category !== undefined && !DATA_ASSET_CATEGORIES.includes(text(body.category) as DataAssetCategory)) { send(response, 400, null, traceId, `资产分类需为 ${DATA_ASSET_CATEGORIES.join("/")}`); return; }
+        if (body.plotLinked !== undefined && typeof body.plotLinked !== "boolean") { send(response, 400, null, traceId, "地块归集标记需为布尔值"); return; }
+        const next: DataAsset = {
+          ...asset,
+          name: body.name !== undefined ? bounded(body.name, "资产名称", 100, true) : asset.name,
+          category: body.category !== undefined ? text(body.category) as DataAssetCategory : asset.category,
+          description: body.description !== undefined ? bounded(body.description, "资产描述", 500) : asset.description,
+          sourceService: body.sourceService !== undefined ? bounded(body.sourceService, "来源服务", 100) : asset.sourceService,
+          storage: body.storage !== undefined ? bounded(body.storage, "存储介质", 100) : asset.storage,
+          updateFrequency: body.updateFrequency !== undefined ? bounded(body.updateFrequency, "更新频率", 100) : asset.updateFrequency,
+          plotLinked: body.plotLinked !== undefined ? body.plotLinked === true : asset.plotLinked,
+          updatedAt: new Date().toISOString(),
+        };
+        const updated = await catalog.updateAsset(next);
+        await audit(request, "dataAsset.update", `dataAsset:${asset.id}`, `更新数据资产 ${next.name}（${asset.code}）`);
+        send(response, 200, updated, traceId);
+        return;
+      }
+      if (request.method === "DELETE") {
+        // 引用守卫：资产下还挂着字典条目时不允许删，避免条目悬空失去口径归属
+        const entries = await catalog.countDictionaryByAsset(tenantOf(request), asset.code);
+        if (entries > 0) { send(response, 409, null, traceId, `该资产下仍有 ${entries} 条字典条目，请先清理条目`); return; }
+        await catalog.removeAsset(tenantOf(request), asset.id);
+        await audit(request, "dataAsset.delete", `dataAsset:${asset.id}`, `删除数据资产 ${asset.name}（${asset.code}）`);
+        send(response, 200, null, traceId);
+        return;
+      }
+    }
+    if (request.method === "GET" && url.pathname === "/api/v1/platform/data-dictionary") {
+      const assetCode = text(url.searchParams.get("assetCode"));
+      const keyword = text(url.searchParams.get("keyword"));
+      send(response, 200, await catalog.pageDictionary(tenantOf(request), { ...pageOf(url.searchParams), ...(assetCode ? { assetCode } : {}), ...(keyword ? { keyword } : {}) }), traceId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/v1/platform/data-dictionary") {
+      const body = await readJson(request);
+      const assetCode = bounded(body.assetCode, "所属资产编码", 64, true);
+      if (!(await catalog.findAssetByCode(tenantOf(request), assetCode))) { send(response, 404, null, traceId, "数据资产不存在"); return; }
+      const metricKey = bounded(body.metricKey, "指标标识", 64, true);
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(metricKey)) { send(response, 400, null, traceId, "指标标识需以字母开头，仅含字母、数字或下划线，不超过 64 位"); return; }
+      if (await catalog.findDictionaryByKey(tenantOf(request), assetCode, metricKey)) { send(response, 409, null, traceId, "该资产下指标已存在，同一指标只留一条口径"); return; }
+      const now = new Date().toISOString();
+      const record: DataDictionaryEntry = { id: `dict-${randomUUID().slice(0, 8)}`, tenantId: tenantOf(request), assetCode, metricKey, label: bounded(body.label, "指标名称", 100, true), definition: bounded(body.definition, "指标定义", 500), unit: bounded(body.unit, "单位", 30), dataType: bounded(body.dataType, "数据类型", 30), source: bounded(body.source, "数据来源", 100), updateFrequency: bounded(body.updateFrequency, "更新频率", 100), createdAt: now, updatedAt: now };
+      const created = await catalog.createDictionary(record);
+      await audit(request, "dataDictionary.create", `dataDictionary:${record.id}`, `登记字典条目 ${record.label}（${assetCode}.${metricKey}）`);
+      send(response, 201, created, traceId);
+      return;
+    }
+    const dictionaryRoute = url.pathname.match(/^\/api\/v1\/platform\/data-dictionary\/([^/]+)$/);
+    if (dictionaryRoute) {
+      const id = decodeURIComponent(dictionaryRoute[1] ?? "");
+      const entry = await catalog.findDictionary(tenantOf(request), id);
+      if (!entry) { send(response, 404, null, traceId, "字典条目不存在"); return; }
+      if (request.method === "PUT") {
+        const body = await readJson(request);
+        // 所属资产与指标标识不可改：改了等于另一条口径，应新建而非改写
+        if (body.assetCode !== undefined && text(body.assetCode) !== entry.assetCode) { send(response, 400, null, traceId, "所属资产不可修改"); return; }
+        if (body.metricKey !== undefined && text(body.metricKey) !== entry.metricKey) { send(response, 400, null, traceId, "指标标识不可修改"); return; }
+        const next: DataDictionaryEntry = {
+          ...entry,
+          label: body.label !== undefined ? bounded(body.label, "指标名称", 100, true) : entry.label,
+          definition: body.definition !== undefined ? bounded(body.definition, "指标定义", 500) : entry.definition,
+          unit: body.unit !== undefined ? bounded(body.unit, "单位", 30) : entry.unit,
+          dataType: body.dataType !== undefined ? bounded(body.dataType, "数据类型", 30) : entry.dataType,
+          source: body.source !== undefined ? bounded(body.source, "数据来源", 100) : entry.source,
+          updateFrequency: body.updateFrequency !== undefined ? bounded(body.updateFrequency, "更新频率", 100) : entry.updateFrequency,
+          updatedAt: new Date().toISOString(),
+        };
+        const updated = await catalog.updateDictionary(next);
+        await audit(request, "dataDictionary.update", `dataDictionary:${entry.id}`, `更新字典条目 ${next.label}（${entry.assetCode}.${entry.metricKey}）`);
+        send(response, 200, updated, traceId);
+        return;
+      }
+      if (request.method === "DELETE") {
+        await catalog.removeDictionary(tenantOf(request), entry.id);
+        await audit(request, "dataDictionary.delete", `dataDictionary:${entry.id}`, `删除字典条目 ${entry.label}（${entry.assetCode}.${entry.metricKey}）`);
+        send(response, 200, null, traceId);
+        return;
+      }
     }
     // 系统备份：清单读取、触发备份/恢复脚本、详情与删除
     if (request.method === "GET" && url.pathname === "/api/v1/platform/backups") {

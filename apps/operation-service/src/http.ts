@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { ApiResponse } from "@agri/contracts";
-import { authorizeRequest } from "@agri/shared";
+import { authorizeRequest, identityHeaders } from "@agri/shared";
 import { parseNavigationRequest, planNavigation } from "./navigation.js";
 import type { NavPlan } from "./navigation.js";
 import { CoverageError, parseCoverageRequest, planCoverage } from "./coverage.js";
@@ -13,6 +13,8 @@ import type { VariableRatePlanRepository } from "./variable-rate.repository.js";
 
 import { canTransition, InMemoryTaskRepository, TASK_ARCHIVE_FILTERS, TASK_PRIORITIES, TASK_STATUSES, TASK_TYPES } from "./task.repository.js";
 import type { Task, TaskArchiveFilter, TaskPriority, TaskQuery, TaskRepository, TaskResult, TaskStatus, TaskType } from "./task.repository.js";
+import { weatherConflictsOf } from "./weather-conflict.js";
+import type { ForecastDaySnapshot } from "./weather-conflict.js";
 const hoursFromNow = (hours: number): string => new Date(Date.now() + hours * 3600000).toISOString();
 /** 操作人取网关注入的 x-user-id，与地块变更历史同一口径；缺省记为 system */
 const actorOf = (req: IncomingMessage): string => req.headers["x-user-id"]?.toString() || "system";
@@ -97,9 +99,13 @@ function resultOf(value: unknown): TaskResult {
   if (typeof result.finishedAreaMu !== "number" || !Number.isFinite(result.finishedAreaMu) || result.finishedAreaMu < 0) throw new InputError("实际作业面积必须为非负数");
   return { outcome: result.outcome as TaskResult["outcome"], finishedAreaMu: result.finishedAreaMu, notes: text(result.notes, "作业说明", 2000) };
 }
-export function createOperationHttpServer(options: { tasks?: TaskRepository; variablePlans?: VariableRatePlanRepository } = {}): Server {
+export function createOperationHttpServer(options: { tasks?: TaskRepository; variablePlans?: VariableRatePlanRepository; fetchWeatherForecast?: (identity: Record<string, string>) => Promise<ForecastDaySnapshot[] | undefined> } = {}): Server {
   const tasks = options.tasks ?? new InMemoryTaskRepository(demoTasks.map((task) => ({ ...task, version: 1 })));
   const variablePlans = options.variablePlans ?? new InMemoryVariableRatePlanRepository();
+  // 天气冲突提示（方案 8.4/8.7）：预报由启动层注入，缺省不取数——缺测时诚实返回空提示，不假定无冲突
+  const fetchWeatherForecast = options.fetchWeatherForecast;
+  const forecastDays = async (req: IncomingMessage): Promise<ForecastDaySnapshot[]> =>
+    fetchWeatherForecast ? (await fetchWeatherForecast(identityHeaders(req)).catch(() => undefined)) ?? [] : [];
   const navPlans = new Map<string, NavPlan[]>();
   const coveragePlans = new Map<string, CoveragePlan[]>();
   return createServer(async (req, res) => {
@@ -130,7 +136,9 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository; var
         const created = await tasks.create(task, actorOf(req), traceId);
         // 冲突只提示不阻断：排程重叠由调度人权衡（抢排/改期），平台把命中的任务与缘由摆出来
         const conflicts = await tasks.conflicts(tenantId, { id: created.id, plotCode: created.plotCode, ...(created.assigneeName === undefined ? {} : { assigneeName: created.assigneeName }), ...(created.deviceId === undefined ? {} : { deviceId: created.deviceId }), ...(created.scheduledAt === undefined ? {} : { scheduledAt: created.scheduledAt }), ...(created.scheduledEndAt === undefined ? {} : { scheduledEndAt: created.scheduledEndAt }) });
-        send(res, 201, { ...created, conflicts }, traceId); return;
+        // 天气冲突同样只提示不阻断：计划窗与七日预报求交，逐日给出不宜/推迟缘由
+        const weatherConflicts = weatherConflictsOf(created.type, created.scheduledAt, created.scheduledEndAt, await forecastDays(req));
+        send(res, 201, { ...created, conflicts, weatherConflicts }, traceId); return;
       }
       // 设备任务队列（A5，方案 8.7 自动排队）：同一设备的在册未结束任务按
       // 优先级 → 计划开始 → 建档时间 给出位次；必须放在 detailMatch 之前，免得 queue 被当成任务 id
@@ -143,6 +151,13 @@ export function createOperationHttpServer(options: { tasks?: TaskRepository; var
       const detailMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)$/);
       const historyMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/history$/);
       const conflictsMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/conflicts$/);
+      const weatherMatch = url.pathname.match(/^\/api\/v1\/farm-tasks\/([^/]+)\/weather-conflicts$/);
+      if (weatherMatch?.[1] && req.method === "GET") {
+        // 天气适宜性回查：改期后前端可重拉一次；未排时间的任务无窗可判，诚实返回空
+        const task = await tasks.find(tenantId, decodeURIComponent(weatherMatch[1]));
+        if (!task) { send(res, 404, null, traceId, "任务不存在"); return; }
+        send(res, 200, weatherConflictsOf(task.type, task.scheduledAt, task.scheduledEndAt, await forecastDays(req)), traceId); return;
+      }
       if (conflictsMatch?.[1] && req.method === "GET") {
         // 排程回查：任务改期或负责人调整后，前端可重新拉一次冲突提示
         const task = await tasks.find(tenantId, decodeURIComponent(conflictsMatch[1]));
