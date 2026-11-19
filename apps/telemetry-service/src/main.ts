@@ -40,7 +40,7 @@ async function bootstrap(): Promise<void> {
       const publisher = new EventLogPublisher(new PgEventLogStore(client), { tenantId, traceId: "telemetry-relay", producer: "telemetry" });
       setDefaultPublisher(publisher);
       const dependencies: TelemetryDependencies = {
-        readings: new SqlReadingRepository(client),
+        readings: new SqlReadingRepository(client, { latestMode: process.env.TELEMETRY_LATEST_MODE === "timescale" ? "timescale" : "raw" }),
         alerts: new SqlAlertRepository(client),
         rules,
         pests: new SqlPestEventRepository(client),

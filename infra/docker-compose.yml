@@ -1,10 +1,15 @@
 services:
   postgres:
-    image: postgis/postgis:16-3.5
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile.timescale
+    image: agri-postgres-timescale:local
     environment:
       POSTGRES_DB: agri
       POSTGRES_USER: agri
       POSTGRES_PASSWORD: agri
+      # TimescaleDB 预加载已写入镜像内 postgresql.conf.sample，initdb 生成的 postgresql.conf 自动包含
+      # 已有数据卷需手工 ALTER SYSTEM SET shared_preload_libraries = 'timescaledb' 后重启
     ports:
       - "5432:5432"
     volumes:
@@ -32,6 +37,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # MQTT Broker（A2）：承载设备高频遥测与指令下发
+  emqx:
+    image: emqx/emqx:5.8
+    ports:
+      - "1883:1883"    # MQTT
+      - "8883:8883"    # MQTT over TLS
+      - "18083:18083"  # 控制台
+    volumes:
+      - agri-emqx:/opt/emqx/data
+    healthcheck:
+      test: ["CMD", "emqx_ctl", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   # 应用服务（profile app 才启动，默认只用基础设施）
   # 单容器内跑全部 15 个 HTTP 服务，仅网关对外；反代与 HTTPS 在 edge
@@ -121,3 +142,4 @@ services:
 volumes:
   agri-postgres:
   agri-minio:
+  agri-emqx:

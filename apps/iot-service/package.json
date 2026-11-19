@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@agri/iot-service",
   "version": "1.0.0",
   "private": true,
@@ -17,6 +17,7 @@
     "@agri/db": "workspace:*",
     "@agri/shared": "workspace:*",
     "@nestjs/common": "^11.2.8",
+    "mqtt": "^5.10.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "zod": "^3.24.0"

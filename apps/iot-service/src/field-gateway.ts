@@ -77,6 +77,8 @@ export interface FieldGatewayOptions {
   /** 单条指令执行失败的回调，缺省只在控制台留一行；不影响其它设备与其它指令 */
   onError?: (device: Device, command: FieldCommand, error: Error) => void;
   now?: () => number;
+  /** MQTT 指令下发（A2）：领取指令后向设备 command topic 补发一条，与 Modbus 线圈下发并存；缺省不发 */
+  publishCommand?: ((deviceNo: string, command: unknown) => void) | undefined;
 }
 
 /** 网关用到的 Modbus 主站能力，`ModbusTcpClient` 的子集，便于测试替身 */
@@ -173,6 +175,7 @@ export class FieldGateway {
   private readonly clientFor: (device: Device, binding: ModbusBinding) => ModbusClientLike;
   private readonly onError: (device: Device, command: FieldCommand, error: Error) => void;
   private readonly now: () => number;
+  private readonly publishCommand: ((deviceNo: string, command: unknown) => void) | undefined;
   private readonly clients = new Map<string, ModbusClientLike>();
   private readonly jobs = new Map<string, JobState>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -193,6 +196,7 @@ export class FieldGateway {
       ((_device, binding) => new ModbusTcpClient({ host: binding.host, port: binding.port, unitId: binding.unitId, timeoutMs: binding.timeoutMs }));
     this.onError = options.onError ?? ((device, command, error) => console.warn(`[field-gateway] ${device.deviceNo} 指令 ${command.id} 失败：${error.message}`));
     this.now = options.now ?? Date.now;
+    this.publishCommand = options.publishCommand;
   }
 
   start(): void {
@@ -273,6 +277,8 @@ export class FieldGateway {
     const client = this.client(device, binding);
     if (command.status === "QUEUED") {
       await this.channel.dispatch(command.id);
+      // MQTT 指令通道（A2）：与 Modbus 线圈下发并存，领取后补发一条给订阅 command topic 的设备
+      this.publishCommand?.(device.deviceNo, command);
       await this.startJob(client, profile, command, spec);
       return;
     }

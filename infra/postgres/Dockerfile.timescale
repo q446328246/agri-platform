@@ -1,0 +1,22 @@
+# 基于 postgres:16-bookworm，同时具备 PostGIS 与 TimescaleDB（PG16），供遥测时序数据使用。
+#
+# 构建：docker build -f infra/postgres/Dockerfile.timescale -t agri-postgres-timescale:local infra/postgres
+#
+# 为什么不用 postgis/postgis:16-3.5：它基于已 EOL 的 Debian 11 bullseye，PGDG 与
+# debian-security 源失效，postgresql-16 停在 16.9，而 timescaledb 要求 ≥16.13，依赖无法满足。
+# bookworm 未 EOL，PGDG（PostGIS）与 packagecloud（TimescaleDB）源均正常。
+# postgres:16-bookworm 官方镜像已预装 PGDG 源与 key，无需重复配置。
+FROM postgres:16-bookworm
+
+# PGDG 源已预装（PostGIS）；timescaledb 走 packagecloud bookworm 源（trusted=yes 跳过签名）
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gnupg curl ca-certificates; \
+    echo "deb [trusted=yes] https://packagecloud.io/timescale/timescaledb/debian/ bookworm main" > /etc/apt/sources.list.d/timescaledb.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends postgresql-16-postgis-3 timescaledb-2-postgresql-16; \
+    # shared_preload_libraries 是 postgres 启动参数而非 initdb 参数，写入 postgresql.conf.sample 模板，
+    # 使 initdb 生成的 postgresql.conf 自动预加载 timescaledb
+    sed -i "s/^#shared_preload_libraries = .*/shared_preload_libraries = 'timescaledb'/" /usr/share/postgresql/16/postgresql.conf.sample; \
+    grep -q "shared_preload_libraries = 'timescaledb'" /usr/share/postgresql/16/postgresql.conf.sample || echo "shared_preload_libraries = 'timescaledb'" >> /usr/share/postgresql/16/postgresql.conf.sample; \
+    rm -rf /var/lib/apt/lists/*

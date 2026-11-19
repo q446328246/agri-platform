@@ -3,6 +3,7 @@ import 'reflect-metadata';
 import { PgClientAdapter, resolveDatabaseUrl } from '@agri/db';
 
 import { createIotHttpServer } from './http.js';
+import { createMqttBroker } from './mqtt-broker.js';
 import { FieldGateway } from './field-gateway.js';
 import { DEFAULT_TENANT, InMemoryDeviceRepository, SqlDeviceRepository, demoDevices } from './device.repository.js';
 import type { DeviceRepository } from './device.repository.js';
@@ -40,8 +41,22 @@ async function bootstrap(): Promise<void> {
   const server = createIotHttpServer({ devices });
   server.listen(port, '127.0.0.1', () => console.log(`iot-service HTTP started on ${port} (${mode})`));
 
+  // MQTT 接入（A2）：订阅设备遥测/回执 topic 并转发，同时提供指令下发通道；缺省关闭，保留 HTTP 回调链路
+  const mqttEnabled = ['1', 'true'].includes((process.env.IOT_MQTT_ENABLED ?? '').toLowerCase());
+  const mqttBroker = mqttEnabled
+    ? createMqttBroker({
+        telemetryUrl: process.env.TELEMETRY_SERVICE_URL,
+        controlUrl: process.env.CONTROL_SERVICE_URL,
+        deviceToken: process.env.DEVICE_CALLBACK_TOKEN,
+      })
+    : undefined;
+  if (mqttBroker) {
+    mqttBroker.start();
+    console.log(`iot-service MQTT 接入已启动 -> ${process.env.MQTT_URL ?? 'mqtt://127.0.0.1:1883'}，上报 ${process.env.TELEMETRY_SERVICE_URL ?? 'http://127.0.0.1:3004'}`);
+  }
+
   const gatewayEnabled = ['1', 'true'].includes((process.env.FIELD_GATEWAY_ENABLED ?? '').toLowerCase());
-  const gateway = gatewayEnabled ? new FieldGateway({ devices }) : undefined;
+  const gateway = gatewayEnabled ? new FieldGateway({ devices, publishCommand: mqttBroker?.publishCommand }) : undefined;
   if (gateway) {
     gateway.start();
     console.log(`iot-service 现场协议网关已启动 -> ${process.env.CONTROL_SERVICE_URL ?? 'http://127.0.0.1:3008'}`);
@@ -50,6 +65,7 @@ async function bootstrap(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     server.close();
     await gateway?.stop();
+    await mqttBroker?.stop();
     await client?.$disconnect();
   };
   process.once('SIGINT', () => void shutdown());

@@ -480,49 +480,53 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
           ...(typeof depth === "number" ? { depthCm: depth } : {}),
           ...(flags.length > 0 ? { qualityFlags: flags } : {}),
         };
-        const reading = await readings.create(undefined, input);
+        const { reading, inserted } = await readings.createIdempotent(undefined, input);
         let alert: TelemetryAlert | null = null;
-        if (flags.length > 0) {
-          // 可疑读数不触发阈值告警，避免传感器故障刷告警；异常日志供审计回查
-          await qualityLogs.append(undefined, {
-            id: newReadingId(),
-            readingId: reading.id,
-            deviceId: reading.deviceId,
-            plotCode: reading.plotCode,
-            metric: reading.metric,
-            value: reading.value,
-            unit: reading.unit,
-            recordedAt: reading.recordedAt,
-            flags,
-            createdAt: new Date().toISOString(),
-          });
-        } else {
-          // 地块专属分级规则优先，未配置回落全局；命中多级时只按最严重的一级生成一条告警
-          const applicable = await rules.findEnabled(reading.metric, reading.plotCode);
-          const rule = applicable
-            .filter((candidate) => breaches(candidate, reading.value))
-            .sort((a, b) => RULE_SEVERITY[b.level] - RULE_SEVERITY[a.level])[0] ?? null;
-          if (rule) {
-            alert = {
+        // 幂等去重（A2）：MQTT QoS 1/2 重投、断网补传会重复上报，
+        // 命中迁移 060 唯一索引时不再落第二条读数，也不重复生成告警、异常日志与越限事件。
+        if (inserted) {
+          if (flags.length > 0) {
+            // 可疑读数不触发阈值告警，避免传感器故障刷告警；异常日志供审计回查
+            await qualityLogs.append(undefined, {
               id: newReadingId(),
+              readingId: reading.id,
               deviceId: reading.deviceId,
               plotCode: reading.plotCode,
-              level: rule.level,
-              metric: reading.metric,
-              message: rule.message,
-              createdAt: reading.recordedAt,
-              handled: false,
-            };
-            await alerts.create(undefined, alert);
-            const payload: ThresholdBreachedPayload = {
-              parcelId: reading.plotCode,
               metric: reading.metric,
               value: reading.value,
-              threshold: rule.threshold,
-              direction: rule.direction,
-              occurredAt: reading.recordedAt,
-            };
-            await emit(EventTopic.TelemetryThresholdBreached, payload, reading.plotCode);
+              unit: reading.unit,
+              recordedAt: reading.recordedAt,
+              flags,
+              createdAt: new Date().toISOString(),
+            });
+          } else {
+            // 地块专属分级规则优先，未配置回落全局；命中多级时只按最严重的一级生成一条告警
+            const applicable = await rules.findEnabled(reading.metric, reading.plotCode);
+            const rule = applicable
+              .filter((candidate) => breaches(candidate, reading.value))
+              .sort((a, b) => RULE_SEVERITY[b.level] - RULE_SEVERITY[a.level])[0] ?? null;
+            if (rule) {
+              alert = {
+                id: newReadingId(),
+                deviceId: reading.deviceId,
+                plotCode: reading.plotCode,
+                level: rule.level,
+                metric: reading.metric,
+                message: rule.message,
+                createdAt: reading.recordedAt,
+                handled: false,
+              };
+              await alerts.create(undefined, alert);
+              const payload: ThresholdBreachedPayload = {
+                parcelId: reading.plotCode,
+                metric: reading.metric,
+                value: reading.value,
+                threshold: rule.threshold,
+                direction: rule.direction,
+                occurredAt: reading.recordedAt,
+              };
+              await emit(EventTopic.TelemetryThresholdBreached, payload, reading.plotCode);
+            }
           }
         }
         send(res, 201, { reading, alert }, traceId);

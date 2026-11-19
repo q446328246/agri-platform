@@ -62,8 +62,21 @@ export interface ReadingPoint {
   value: number;
 }
 
+/** SqlReadingRepository 的可选装配口径 */
+export interface SqlReadingRepositoryOptions {
+  /**
+   * latest 的读取路径：
+   * - `raw`（默认）：直查 telemetry_readings，靠 hypertable 分块裁剪 + 索引，结果实时；
+   * - `timescale`：读连续聚合 telemetry_readings_latest，数据量大时更快，但聚合刷新周期内可能滞后。
+   * 由 `TELEMETRY_LATEST_MODE=timescale` 开启，可随时回退。
+   */
+  latestMode?: "raw" | "timescale";
+}
+
 export interface ReadingRepository {
   create(tx: unknown, input: CreateReadingInput): Promise<Reading>;
+  /** 幂等落库：同 (deviceId, metric, depthCm, recordedAt) 只保留一条，返回是否真正新增（迁移 060 唯一索引兜底） */
+  createIdempotent(tx: unknown, input: CreateReadingInput): Promise<{ reading: Reading; inserted: boolean }>;
   latest(deviceId?: string): Promise<Reading[]>;
   history(query: HistoryQuery): Promise<Reading[]>;
   /** 按时间升序返回 (时间, 数值) 序列，供趋势图直接使用；默认剔除可疑读数 */
@@ -113,7 +126,11 @@ function toAlert(row: Record<string, unknown>): TelemetryAlert {
 
 /** PostgreSQL 实现，表结构由迁移 002_decision_telemetry.sql 管理，质量标记列由迁移 049 追加 */
 export class SqlReadingRepository implements ReadingRepository {
-  constructor(private readonly client: PrismaClientLike) {}
+  private readonly latestMode: "raw" | "timescale";
+
+  constructor(private readonly client: PrismaClientLike, options: SqlReadingRepositoryOptions = {}) {
+    this.latestMode = options.latestMode ?? "raw";
+  }
 
   private executor(tx: unknown): Pick<Tx, "$queryRawUnsafe" | "$executeRawUnsafe"> {
     return (tx as Tx | undefined) ?? this.client;
@@ -137,8 +154,49 @@ export class SqlReadingRepository implements ReadingRepository {
     return { id, ...input };
   }
 
+  /**
+   * 幂等落库：按 (deviceId, metric, depthCm, recordedAt) 去重。
+   * 分层与非分层分别命中迁移 060 的两个部分唯一索引，冲突时不写入、回查既有读数，
+   * 上层据此跳过重复告警与事件发布。
+   */
+  async createIdempotent(tx: unknown, input: CreateReadingInput): Promise<{ reading: Reading; inserted: boolean }> {
+    const id = ulid();
+    const hasDepth = input.depthCm !== undefined && input.depthCm !== null;
+    const conflict = hasDepth
+      ? `ON CONFLICT (device_id, metric, depth_cm, recorded_at) WHERE depth_cm IS NOT NULL DO NOTHING`
+      : `ON CONFLICT (device_id, metric, recorded_at) WHERE depth_cm IS NULL DO NOTHING`;
+    const inserted = await this.executor(tx).$queryRawUnsafe<Record<string, unknown>[]>(
+      `INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm, quality_flags)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+       ${conflict}
+       RETURNING id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm, quality_flags`,
+      id,
+      input.deviceId,
+      input.plotCode,
+      input.metric,
+      input.value,
+      input.unit,
+      input.recordedAt,
+      input.depthCm ?? null,
+      JSON.stringify(input.qualityFlags ?? []),
+    );
+    if (inserted.length > 0) return { reading: toReading(inserted[0]!), inserted: true };
+    const existing = await this.executor(tx).$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm, quality_flags
+       FROM telemetry_readings
+       WHERE device_id = $1 AND metric = $2 AND depth_cm IS NOT DISTINCT FROM $3 AND recorded_at = $4
+       LIMIT 1`,
+      input.deviceId,
+      input.metric,
+      input.depthCm ?? null,
+      input.recordedAt,
+    );
+    return { reading: existing[0] ? toReading(existing[0]) : { id, ...input }, inserted: false };
+  }
+
   /** 每个设备每个指标（含深度分层）的最近一次干净读数；可疑读数不参与汇总，不传设备则返回全部设备 */
   async latest(deviceId?: string): Promise<Reading[]> {
+    if (this.latestMode === "timescale") return this.latestFromContinuousAggregate(deviceId);
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
       `WITH ranked AS (
          SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm, quality_flags,
@@ -149,6 +207,26 @@ export class SqlReadingRepository implements ReadingRepository {
        SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm, quality_flags FROM ranked WHERE rn = 1` +
         (deviceId ? ` AND device_id = $1 ORDER BY metric` : ` ORDER BY device_id, metric`),
       ...(deviceId ? [deviceId] : []),
+    );
+    return rows.map(toReading);
+  }
+
+  /** 读连续聚合 telemetry_readings_latest（迁移 059）；只含干净读数，聚合刷新周期内可能滞后 */
+  private async latestFromContinuousAggregate(deviceId?: string): Promise<Reading[]> {
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+    if (deviceId) { values.push(deviceId); conditions.push(`device_id = $${values.length}`); }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
+      `WITH ranked AS (
+         SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm,
+                ROW_NUMBER() OVER (PARTITION BY device_id, metric, depth_cm ORDER BY recorded_at DESC) AS rn
+         FROM telemetry_readings_latest
+         ${where}
+       )
+       SELECT id, device_id, plot_code, metric, value, unit, recorded_at, depth_cm FROM ranked WHERE rn = 1
+       ORDER BY device_id, metric, depth_cm`,
+      ...values,
     );
     return rows.map(toReading);
   }
@@ -254,6 +332,16 @@ export class InMemoryReadingRepository implements ReadingRepository {
     this.rows.push(reading);
     // SQL 模式返回的是新构造的对象，内存模式若直接交出同一份引用，调用方改手写读数就能污染存储
     return structuredClone(reading);
+  }
+
+  async createIdempotent(_tx: unknown, input: CreateReadingInput): Promise<{ reading: Reading; inserted: boolean }> {
+    const existing = this.rows.find(
+      (row) => row.deviceId === input.deviceId && row.metric === input.metric && row.depthCm === input.depthCm && row.recordedAt === input.recordedAt,
+    );
+    if (existing) return { reading: structuredClone(existing), inserted: false };
+    const reading: Reading = { id: ulid(), ...input };
+    this.rows.push(reading);
+    return { reading: structuredClone(reading), inserted: true };
   }
 
   async latest(deviceId?: string): Promise<Reading[]> {
