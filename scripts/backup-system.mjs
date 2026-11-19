@@ -210,6 +210,22 @@ async function detectDbRunner() {
   return null;
 }
 
+/**
+ * 探测可用的 docker compose 命令形式。
+ * 优先 `docker compose`（插件），失败时回退独立 `docker-compose` 二进制。
+ * 两者都不可用返回 null，由调用方给出明确提示。
+ */
+async function detectDockerCompose() {
+  if (await commandAvailable("docker")) {
+    const plugin = await run("docker", ["compose", "version"]);
+    if (plugin.ok) return { command: "docker", args: ["compose"] };
+  }
+  if (await commandAvailable("docker-compose")) {
+    return { command: "docker-compose", args: [] };
+  }
+  return null;
+}
+
 async function backupDatabase(parts, dir, timestamp) {
   const databaseUrl = process.env.DB_URL ?? process.env.DATABASE_URL ?? "postgresql://agri:agri@127.0.0.1:5432/agri";
   const database = parseDatabaseUrl(databaseUrl);
@@ -237,17 +253,28 @@ async function backupDatabase(parts, dir, timestamp) {
     }
     log("数据库备份完成：" + path.basename(file) + "（pg_dump，库 " + database.database + "）");
   } else {
-    const result = await spawnToFile(
-      "docker",
-      ["compose", "-f", "infra/docker-compose.yml", "exec", "-T", "postgres", "pg_dump", "-Fc", database.database],
-      file,
-    );
+    const compose = await detectDockerCompose();
+    if (!compose) {
+      fs.rmSync(file, { force: true });
+      fail("数据库备份失败：本机既无 docker compose 插件，也无 docker-compose 独立二进制");
+      return { ok: false, reason: "docker-compose" };
+    }
+    const composeCmd = compose.command + (compose.args.length ? " " + compose.args.join(" ") : "");
+    const dumpArgs = [
+      ...compose.args,
+      "-f", "infra/docker-compose.yml",
+      "exec", "-T",
+      ...(database.password ? ["-e", `PGPASSWORD=${database.password}`] : []),
+      "postgres",
+      "pg_dump", "-U", database.user, "-Fc", database.database,
+    ];
+    const result = await spawnToFile(compose.command, dumpArgs, file);
     if (!result.ok) {
       fs.rmSync(file, { force: true });
       fail("数据库备份失败（docker compose）：" + (result.stderr.trim() || (result.error && result.error.message) || "未知错误"));
       return { ok: false, reason: "docker" };
     }
-    log("数据库备份完成：" + path.basename(file) + "（docker compose exec postgres，库 " + database.database + "）");
+    log("数据库备份完成：" + path.basename(file) + "（" + composeCmd + " exec postgres，库 " + database.database + "）");
   }
   const relative = path.basename(file);
   parts.push({ name: relative, path: relative, bytes: fs.statSync(file).size, sha256: sha256File(file) });

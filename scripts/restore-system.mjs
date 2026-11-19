@@ -56,6 +56,22 @@ async function commandAvailable(command) {
   return probe.error === null;
 }
 
+/**
+ * 探测可用的 docker compose 命令形式。
+ * 优先 `docker compose`（插件），失败时回退独立 `docker-compose` 二进制。
+ * 两者都不可用返回 null，由调用方给出明确提示。
+ */
+async function detectDockerCompose() {
+  if (await commandAvailable("docker")) {
+    const plugin = await run("docker", ["compose", "version"]);
+    if (plugin.ok) return { command: "docker", args: ["compose"] };
+  }
+  if (await commandAvailable("docker-compose")) {
+    return { command: "docker-compose", args: [] };
+  }
+  return null;
+}
+
 function resolveBackup(id) {
   const candidate = path.resolve(id);
   if (fs.existsSync(path.join(candidate, "manifest.json"))) {
@@ -169,10 +185,20 @@ async function restoreDatabase(manifest, backupPath) {
     });
   }
 
-  if (await commandAvailable("docker") && fs.existsSync(path.join(root, "infra/docker-compose.yml"))) {
+  const compose = await detectDockerCompose();
+  if (compose && fs.existsSync(path.join(root, "infra/docker-compose.yml"))) {
+    const composeCmd = compose.command + (compose.args.length ? " " + compose.args.join(" ") : "");
+    const restoreArgs = [
+      ...compose.args,
+      "-f", "infra/docker-compose.yml",
+      "exec", "-T",
+      ...(database.password ? ["-e", `PGPASSWORD=${database.password}`] : []),
+      "postgres",
+      "pg_restore", "-U", database.user, "-d", targetDatabase, "--clean", "--if-exists",
+    ];
     const child = spawn(
-      "docker",
-      ["compose", "-f", "infra/docker-compose.yml", "exec", "-T", "postgres", "pg_restore", "-d", targetDatabase, "--clean", "--if-exists"],
+      compose.command,
+      restoreArgs,
       {
         cwd: root,
         windowsHide: true,
@@ -192,7 +218,7 @@ async function restoreDatabase(manifest, backupPath) {
       });
       child.on("close", (code) => {
         if (code === 0) {
-          log("数据库已恢复到：" + targetDatabase + "（docker compose exec postgres）");
+          log("数据库已恢复到：" + targetDatabase + "（" + composeCmd + " exec postgres）");
           resolve(true);
         } else {
           fail("数据库恢复失败（docker compose）：" + (stderr.trim() || "未知错误"));
