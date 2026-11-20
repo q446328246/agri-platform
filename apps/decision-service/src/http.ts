@@ -232,7 +232,9 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
           if (!item || !isRuleType(rule.action.type)) throw new Error("处方动作与规则不一致");
           const planType = PLAN_TYPE_BY_RULE[rule.action.type];
           const payload: PrescriptionIssuedPayload = groups.get(planType) ?? { prescriptionId: input.id, parcelId: plotCode, seasonId: "", planType, ...(areaMu !== undefined ? { areaMu } : {}), items: [] };
-          payload.items.push(item);
+          // 明细自带其网格的台账面积（D2 规则 A）：引擎明细 gridCode 即地块，面积取地块台账值；
+          // 控制侧据此逐明细建分区，不再依赖整处方的单一 areaMu 猜分摊。
+          payload.items.push(areaMu === undefined ? item : { ...item, areaMu });
           groups.set(planType, payload);
         });
         const save = async (tx: Tx | undefined): Promise<PrescriptionRecord> => {

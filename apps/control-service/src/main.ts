@@ -14,6 +14,12 @@ import type { ControlHttpOptions } from "./http.js";
 import { SqlControlOutboxStore } from "./outbox.repository.js";
 import { ControlReceiptSweeper } from "./receipt-sweeper.js";
 
+/** 解析正数环境变量，缺省或非法时回落到默认值 */
+function parseEnvNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 /**
  * 控制服务启动。
  *
@@ -60,6 +66,8 @@ async function bootstrap(): Promise<void> {
   const { consumer } = createControlEventConsumer(commands, store, {
     group: process.env.CONTROL_CONSUMER_GROUP ?? "control-service",
     pollIntervalMs,
+    // 越限补灌定额（D3 口径一）：缺省 15mm，在确认的 10–20 范围内，按土壤质地与作物需水调整
+    supplementIrrigationMm: parseEnvNumber(process.env.AUTO_SUPPLEMENT_IRRIGATION_MM, 15),
     onError: (topic, eventId, error, attempt) => {
       console.error(`[control-service] 事件处理失败 topic=${topic} eventId=${eventId} attempt=${attempt}`, error.message);
     },
@@ -87,7 +95,13 @@ async function bootstrap(): Promise<void> {
     },
   });
 
-  const server = createControlHttpServer(commands, { receiptTimeoutMin: timeoutMin, authorizations, ...eventDeps });
+  const server = createControlHttpServer(commands, {
+    receiptTimeoutMin: timeoutMin,
+    authorizations,
+    // 料液密度（D1 口径）：升计量设备回执换算施肥千克数，缺省 1.0 kg/L，按现场配方调整
+    fertilizerDensityKgPerL: parseEnvNumber(process.env.FERTILIZER_DENSITY_KG_L, 1),
+    ...eventDeps,
+  });
   server.listen(port, "127.0.0.1", () =>
     console.log(
       `control-service HTTP started on ${port}（${mode === "sql" ? "SQL 持久化" : "内存实现"}，超时阈值 ${timeoutMin} 分钟，收口间隔 ${sweepIntervalMs} 毫秒）`,

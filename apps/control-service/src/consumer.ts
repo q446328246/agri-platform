@@ -45,6 +45,9 @@ const PLAN_LABELS: Record<PrescriptionIssuedPayload["planType"], string> = {
 /** 自动指令的执行人标识，与人工指令的账号区分 */
 const AUTO_OPERATOR = "system:event";
 
+/** 越限补灌定额缺省值（毫米）：D3 口径一固定补灌量，确认范围 10–20 mm/次，缺省取 15，可按土壤质地与作物需水用环境变量调整 */
+export const DEFAULT_SUPPLEMENT_IRRIGATION_MM = 15;
+
 /** 自动控制不得把缺失地块映射成 unbound 设备。 */
 function requireParcelId(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) throw new Error("自动控制事件 parcelId 必须为非空字符串");
@@ -93,10 +96,9 @@ function buildCommand(
 /**
  * 处方明细 → 现场执行分区。
  *
- * 只有「单条灌溉明细 + 地块台账面积」能无歧义地推出包络：面积取事件带出的台账值，
- * 灌水定额就是明细用量（毫米），上限沿用 `validateIrrigationParameters` 的 0~100。
- * 其余情况一律不猜，显式标成待人工确认，让台账与网关回执都说得清为什么没执行：
- * - 多条明细各自给同一地块的定额，分区面积怎么分摊平台没有权威口径；
+ * 分摊口径（D2 规则 A）：多明细逐明细建分区，分区面积取各自网格台账面积——
+ * 明细自带 `areaMu` 时直接使用；明细 `gridCode` 即地块时回落用事件带出的地块台账面积；
+ * 网格非地块且不带面积时不猜，显式标成待人工确认，让台账与网关回执都说得清为什么没执行：
  * - 施肥明细用量是千克/亩而不是水深，推不出阀门该开多久；
  * - 台账面积缺测时宁可不执行，也不拿一个估计面积去开阀。
  */
@@ -109,23 +111,31 @@ function prescriptionExecution(
   const area = areaMu === undefined ? {} : { areaMu };
   const first = items[0]!;
   if (payload.planType === "fertilization") {
-    return { ...area, envelopeBlocked: "施肥处方用量单位为千克/亩，平台没有灌水定额与料液密度的权威值，推不出阀门开启时长，需人工确认作业量后下发" };
+    return { ...area, envelopeBlocked: "施肥处方用量单位为千克/亩，平台没有灌水定额的权威值，推不出阀门开启时长，需人工确认作业量后下发" };
   }
-  if (items.length > 1) {
-    return { ...area, envelopeBlocked: `处方含 ${items.length} 条明细，各明细的分区面积没有权威分摊口径，需人工确认分区与作业量后下发` };
+  const zones: IrrigationZone[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    const gridCode = item.gridCode?.trim() || plotCode;
+    const itemArea = isNonNegativeNumber(item.areaMu) && item.areaMu > 0 ? item.areaMu : undefined;
+    const zoneArea = itemArea ?? (gridCode === plotCode ? areaMu : undefined);
+    if (zoneArea === undefined) {
+      return { ...area, envelopeBlocked: `处方第 ${index + 1} 条明细（网格 ${gridCode}）没有台账面积，无法现算计划水量与阀门开启时长，需人工确认后下发` };
+    }
+    if (!(item.dosage > 0 && item.dosage <= 100)) {
+      return { ...area, envelopeBlocked: `处方第 ${index + 1} 条明细灌水定额 ${item.dosage} 毫米不在可执行范围（0 到 100），需人工确认后下发` };
+    }
+    zones.push({ zoneCode: gridCode, areaMu: zoneArea, targetMm: item.dosage });
   }
-  if (areaMu === undefined) {
-    return { envelopeBlocked: "事件未带出地块台账面积，无法现算计划水量与阀门开启时长，需人工确认后下发" };
-  }
-  if (!(first.dosage > 0 && first.dosage <= 100)) {
-    return { ...area, envelopeBlocked: `处方灌水定额 ${first.dosage} 毫米不在可执行范围（0 到 100），需人工确认后下发` };
-  }
-  return { ...area, zones: [{ zoneCode: first.gridCode?.trim() || plotCode, areaMu, targetMm: first.dosage }] };
+  return { ...area, zones };
 }
 
 /** 事件消费处理器：一个方法对应一个主题 */
 export class ControlCommandConsumer {
-  constructor(private readonly commands: ControlCommandRepository) {}
+  constructor(
+    private readonly commands: ControlCommandRepository,
+    private readonly supplementIrrigationMm: number = DEFAULT_SUPPLEMENT_IRRIGATION_MM,
+  ) {}
 
   /**
    * 遥测越限：土壤含水率低于下限自动补灌，高于上限自动停灌。
@@ -143,15 +153,25 @@ export class ControlCommandConsumer {
     if (!isNonNegativeNumber(payload.value) || !isNonNegativeNumber(payload.threshold) || payload.value >= payload.threshold) {
       throw new Error("自动补灌越限事件数值非法");
     }
+    // 补灌定额走确认口径（D3 口径一：固定补灌量）；事件带出地块台账面积时直接生成执行包络，
+    // 面积缺测不猜，保持 envelopeBlocked 交人工确认。
+    const quotaMm = this.supplementIrrigationMm;
+    const areaMu = isNonNegativeNumber(payload.areaMu) && payload.areaMu > 0 ? payload.areaMu : undefined;
+    const zones = areaMu === undefined
+      ? undefined
+      : [{ zoneCode: payload.gridCode?.trim() || payload.parcelId.trim(), areaMu, targetMm: quotaMm }];
     await this.commands.create(
       buildCommand(event, "IRRIGATION", `土壤含水率 ${payload.value} 低于阈值 ${payload.threshold}，自动补灌`, {
         source: "threshold",
         metric: payload.metric,
         value: payload.value,
         threshold: payload.threshold,
+        quotaMm,
         gridCode: payload.gridCode ?? "",
-        // 越限事件只给出含水率与阈值，没有「该补多少水」的权威值，不猜定额
-        envelopeBlocked: "越限自动补灌只带含水率与阈值，没有灌水定额的权威值，需人工确认作业量后下发",
+        ...(areaMu === undefined ? {} : { areaMu }),
+        ...(zones === undefined
+          ? { envelopeBlocked: "越限补灌未带出地块台账面积，无法现算计划水量与阀门开启时长，需人工确认后下发" }
+          : { zones }),
       }),
     );
   }
@@ -229,6 +249,8 @@ export interface ControlConsumerOptions {
   /** 消费者组，缺省 control-service；多副本共用一组即可共享位点 */
   group?: string;
   pollIntervalMs?: number;
+  /** 越限补灌定额（毫米）：D3 口径一固定补灌量，缺省 DEFAULT_SUPPLEMENT_IRRIGATION_MM，按土壤质地与作物需水调整 */
+  supplementIrrigationMm?: number;
   /** 处理失败回调，缺省静默由下一轮重试 */
   onError?: (topic: string, eventId: string, error: Error, attempt: number) => void;
 }
@@ -249,7 +271,10 @@ export function createControlEventConsumer(
     retry: { maxAttempts: 3, baseDelayMs: 50, maxDelayMs: 500, deadLetterAfterMaxAttempts: false },
     ...(options.onError ? { onError: options.onError } : {}),
   });
-  const handler = new ControlCommandConsumer(commands);
+  const handler = new ControlCommandConsumer(
+    commands,
+    options.supplementIrrigationMm ?? DEFAULT_SUPPLEMENT_IRRIGATION_MM,
+  );
   const registrations = buildHandlers(handler);
   for (const registration of registrations) {
     dispatcher.subscribe(registration.topic, registration.handler);

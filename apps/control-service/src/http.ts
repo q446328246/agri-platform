@@ -7,7 +7,7 @@ import type { PrismaClientLike, Tx } from "@agri/db";
 import type { OutboxService } from "@agri/mq";
 import { authorizeRequest } from "@agri/shared";
 
-import { buildFinishedEvent } from "./command-finished.js";
+import { buildFinishedEvent, DEFAULT_FERTILIZER_DENSITY_KG_PER_L } from "./command-finished.js";
 import { buildIrrigationPlan, executionPlanOf, validateCommandParameters } from "./command-spec.js";
 import type { IrrigationPlanInput } from "./command-spec.js";
 import type { ControlAuthorization, ControlAuthorizationRepository } from "./authorization.repository.js";
@@ -191,6 +191,8 @@ function query(search: URLSearchParams, timeoutMin: number): {
 /** HTTP 装配参数：`outbox` 与 `withTransaction` 必须成对给出 */
 export interface ControlHttpOptions {
   receiptTimeoutMin?: number;
+  /** 料液密度（kg/L）：升计量设备回执换算施肥千克数用；缺省 1.0，按现场配方调整 */
+  fertilizerDensityKgPerL?: number;
   /** 本地消息表；配置后灌溉结单同事务推一条完成事件 */
   outbox?: OutboxService;
   /** 事务句柄；配了消息表就必须给，否则状态改了事件却没落库 */
@@ -207,6 +209,7 @@ export function createControlHttpServer(
     throw new Error("灌溉完成事件要落消息表时必须配置事务句柄，避免状态与事件分家");
   }
   const timeoutMin = resolveReceiptTimeoutMin(options.receiptTimeoutMin);
+  const fertilizerDensityKgPerL = options.fertilizerDensityKgPerL ?? DEFAULT_FERTILIZER_DENSITY_KG_PER_L;
   const outbox = options.outbox;
   const withTransaction = options.withTransaction;
   const authorizations = options.authorizations;
@@ -447,7 +450,7 @@ export function createControlHttpServer(
         };
         // 水肥类指令结单回流一条完成事件：灌溉记用水量，施肥记配方总投肥量，
         // 口径分主题——把施肥的肥料量算进灌溉用水会虚报，两类各说各的账。
-        const finished = status === "DONE" ? buildFinishedEvent(target, at, result) : undefined;
+        const finished = status === "DONE" ? buildFinishedEvent(target, at, result, fertilizerDensityKgPerL) : undefined;
         const apply = async (tx?: Tx): Promise<ControlCommand | null> => {
           // 先跃迁再入队：跃迁被版本拦住时不留一条没人结单的事件
           const updated = await repository.transition(tenantId, transition, tx);

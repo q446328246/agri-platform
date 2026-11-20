@@ -28,6 +28,9 @@ const FINISHED_TOPIC_BY_TYPE: Partial<Record<ControlCommandType, FinishedEvent["
   FERTILIZATION: EventTopic.ControlFertilizationFinished,
 };
 
+/** 料液密度缺省值（kg/L，水溶肥类料液常见 1.0–1.3，平台侧缺省取 1.0，按现场配方用环境变量调整） */
+export const DEFAULT_FERTILIZER_DENSITY_KG_PER_L = 1;
+
 /** 回执里可采纳的非负数值；非法或缺省返回 undefined */
 function reportedNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === "") return undefined;
@@ -74,16 +77,23 @@ export function resolveWaterVolume(
 }
 
 /**
- * 施肥量（千克，氮磷钾合计）：设备实测优先，其次按分区面积 × 配比现算配方总量。
+ * 施肥量（千克，氮磷钾合计）：设备实报千克优先；设备按升计量（FERTILIZER_L 剖面）时
+ * 用料液密度把出液升数换算成千克；都没有再按分区面积 × 配比现算配方总量。
+ * 料液密度来自配置（缺省 1.0 kg/L），设备直接报千克时不使用该值。
  * 处方自动指令带的是亩均用量与台账面积，没有氮磷钾配比，施肥处方还推不出分区，
  * 算不出来就留空——缺配比或缺作业面积都乘不出总投肥量。
  */
 export function resolveFertilizerKg(
   command: ControlCommand,
   result?: Record<string, unknown>,
+  densityKgPerL = DEFAULT_FERTILIZER_DENSITY_KG_PER_L,
 ): { fertilizerKg: number; fertilizerSource: "DEVICE" | "PLAN" } | undefined {
   const reported = reportedNumber(result?.fertilizerKg);
   if (reported !== undefined) return { fertilizerKg: reported, fertilizerSource: "DEVICE" };
+  const reportedLiters = reportedNumber(result?.fertilizerLiters);
+  if (reportedLiters !== undefined && densityKgPerL > 0) {
+    return { fertilizerKg: Number((reportedLiters * densityKgPerL).toFixed(2)), fertilizerSource: "DEVICE" };
+  }
   const plan = planOf(command, recipeOf(command));
   const totalKg = plan?.recipe?.totalKg;
   return totalKg === undefined ? undefined : { fertilizerKg: totalKg, fertilizerSource: "PLAN" };
@@ -113,11 +123,15 @@ function prescriptionIdOf(command: ControlCommand): { prescriptionId: string } |
   return typeof value === "string" && value.trim() ? { prescriptionId: value.trim() } : {};
 }
 
-/** 组装结单事件载荷；指令类型不参与结单回流时返回 undefined */
+/**
+ * 组装结单事件载荷；指令类型不参与结单回流时返回 undefined。
+ * 料液密度透传给施肥量换算（升计量设备 L→kg）；缺省取 DEFAULT_FERTILIZER_DENSITY_KG_PER_L。
+ */
 export function buildFinishedEvent(
   command: ControlCommand,
   finishedAt: string,
   result?: Record<string, unknown>,
+  densityKgPerL = DEFAULT_FERTILIZER_DENSITY_KG_PER_L,
 ): FinishedEvent | undefined {
   const topic = FINISHED_TOPIC_BY_TYPE[command.type];
   if (!topic) return undefined;
@@ -131,5 +145,5 @@ export function buildFinishedEvent(
   };
   return topic === EventTopic.ControlIrrigationFinished
     ? { topic, payload: { ...base, ...(resolveWaterVolume(command, result) ?? {}) } }
-    : { topic, payload: { ...base, ...(resolveFertilizerKg(command, result) ?? {}) } };
+    : { topic, payload: { ...base, ...(resolveFertilizerKg(command, result, densityKgPerL) ?? {}) } };
 }

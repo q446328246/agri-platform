@@ -7,6 +7,8 @@ export type PrescriptionStatus = "RECOMMENDED" | "NO_ACTION";
 /** 处方明细，对齐契约中的 PrescriptionItem，materialCode 取自农资字典 */
 export interface PrescriptionItem {
   gridCode?: string;
+  /** 分区台账面积（亩），对齐契约的 D2 规则 A：明细自带其网格的台账面积 */
+  areaMu?: number;
   materialCode: string;
   /** 用量，单位随 materialCode */
   dosage: number;

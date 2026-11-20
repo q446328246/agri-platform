@@ -44,6 +44,11 @@ export interface ThresholdBreachedPayload {
   direction: "above" | "below";
   /** 网格编码，空表示尚未细分到网格 */
   gridCode?: string;
+  /**
+   * 地块台账面积（亩），发布越限事件时由遥测侧从地块台账带出；
+   * 控制侧据此现算越限补灌的执行包络，取不到则补灌仍需人工确认作业量。
+   */
+  areaMu?: number;
   occurredAt: string;
 }
 
@@ -84,6 +89,12 @@ export interface AiDetectedPayload {
 /** 处方明细项 */
 export interface PrescriptionItem {
   gridCode?: string;
+  /**
+   * 分区台账面积，单位：亩。按「明细 gridCode → 网格台账面积」口径，
+   * 每条明细自带其网格的台账面积；缺省时控制侧在 gridCode 即地块时回落用事件带出的地块台账面积，
+   * 两者都没有就不执行——不猜面积。
+   */
+  areaMu?: number;
   /** 投入品编码，关联农资字典 */
   materialCode: string;
   /** 用量，单位随 materialCode 对应的计量单位 */

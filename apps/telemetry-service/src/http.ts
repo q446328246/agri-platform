@@ -517,6 +517,14 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
                 handled: false,
               };
               await alerts.create(undefined, alert);
+              // 越限补灌需要地块台账面积现算执行包络（D3）：同库只读地块表带出，取不到不猜
+              let areaMu: number | undefined;
+              if (db && reading.plotCode) {
+                const rows = await db.$queryRawUnsafe<Record<string, unknown>[]>(
+                  `SELECT area_mu FROM plot_records WHERE parcel_code = $1 AND deleted_at IS NULL LIMIT 1`, reading.plotCode);
+                const value = Number(rows[0]?.area_mu);
+                if (Number.isFinite(value) && value > 0) areaMu = value;
+              }
               const payload: ThresholdBreachedPayload = {
                 parcelId: reading.plotCode,
                 metric: reading.metric,
@@ -524,6 +532,7 @@ export function createTelemetryHttpServer(dependencies?: TelemetryDependencies):
                 threshold: rule.threshold,
                 direction: rule.direction,
                 occurredAt: reading.recordedAt,
+                ...(areaMu === undefined ? {} : { areaMu }),
               };
               await emit(EventTopic.TelemetryThresholdBreached, payload, reading.plotCode);
             }
