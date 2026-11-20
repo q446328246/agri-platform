@@ -6,6 +6,8 @@ import type {
   PestDetectedPayload,
   PlotCreatedPayload,
   PrescriptionIssuedPayload,
+  ServiceDownPayload,
+  ServiceRecoveredPayload,
   ThresholdBreachedPayload,
 } from "../events/payload.js";
 import { EventTopic } from "../events/topic.js";
@@ -344,6 +346,50 @@ const fertilizationFinishedTemplate: MessageTemplate<FertilizationFinishedPayloa
   },
 };
 
+/**
+ * 运维告警：巡检发现服务或基础设施异常。平台级消息不绑定地块；
+ * 响应过慢是劣化提醒发 WARNING，不可用意味着功能中断发 CRITICAL。
+ * 去重按「目标 + 触发时间」——同一异常持续期间巡检只触发一次告警事件，
+ * 事件重放靠这个键兜住。
+ */
+const serviceDownTemplate: MessageTemplate<ServiceDownPayload> = {
+  topic: EventTopic.PlatformServiceDown,
+  label: "运维监控告警",
+  type: "ALERT",
+  render(payload, context) {
+    const latency = payload.latencyMs === undefined ? "" : `，最近响应 ${payload.latencyMs} 毫秒`;
+    return {
+      type: "ALERT",
+      level: payload.alertKind === "SERVICE_SLOW" ? "WARNING" : "CRITICAL",
+      title: `运维告警：${payload.label}`,
+      content: `${payload.label}（${payload.target}）连续 ${payload.consecutiveFailures} 轮巡检异常${latency}：${payload.reason}。请检查服务进程与依赖，恢复后系统会自动撤销告警。`,
+      plotCode: "",
+      occurredAt: payload.occurredAt || context.occurredAt,
+      dedupeKey: `${EventTopic.PlatformServiceDown}:${payload.target}:${payload.occurredAt || context.occurredAt}`,
+    };
+  },
+};
+
+/** 运维恢复：异常目标恢复的通知消息，与告警成对出现 */
+const serviceRecoveredTemplate: MessageTemplate<ServiceRecoveredPayload> = {
+  topic: EventTopic.PlatformServiceRecovered,
+  label: "运维恢复通知",
+  type: "NOTICE",
+  render(payload, context) {
+    const downtime =
+      payload.downtimeMs === undefined ? "" : `，异常持续约 ${Math.max(1, Math.round(payload.downtimeMs / 60000))} 分钟`;
+    return {
+      type: "NOTICE",
+      level: "INFO",
+      title: `运维恢复：${payload.label}`,
+      content: `${payload.label}（${payload.target}）已恢复正常${downtime}，对应告警已自动撤销。`,
+      plotCode: "",
+      occurredAt: payload.occurredAt || context.occurredAt,
+      dedupeKey: `${EventTopic.PlatformServiceRecovered}:${payload.target}:${payload.occurredAt || context.occurredAt}`,
+    };
+  },
+};
+
 /** 主题到模板的映射，新增消费主题时在这里登记 */
 export const MESSAGE_TEMPLATES = {
   [EventTopic.TelemetryThresholdBreached]: thresholdTemplate,
@@ -354,6 +400,8 @@ export const MESSAGE_TEMPLATES = {
   [EventTopic.ControlCommandTimeout]: commandTimeoutTemplate,
   [EventTopic.ControlIrrigationFinished]: irrigationFinishedTemplate,
   [EventTopic.ControlFertilizationFinished]: fertilizationFinishedTemplate,
+  [EventTopic.PlatformServiceDown]: serviceDownTemplate,
+  [EventTopic.PlatformServiceRecovered]: serviceRecoveredTemplate,
 } as const;
 
 /** 已登记模板的主题 */

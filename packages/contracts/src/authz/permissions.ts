@@ -50,7 +50,7 @@ export const PERMISSION_CATALOG: PermissionGroup[] = [
     ],
   },
   { group: "消息中心", items: [{ code: "message:read", name: "查看消息" }, { code: "message:write", name: "发布消息" }] },
-  { group: "系统管理", items: [{ code: "system:user", name: "管理用户" }, { code: "system:role", name: "管理角色" }, { code: "system:audit", name: "查看审计日志" }, { code: "system:backup", name: "管理备份与恢复" }, { code: "system:data", name: "管理数据字典与资产目录" }] },
+  { group: "系统管理", items: [{ code: "system:user", name: "管理用户" }, { code: "system:role", name: "管理角色" }, { code: "system:audit", name: "查看审计日志" }, { code: "system:backup", name: "管理备份与恢复" }, { code: "system:data", name: "管理数据字典与资产目录" }, { code: "system:monitor", name: "运维监控与告警" }] },
 ];
 
 /** 权限码联合类型 */
@@ -79,7 +79,8 @@ export type PermissionCode =
   | "system:role"
   | "system:audit"
   | "system:backup"
-  | "system:data";
+  | "system:data"
+  | "system:monitor";
 
 /** 目录内的全部权限码 */
 export const PERMISSION_CODES: string[] = PERMISSION_CATALOG.flatMap((group) => group.items.map((item) => item.code));

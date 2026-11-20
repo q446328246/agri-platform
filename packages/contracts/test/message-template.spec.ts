@@ -207,7 +207,39 @@ describe("消息模板与去重键", () => {
       EventTopic.ControlCommandTimeout,
       EventTopic.ControlIrrigationFinished,
       EventTopic.ControlFertilizationFinished,
+      EventTopic.PlatformServiceDown,
+      EventTopic.PlatformServiceRecovered,
     ]);
     expect(MESSAGE_LEVEL_RANK.CRITICAL).toBeGreaterThan(MESSAGE_LEVEL_RANK.WARNING);
+  });
+
+  it("运维告警不可用发严重、过慢发警告，恢复成对通知", () => {
+    const down = buildMessageDraft(EventTopic.PlatformServiceDown, {
+      target: "telemetry", targetKind: "SERVICE", label: "遥测感知服务", alertKind: "SERVICE_DOWN",
+      reason: "connect ECONNREFUSED", consecutiveFailures: 3, occurredAt: "2026-11-05T04:00:00.000Z",
+    }, context);
+    expect(down).toMatchObject({ type: "ALERT", level: "CRITICAL", plotCode: "" });
+    expect(down?.title).toBe("运维告警：遥测感知服务");
+    expect(down?.content).toContain("连续 3 轮巡检异常");
+    expect(down?.content).toContain("connect ECONNREFUSED");
+
+    const slow = buildMessageDraft(EventTopic.PlatformServiceDown, {
+      target: "decision", targetKind: "SERVICE", label: "智能决策服务", alertKind: "SERVICE_SLOW",
+      reason: "响应时长 2600 毫秒，超过阈值 2000 毫秒（连续 3 轮）", latencyMs: 2600, consecutiveFailures: 3,
+      occurredAt: "2026-11-05T04:00:00.000Z",
+    }, context);
+    expect(slow).toMatchObject({ type: "ALERT", level: "WARNING" });
+    expect(slow?.content).toContain("最近响应 2600 毫秒");
+    // 去重按目标 + 触发时间：同目标不同时刻的两次异常各提醒一次
+    expect(slow?.dedupeKey).not.toBe(down?.dedupeKey);
+
+    const recovered = buildMessageDraft(EventTopic.PlatformServiceRecovered, {
+      target: "telemetry", targetKind: "SERVICE", label: "遥测感知服务", downtimeMs: 125_000,
+      occurredAt: "2026-11-05T04:02:05.000Z",
+    }, context);
+    expect(recovered).toMatchObject({ type: "NOTICE", level: "INFO", plotCode: "" });
+    expect(recovered?.title).toBe("运维恢复：遥测感知服务");
+    expect(recovered?.content).toContain("异常持续约 2 分钟");
+    expect(recovered?.content).toContain("告警已自动撤销");
   });
 });

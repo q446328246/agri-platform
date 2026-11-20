@@ -215,3 +215,33 @@ export interface CostAccruedPayload {
   amount: number;
   accruedAt: string;
 }
+
+/** 运维告警类型：服务不可用 / 服务响应过慢 / 基础设施不可用 */
+export type MonitorAlertKind = "SERVICE_DOWN" | "SERVICE_SLOW" | "INFRA_DOWN";
+
+/** platform.service.down —— 巡检发现服务或基础设施异常，达到告警规则阈值 */
+export interface ServiceDownPayload {
+  /** 监控目标标识：服务名（如 telemetry）或基础设施名（postgres / minio） */
+  target: string;
+  targetKind: "SERVICE" | "INFRA";
+  /** 目标展示名 */
+  label: string;
+  alertKind: MonitorAlertKind;
+  /** 异常原因：不可用为最近一次探测错误，过慢为响应时长超阈值说明 */
+  reason: string;
+  /** 最近一次探测耗时，单位：毫秒；不可用时缺省 */
+  latencyMs?: number;
+  /** 连续失败次数（过慢告警为连续过慢轮次） */
+  consecutiveFailures: number;
+  occurredAt: string;
+}
+
+/** platform.service.recovered —— 异常目标恢复，撤销对应告警 */
+export interface ServiceRecoveredPayload {
+  target: string;
+  targetKind: "SERVICE" | "INFRA";
+  label: string;
+  /** 从首次判定 DOWN 到恢复的时长，单位：毫秒；无法推算时缺省 */
+  downtimeMs?: number;
+  occurredAt: string;
+}

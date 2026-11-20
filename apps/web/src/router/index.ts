@@ -216,6 +216,12 @@ const routes: RouteRecordRaw[] = [
             name: 'SystemDataCatalog',
             component: () => import('@/views/system/DataCatalog.vue'),
             meta: { title: '数据目录', permission: 'system:data' }
+          },
+          {
+            path: 'monitor',
+            name: 'SystemMonitor',
+            component: () => import('@/views/system/Monitor.vue'),
+            meta: { title: '运维监控', permission: 'system:monitor' }
           }
         ]
       }

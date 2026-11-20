@@ -16,6 +16,8 @@ export const EventTopic = {
   ControlFertilizationFinished: "control.fertilization.finished",
   ControlCommandTimeout: "control.command.timeout",
   FinanceCostAccrued: "finance.cost.accrued",
+  PlatformServiceDown: "platform.service.down",
+  PlatformServiceRecovered: "platform.service.recovered",
 } as const;
 
 /** 事件主题联合类型 */

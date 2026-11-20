@@ -613,6 +613,43 @@ export interface BackupRunResult {
   command: string
 }
 
+// 运维监控（platform-service，F3）：巡检状态、告警规则与告警台账
+export type MonitorAlertKind = 'SERVICE_DOWN' | 'SERVICE_SLOW' | 'INFRA_DOWN'
+
+export interface MonitorServiceStatus {
+  target: string
+  kind: 'SERVICE' | 'INFRA'
+  label: string
+  status: 'UP' | 'DOWN' | 'UNKNOWN'
+  latencyMs?: number
+  lastError?: string
+  consecutiveFailures: number
+  lastCheckedAt?: string
+  lastUpAt?: string
+  lastDownAt?: string
+  updatedAt: string
+}
+
+export interface MonitorRule {
+  id: string
+  kind: MonitorAlertKind
+  thresholdMs: number
+  consecutive: number
+  enabled: boolean
+  updatedAt: string
+}
+
+export interface MonitorAlert {
+  id: string
+  target: string
+  kind: MonitorAlertKind
+  level: 'WARNING' | 'CRITICAL'
+  status: 'FIRING' | 'RESOLVED'
+  message: string
+  firedAt: string
+  resolvedAt?: string
+}
+
 // 权限目录分组
 export interface PermissionGroup {
   group: string

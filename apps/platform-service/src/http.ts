@@ -10,6 +10,8 @@ import { InMemoryAuditRepository, InMemoryRoleRepository, MIN_AUDIT_RETENTION_DA
 import type { AuditRecord, AuditRepository, RoleRecord, RoleRepository } from "./role.repository.js";
 import { DATA_ASSET_CATEGORIES, InMemoryDataCatalogRepository, seedDataCatalog } from "./data-catalog.repository.js";
 import type { DataAsset, DataAssetCategory, DataCatalogRepository, DataDictionaryEntry } from "./data-catalog.repository.js";
+import { InMemoryMonitorRepository, seedMonitorRules } from "./monitor.repository.js";
+import type { MonitorAlertStatus, MonitorRepository, MonitorRule } from "./monitor.repository.js";
 import { backupArchive, listBackups, readBackup, readBackupPart, removeBackup, runBackup, runRestore } from "./backup.js";
 
 /**
@@ -23,6 +25,9 @@ export interface PlatformHttpOptions {
   roles?: RoleRepository;
   audits?: AuditRepository;
   catalog?: DataCatalogRepository;
+  monitor?: MonitorRepository;
+  /** 手动触发一轮巡检，由组合根注入巡检引擎的 checkNow */
+  monitorCheck?: () => Promise<void>;
 }
 
 interface Tenant { id: string; name: string; code: string; status: "ACTIVE" | "DISABLED" }
@@ -39,7 +44,7 @@ const PLATFORM_POLICY = {
   write: "system:role",
   publicPaths: ["/api/v1/internal/platform/role-permissions"],
   sessionPaths: ["/api/v1/platform/tenant", "/api/v1/platform/permissions"],
-  pathPermissions: [{ prefix: "/api/v1/platform/audit-logs", permission: "system:audit" }, { prefix: "/api/v1/platform/audit-retention", permission: "system:audit" }, { prefix: "/api/v1/platform/backups", permission: "system:backup" }, { prefix: "/api/v1/platform/data-assets", permission: "system:data" }, { prefix: "/api/v1/platform/data-dictionary", permission: "system:data" }],
+  pathPermissions: [{ prefix: "/api/v1/platform/audit-logs", permission: "system:audit" }, { prefix: "/api/v1/platform/audit-retention", permission: "system:audit" }, { prefix: "/api/v1/platform/backups", permission: "system:backup" }, { prefix: "/api/v1/platform/data-assets", permission: "system:data" }, { prefix: "/api/v1/platform/data-dictionary", permission: "system:data" }, { prefix: "/api/v1/platform/monitor", permission: "system:monitor" }],
 };
 
 /** 内部接口凭证：网关与管理脚本使用，不经公网暴露 */
@@ -77,6 +82,7 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
   const roles = options.roles ?? new InMemoryRoleRepository(seedRoles());
   const audits = options.audits ?? new InMemoryAuditRepository();
   const catalog = options.catalog ?? new InMemoryDataCatalogRepository(seedDataCatalog());
+  const monitor = options.monitor ?? new InMemoryMonitorRepository({ rules: seedMonitorRules() });
   const audit = async (request: IncomingMessage, action: string, resource: string, detail: string): Promise<void> => {
     const record: AuditRecord = { id: `audit-${randomUUID().slice(0, 8)}`, tenantId: tenantOf(request), action, operator: operator(request), resource, detail, createdAt: new Date().toISOString() };
     await audits.create(record);
@@ -368,6 +374,49 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
         send(response, 200, null, traceId);
         return;
       }
+    }
+    // 运维监控（F3）：巡检状态、告警台账、告警规则与手动巡检
+    if (request.method === "GET" && url.pathname === "/api/v1/platform/monitor/status") {
+      send(response, 200, await monitor.listStatus(), traceId);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/v1/platform/monitor/alerts") {
+      const status = text(url.searchParams.get("status"));
+      if (status && status !== "FIRING" && status !== "RESOLVED") { send(response, 400, null, traceId, "告警状态需为 FIRING/RESOLVED"); return; }
+      const target = text(url.searchParams.get("target"));
+      send(response, 200, await monitor.pageAlerts({ ...pageOf(url.searchParams), ...(status ? { status: status as MonitorAlertStatus } : {}), ...(target ? { target } : {}) }), traceId);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/v1/platform/monitor/rules") {
+      send(response, 200, await monitor.listRules(), traceId);
+      return;
+    }
+    const monitorRuleRoute = url.pathname.match(/^\/api\/v1\/platform\/monitor\/rules\/([^/]+)$/);
+    if (monitorRuleRoute && request.method === "PUT") {
+      const id = decodeURIComponent(monitorRuleRoute[1] ?? "");
+      const rule = await monitor.findRule(id);
+      if (!rule) { send(response, 404, null, traceId, "告警规则不存在"); return; }
+      const body = await readJson(request);
+      if (body.thresholdMs !== undefined && (typeof body.thresholdMs !== "number" || !Number.isFinite(body.thresholdMs) || body.thresholdMs < 0)) { send(response, 400, null, traceId, "响应时长阈值需为不小于 0 的数值（毫秒）"); return; }
+      if (body.consecutive !== undefined && (typeof body.consecutive !== "number" || !Number.isInteger(body.consecutive) || body.consecutive < 1)) { send(response, 400, null, traceId, "连续异常轮次需为不小于 1 的整数"); return; }
+      if (body.enabled !== undefined && typeof body.enabled !== "boolean") { send(response, 400, null, traceId, "启用标记需为布尔值"); return; }
+      const next: MonitorRule = {
+        ...rule,
+        thresholdMs: body.thresholdMs !== undefined ? body.thresholdMs as number : rule.thresholdMs,
+        consecutive: body.consecutive !== undefined ? body.consecutive as number : rule.consecutive,
+        enabled: body.enabled !== undefined ? body.enabled === true : rule.enabled,
+        updatedAt: new Date().toISOString(),
+      };
+      const updated = await monitor.saveRule(next);
+      await audit(request, "monitorRule.update", `monitorRule:${rule.id}`, `更新告警规则 ${rule.kind}：阈值 ${next.thresholdMs} 毫秒、连续 ${next.consecutive} 轮、${next.enabled ? "启用" : "停用"}`);
+      send(response, 200, updated, traceId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/v1/platform/monitor/check") {
+      if (options.monitorCheck) await options.monitorCheck();
+      await audit(request, "monitor.check", "monitor", "手动触发一轮运维巡检");
+      send(response, 200, await monitor.listStatus(), traceId);
+      return;
     }
     send(response, 404, null, traceId, "接口不存在");
   } catch (error) { send(response, 400, null, traceId, error instanceof Error ? error.message : "请求处理失败"); } });

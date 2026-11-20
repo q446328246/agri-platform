@@ -80,6 +80,18 @@ export class MessageEventConsumer {
     await this.deliver(event);
   }
 
+  /** 运维告警：服务或基础设施巡检异常达到阈值，生成告警消息 */
+  @registerHandler(EventTopic.PlatformServiceDown)
+  async onServiceDown(event: DomainEvent<unknown>): Promise<void> {
+    await this.deliver(event);
+  }
+
+  /** 运维恢复：异常目标恢复正常，生成通知消息提示告警已撤销 */
+  @registerHandler(EventTopic.PlatformServiceRecovered)
+  async onServiceRecovered(event: DomainEvent<unknown>): Promise<void> {
+    await this.deliver(event);
+  }
+
   /**
    * 通用投递：模板渲染 → 偏好过滤 → 落库。
    * 未登记模板的主题直接跳过，便于后续扩展主题时先加模板再加订阅。

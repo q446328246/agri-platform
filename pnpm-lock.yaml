@@ -448,6 +448,9 @@ importers:
       '@agri/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@agri/mq':
+        specifier: workspace:*
+        version: link:../../packages/mq
       '@agri/shared':
         specifier: workspace:*
         version: link:../../packages/shared

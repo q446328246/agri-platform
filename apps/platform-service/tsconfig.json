@@ -9,6 +9,7 @@
     { "path": "../../packages/config" },
     { "path": "../../packages/contracts" },
     { "path": "../../packages/db" },
+    { "path": "../../packages/mq" },
     { "path": "../../packages/shared" }
   ]
 }

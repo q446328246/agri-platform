@@ -15,6 +15,7 @@ import type {
   SystemUser, PlatformRole, PermissionGroup,
   DataAsset, DataAssetCategory, DataDictionaryEntry, TaskWeatherConflict,
   BackupRecord, BackupRunResult,
+  MonitorServiceStatus, MonitorRule, MonitorAlert,
 } from '@/types'
 
 /** 剥掉查询参数里的 undefined/null/空串，避免发 ?keyword=&type= 这种无意义空条件 */
@@ -493,6 +494,25 @@ export const platformApi = {
   /** 下载备份中的单个分片：以 Blob 返回，由调用方保存为文件 */
   downloadBackupPart(id: string, partName: string, config?: AxiosRequestConfig): Promise<Blob> {
     return request<Blob>({ method: 'GET', url: `/platform/backups/${encodeURIComponent(id)}/download/${encodeURIComponent(partName)}`, responseType: 'blob', ...config })
+  },
+  /** 运维监控：全部目标的最近一轮巡检状态 */
+  getMonitorStatus(): Promise<MonitorServiceStatus[]> {
+    return get<MonitorServiceStatus[]>('/platform/monitor/status')
+  },
+  /** 告警台账：状态/目标筛选 + 分页，按触发时间倒序 */
+  getMonitorAlerts(params?: { page?: number; size?: number; status?: 'FIRING' | 'RESOLVED'; target?: string }): Promise<PageResult<MonitorAlert>> {
+    return get<PageResult<MonitorAlert>>('/platform/monitor/alerts', cleanParams(params))
+  },
+  getMonitorRules(): Promise<MonitorRule[]> {
+    return get<MonitorRule[]>('/platform/monitor/rules')
+  },
+  /** 规则类型不可改；阈值毫秒、连续轮次与启用标记选填更新 */
+  updateMonitorRule(id: string, data: { thresholdMs?: number; consecutive?: number; enabled?: boolean }): Promise<MonitorRule> {
+    return put<MonitorRule>(`/platform/monitor/rules/${encodeURIComponent(id)}`, data)
+  },
+  /** 手动触发一轮巡检，返回巡检后的最新状态 */
+  runMonitorCheck(): Promise<MonitorServiceStatus[]> {
+    return post<MonitorServiceStatus[]>('/platform/monitor/check', {})
   }
 }
 
