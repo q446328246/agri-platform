@@ -9,6 +9,8 @@ export interface PrescriptionItem {
   gridCode?: string;
   /** 分区台账面积（亩），对齐契约的 D2 规则 A：明细自带其网格的台账面积 */
   areaMu?: number;
+  /** 水肥一体灌水定额（毫米），对齐契约 D1 口径：施肥随灌溉，与灌溉处方同源 */
+  targetMm?: number;
   materialCode: string;
   /** 用量，单位随 materialCode */
   dosage: number;

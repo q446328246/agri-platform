@@ -95,6 +95,11 @@ export interface PrescriptionItem {
    * 两者都没有就不执行——不猜面积。
    */
   areaMu?: number;
+  /**
+   * 水肥一体时的灌水定额，单位：毫米（D1 口径：水肥一体随水施肥，灌水定额与灌溉处方同源）。
+   * 施肥处方带出该值时控制侧可按灌溉口径现算阀门开启时长；缺省则施肥处方仍需人工确认作业量。
+   */
+  targetMm?: number;
   /** 投入品编码，关联农资字典 */
   materialCode: string;
   /** 用量，单位随 materialCode 对应的计量单位 */

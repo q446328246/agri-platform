@@ -6,7 +6,28 @@
  * - 变量灌溉：按分区给出目标灌水定额，换算用水量与阀门时序，并生成累计供水曲线；
  * - 水肥配比：氮磷钾配比（kg/亩）与搅拌参数（时长、转速）。
  * 非水肥类指令保持原有自由参数，不在这里收口，避免影响播种/除草既有调用方。
+ *
+ * 参数口径按设备类型推断：设备能执行什么动作，指令就需要什么参数，包络只由
+ * 已确认的口径现算，不猜。设备类型 → 指令类型：
+ * - IRRIGATION_PUMP / IRRIGATION_VALVE → IRRIGATION：分区面积 + 灌水定额 + 流量 → 水量与阀门时长
+ * - FERTILIZER_VALVE → FERTILIZATION：配比 + 水肥一体灌水定额 + 面积 + 流量 → 投肥量、水量与时长
+ * - AUTO_TRACTOR → SEEDING / TILLAGE / WEEDING：作业面积 + 作业时长 → 作业时长包络
+ * - AGRICULTURAL_DRONE → SEEDING / WEEDING：作业面积 + 作业时长 → 作业时长包络
+ * - INSECT_LAMP：开关型设备，平台暂无专属指令码，按作业时长控制
+ * 暂停/恢复/急停/断电/返航/换具等联动指令对所有设备通用，不在此列。
  */
+
+/** 设备类型 → 作业类指令类型（水肥与作业动作；联动类指令对所有设备通用） */
+export const OPERATION_COMMAND_TYPES_BY_DEVICE: Record<string, readonly string[]> = {
+  IRRIGATION_PUMP: ["IRRIGATION"],
+  IRRIGATION_VALVE: ["IRRIGATION"],
+  FERTILIZER_VALVE: ["FERTILIZATION"],
+  AUTO_TRACTOR: ["SEEDING", "TILLAGE", "WEEDING"],
+  AGRICULTURAL_DRONE: ["SEEDING", "WEEDING"],
+};
+
+/** 作业类指令（播种/整地/除草）：农机与无人机执行，包络只有作业时长 */
+const OPERATION_COMMAND_TYPES = ["SEEDING", "TILLAGE", "WEEDING"] as const;
 
 /** 分区灌溉参数 */
 export interface IrrigationZone {
@@ -84,7 +105,8 @@ export function waterVolumeOf(areaMu: number, targetMm: number): number {
 /** 现场执行包络：网关只需要「开多久、开到多少」这两个数 */
 export interface ExecutionPlan {
   totalDurationMin: number;
-  totalWaterVolume: number;
+  /** 用水量（立方米）：水肥类指令按分区现算；作业/开关类指令无此量纲时缺省 */
+  totalWaterVolume?: number;
 }
 
 /**
@@ -92,22 +114,29 @@ export interface ExecutionPlan {
  *
  * 「阀门该开多久」在平台里只由分区面积与灌水定额推出（见 `buildIrrigationPlan`），
  * 现场网关不重算一遍，否则亩转平方米、默认流量这两个常数就有两份口径。
- * 非水肥指令、以及处方自动指令（参数里没有分区）算不出包络，返回 undefined 让调用方不写这个字段。
+ * 作业类指令（播种/整地/除草）的包络只有作业时长，按入参取，不臆造作业速度；
+ * 非水肥、非作业指令，以及处方自动指令（参数里没有分区）算不出包络，返回 undefined 让调用方不写这个字段。
  */
 export function executionPlanOf(type: string, parameters: Record<string, unknown>): ExecutionPlan | undefined {
-  if (type !== "IRRIGATION" && type !== "FERTILIZATION") return undefined;
-  const zones = parameters.zones;
-  if (!Array.isArray(zones) || zones.length === 0) return undefined;
-  const flowM3h = Number(parameters.flowM3h);
-  try {
-    const plan = buildIrrigationPlan({
-      zones: zones as IrrigationPlanInput["zones"],
-      ...(Number.isFinite(flowM3h) && flowM3h > 0 ? { flowM3h } : {}),
-    });
-    return { totalDurationMin: plan.totalDurationMin, totalWaterVolume: plan.totalWaterVolume };
-  } catch {
-    return undefined;
+  if (type === "IRRIGATION" || type === "FERTILIZATION") {
+    const zones = parameters.zones;
+    if (!Array.isArray(zones) || zones.length === 0) return undefined;
+    const flowM3h = Number(parameters.flowM3h);
+    try {
+      const plan = buildIrrigationPlan({
+        zones: zones as IrrigationPlanInput["zones"],
+        ...(Number.isFinite(flowM3h) && flowM3h > 0 ? { flowM3h } : {}),
+      });
+      return { totalDurationMin: plan.totalDurationMin, totalWaterVolume: plan.totalWaterVolume };
+    } catch {
+      return undefined;
+    }
   }
+  if ((OPERATION_COMMAND_TYPES as readonly string[]).includes(type)) {
+    const durationMin = Number(parameters.durationMin);
+    return Number.isFinite(durationMin) && durationMin > 0 ? { totalDurationMin: durationMin } : undefined;
+  }
+  return undefined;
 }
 
 /** 校验水肥相关参数，返回错误明细；空数组表示通过 */
@@ -154,9 +183,20 @@ export function validateIrrigationParameters(parameters: Record<string, unknown>
   return errors;
 }
 
-/** 校验指令参数：仅水肥类指令进入细分校验 */
+/** 校验作业类指令参数：作业面积与作业时长必填，其余作业量参数按自由结构放行 */
+export function validateOperationParameters(parameters: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  const areaMu = Number(parameters.areaMu);
+  if (!(areaMu > 0)) errors.push("areaMu 必须大于 0");
+  const durationMin = Number(parameters.durationMin);
+  if (!(durationMin > 0)) errors.push("durationMin 必须大于 0");
+  return errors;
+}
+
+/** 校验指令参数：水肥类与作业类指令进入细分校验，其余保持自由参数 */
 export function validateCommandParameters(type: string, parameters: Record<string, unknown>): string[] {
   if (type === "IRRIGATION" || type === "FERTILIZATION") return validateIrrigationParameters(parameters);
+  if ((OPERATION_COMMAND_TYPES as readonly string[]).includes(type)) return validateOperationParameters(parameters);
   return [];
 }
 

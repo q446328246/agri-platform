@@ -98,9 +98,12 @@ function buildCommand(
  *
  * 分摊口径（D2 规则 A）：多明细逐明细建分区，分区面积取各自网格台账面积——
  * 明细自带 `areaMu` 时直接使用；明细 `gridCode` 即地块时回落用事件带出的地块台账面积；
- * 网格非地块且不带面积时不猜，显式标成待人工确认，让台账与网关回执都说得清为什么没执行：
- * - 施肥明细用量是千克/亩而不是水深，推不出阀门该开多久；
- * - 台账面积缺测时宁可不执行，也不拿一个估计面积去开阀。
+ * 网格非地块且不带面积时不猜，显式标成待人工确认，让台账与网关回执都说得清为什么没执行。
+ *
+ * 包络口径按设备动作推断：
+ * - 灌溉处方：灌水定额取明细用量（毫米）；
+ * - 施肥处方（水肥一体，D1 同源）：灌水定额取明细 `targetMm`，用量（千克/亩）不参与阀门时长；
+ *   缺定额或缺面积都推不出包络，保持拦截不猜。
  */
 function prescriptionExecution(
   payload: PrescriptionIssuedPayload,
@@ -109,10 +112,9 @@ function prescriptionExecution(
 ): { areaMu?: number; zones?: IrrigationZone[]; envelopeBlocked?: string } {
   const areaMu = isNonNegativeNumber(payload.areaMu) && payload.areaMu > 0 ? payload.areaMu : undefined;
   const area = areaMu === undefined ? {} : { areaMu };
-  const first = items[0]!;
-  if (payload.planType === "fertilization") {
-    return { ...area, envelopeBlocked: "施肥处方用量单位为千克/亩，平台没有灌水定额的权威值，推不出阀门开启时长，需人工确认作业量后下发" };
-  }
+  const quotaOf = (item: PrescriptionIssuedPayload["items"][number]): number | undefined =>
+    payload.planType === "fertilization" ? item.targetMm : item.dosage;
+  const quotaLabel = payload.planType === "fertilization" ? "水肥一体灌水定额" : "灌水定额";
   const zones: IrrigationZone[] = [];
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index]!;
@@ -122,10 +124,11 @@ function prescriptionExecution(
     if (zoneArea === undefined) {
       return { ...area, envelopeBlocked: `处方第 ${index + 1} 条明细（网格 ${gridCode}）没有台账面积，无法现算计划水量与阀门开启时长，需人工确认后下发` };
     }
-    if (!(item.dosage > 0 && item.dosage <= 100)) {
-      return { ...area, envelopeBlocked: `处方第 ${index + 1} 条明细灌水定额 ${item.dosage} 毫米不在可执行范围（0 到 100），需人工确认后下发` };
+    const quota = quotaOf(item);
+    if (typeof quota !== "number" || !(quota > 0 && quota <= 100)) {
+      return { ...area, envelopeBlocked: `处方第 ${index + 1} 条明细${quotaLabel} ${quota} 毫米不在可执行范围（0 到 100），需人工确认后下发` };
     }
-    zones.push({ zoneCode: gridCode, areaMu: zoneArea, targetMm: item.dosage });
+    zones.push({ zoneCode: gridCode, areaMu: zoneArea, targetMm: quota });
   }
   return { ...area, zones };
 }

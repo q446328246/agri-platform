@@ -327,6 +327,18 @@
           </el-form-item>
         </template>
 
+        <!-- 作业类指令（播种/整地/除草）：按设备类型推断的参数为作业面积与作业时长 -->
+        <template v-if="isOperationCommand">
+          <el-form-item label="作业面积">
+            <el-input-number v-model="commandForm.operationAreaMu" :min="0.1" :precision="2" :step="1" controls-position="right" />
+            <span class="form-hint">亩，作业类指令必填</span>
+          </el-form-item>
+          <el-form-item label="作业时长">
+            <el-input-number v-model="commandForm.operationDurationMin" :min="1" :precision="0" :step="5" controls-position="right" />
+            <span class="form-hint">分钟，平台不臆造作业速度，按入参包络</span>
+          </el-form-item>
+        </template>
+
         <el-form-item label="指令缘由" prop="reason">
           <el-input v-model="commandForm.reason" type="textarea" :rows="2" maxlength="120" show-word-limit placeholder="写明处置依据，指令列表与生产档案按此复盘" />
         </el-form-item>
@@ -679,7 +691,10 @@ const commandForm = reactive({
   flowM3h: 20,
   zones: [{ zoneCode: 'ZONE-01', areaMu: 0, targetMm: 10 }],
   recipe: { nitrogen: 1, phosphorus: 1, potassium: 1 },
-  stir: { durationMin: 10, rpm: 60 }
+  stir: { durationMin: 10, rpm: 60 },
+  // 作业类指令（播种/整地/除草）的作业面积与时长，与服务端校验同口径
+  operationAreaMu: 0,
+  operationDurationMin: 60
 })
 
 /** 暂停/恢复是指向另一条指令的联动指令，需要选目标 */
@@ -722,6 +737,9 @@ const commandRules: FormRules = {
 /** 播种、除草只落地块与缘由；水肥类需要分区才能算出用水量与阀门时序 */
 const isWaterFertilizer = computed(() => commandForm.type === 'IRRIGATION' || commandForm.type === 'FERTILIZATION')
 
+/** 作业类指令（播种/整地/除草）：需要作业面积与作业时长，与服务端参数校验同口径 */
+const isOperationCommand = computed(() => ['SEEDING', 'TILLAGE', 'WEEDING'].includes(commandForm.type))
+
 async function openCommand(row: any) {
   Object.assign(commandForm, {
     deviceId: row.id,
@@ -746,6 +764,8 @@ function resetParameters() {
   commandForm.zones = [{ zoneCode: 'ZONE-01', areaMu: 0, targetMm: 10 }]
   commandForm.recipe = { nitrogen: 1, phosphorus: 1, potassium: 1 }
   commandForm.stir = { durationMin: 10, rpm: 60 }
+  commandForm.operationAreaMu = 0
+  commandForm.operationDurationMin = 60
   commandForm.targetCommandId = ''
   plan.value = null
   fillZoneArea()
@@ -794,8 +814,9 @@ async function simulatePlan() {
 }
 
 function buildParameters(): Record<string, unknown> {
-  // 联动指令只带目标标识；水肥类带分区与配比；其余类型自由参数留空
+  // 联动指令只带目标标识；水肥类带分区与配比；作业类带作业面积与时长；其余类型自由参数留空
   if (isLinkedCommand.value) return { targetCommandId: commandForm.targetCommandId }
+  if (isOperationCommand.value) return { areaMu: commandForm.operationAreaMu, durationMin: commandForm.operationDurationMin }
   if (!isWaterFertilizer.value) return {}
   return {
     zones: commandForm.zones.map((zone) => ({ zoneCode: zone.zoneCode.trim() || undefined, areaMu: zone.areaMu, targetMm: zone.targetMm })),
@@ -809,6 +830,10 @@ async function submitCommand() {
   if (!valid) return
   if (isWaterFertilizer.value && commandForm.zones.some((zone) => !(zone.areaMu > 0))) {
     ElMessage.warning('分区面积必须大于 0 亩，否则算不出用水量')
+    return
+  }
+  if (isOperationCommand.value && !(commandForm.operationAreaMu > 0 && commandForm.operationDurationMin > 0)) {
+    ElMessage.warning('作业类指令需要作业面积与作业时长，否则推不出作业包络')
     return
   }
   // 定时执行：控件给的是本地时间串，转 ISO 后必须仍在未来，与服务端校验同口径
