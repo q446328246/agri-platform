@@ -150,7 +150,7 @@ export class SqlPredictionRepository implements PredictionRepository {
   private async insert(executor: QueryExecutor, input: CreatePredictionInput): Promise<Record<string, unknown> | undefined> {
     const columns = [
       "id", "tenant_id", "plot_code", "season_id", "metric", "predicted_at", "horizon_hours",
-      "predicted_value", "level", "unit", "basis", "inputs", "created_at",
+      "predicted_value", "level", "unit", "basis", "inputs",
     ];
     const values = [
       ulid(), String(input.tenantId), String(input.plotCode), String(input.seasonId), String(input.metric),
