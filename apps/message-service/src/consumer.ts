@@ -44,6 +44,12 @@ export class MessageEventConsumer {
     await this.deliver(event);
   }
 
+  /** 预测预警：墒情/虫害预测达到预警或严重级，提示提前处置而非等越限再补 */
+  @registerHandler(EventTopic.DecisionPredictionAlert)
+  async onPredictionAlert(event: DomainEvent<unknown>): Promise<void> {
+    await this.deliver(event);
+  }
+
   /** 虫情识别：视频 AI 与田间上报共用，按发生等级生成告警或提醒 */
   @registerHandler(EventTopic.TelemetryPestDetected)
   async onPestDetected(event: DomainEvent<unknown>): Promise<void> {
