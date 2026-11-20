@@ -1,3 +1,4 @@
+import { isJobCommandType } from "@agri/contracts";
 import { getModbusProfile, readModbusBinding } from "./device-binding.js";
 import type { ModbusBinding, ModbusMeter, ModbusProfile } from "./device-binding.js";
 import { ModbusTcpClient, combineUint32 } from "./modbus-tcp.js";
@@ -46,6 +47,8 @@ export interface FieldCommand {
   deviceId: string;
   type: string;
   status: "QUEUED" | "SENT" | "ACKED" | "DONE" | "FAILED";
+  /** 归属地块，电子围栏（B4）据此校验设备绑定地块与指令地块一致 */
+  plotCode?: string;
   parameters: Record<string, unknown>;
   sentAt?: string;
   ackedAt?: string;
@@ -261,6 +264,18 @@ export class FieldGateway {
   }
 
   private async execute(device: Device, binding: ModbusBinding, profile: ModbusProfile, command: FieldCommand): Promise<void> {
+    // 作业联锁与电子围栏（B4）：作业类指令执行前先过安全校验，判不过直接失败收口，不碰硬件。
+    // 控制类指令（急停/断电/暂停等）不受此约束——它们是对在途作业的处置动作，急停必须能下达。
+    if (isJobCommandType(command.type)) {
+      if (device.status === "OFFLINE") {
+        await this.channel.receipt(command.id, "FAILED", "设备离线（作业联锁）：设备未在线，禁止执行作业指令");
+        return;
+      }
+      if (device.plotCode && command.plotCode && device.plotCode !== command.plotCode) {
+        await this.channel.receipt(command.id, "FAILED", `电子围栏拦截：指令地块 ${command.plotCode} 与设备绑定地块 ${device.plotCode} 不一致`);
+        return;
+      }
+    }
     const spec = jobSpecOf(command);
     // 判不出收口条件就不领取、不碰硬件：QUEUED 可以直接收口成 FAILED，
     // 先把指令领成 SENT 再失败，等于把「没人规定开多久」的责任推给超时收口

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 
-import type { ApiResponse, PageResult } from "@agri/contracts";
+import { isJobCommandType, type ApiResponse, type PageResult } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
 import type { OutboxService } from "@agri/mq";
 import { authorizeRequest } from "@agri/shared";
@@ -291,6 +291,17 @@ export function createControlHttpServer(
         if (!command.deviceId) {
           send(res, 400, null, traceId, "控制指令需要设备标识");
           return;
+        }
+        // 作业联锁（B4）：同一设备同时只允许一条在途作业指令，两条作业抢同一台设备等于互相踩踏。
+        // 控制类指令（急停/断电/暂停等）不在此列——它们是对在途作业的处置动作，不是新的作业。
+        if (isJobCommandType(type)) {
+          for (const status of ["SENT", "ACKED"] as const) {
+            const inTransit = await repository.page(command.tenantId, { deviceId: command.deviceId, status, page: 1, size: 1 });
+            if (inTransit.items.length > 0) {
+              send(res, 409, null, traceId, `作业联锁：设备 ${command.deviceId} 已有在途作业指令（${status}），完成或取消后再下发新作业指令`);
+              return;
+            }
+          }
         }
         // PAUSE/RESUME 是指向另一条指令的联动指令：目标必须存在、同设备、且处在可暂停/可恢复的状态，
         // 否则入队一条永远联动不上的孤儿指令，现场设备也不知道该停谁
