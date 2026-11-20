@@ -275,6 +275,8 @@ export function createPredictionSweeper(deps: {
   publish?: PredictionPublish;
   options?: PredictionEngineOptions;
   intervalMs?: number;
+  /** 启动宽限（毫秒）：首轮回避兄弟服务端口绑定竞态，缺省 3000 */
+  startupDelayMs?: number;
   now?: () => Date;
   onError?: (error: Error, phase: string) => void;
 }): PredictionSweeper {
@@ -361,7 +363,10 @@ export function createPredictionSweeper(deps: {
   return {
     runOnce,
     start(): void {
-      void runOnce();
+      // 启动宽限：组合根里各服务并行绑定端口，首轮立即执行会撞上尚未就绪的
+      // 兄弟服务（fetch failed）；宽限后执行，后续按周期正常运行
+      const delay = deps.startupDelayMs ?? 3000;
+      setTimeout(() => { void runOnce(); }, delay);
       timer = setInterval(() => { void runOnce(); }, deps.intervalMs ?? 21_600_000);
     },
     stop(): void {
