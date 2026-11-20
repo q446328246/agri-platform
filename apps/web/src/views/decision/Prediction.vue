@@ -131,9 +131,9 @@ async function reload(): Promise<void> {
   loading.value = true
   try {
     const result = await decisionApi.getPredictions({
-      plotCode: queryForm.plotCode || undefined,
-      metric: queryForm.metric || undefined,
-      level: queryForm.level || undefined,
+      ...(queryForm.plotCode ? { plotCode: queryForm.plotCode } : {}),
+      ...(queryForm.metric ? { metric: queryForm.metric } : {}),
+      ...(queryForm.level ? { level: queryForm.level } : {}),
       page: queryForm.page,
       size: queryForm.size,
     })
@@ -150,7 +150,7 @@ async function reloadLatest(): Promise<void> {
     metricOptions.map(async (item) => {
       try {
         const result = await decisionApi.getPredictions({
-          plotCode: queryForm.plotCode || undefined,
+          ...(queryForm.plotCode ? { plotCode: queryForm.plotCode } : {}),
           metric: item.value,
           page: 1,
           size: 1,
