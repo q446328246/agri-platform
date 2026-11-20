@@ -98,12 +98,12 @@ export class SqlLoginAttemptRepository implements LoginAttemptRepository {
     const lockedUntil = now.getTime() + lockMinutes * 60_000;
     const rows = await this.client.$queryRawUnsafe(
       `INSERT INTO auth_login_attempts (id, tenant_id, username, last_ip, fail_count, locked_until, last_attempt_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, 1, CASE WHEN 1 >= $7 THEN $5 ELSE NULL END, $6, $6, $6)
+       VALUES ($1, $2, $3, $4, 1, CASE WHEN 1 >= $7 THEN $5::timestamptz ELSE NULL END, $6, $6, $6)
        ON CONFLICT (tenant_id, username) DO UPDATE SET
          last_ip = EXCLUDED.last_ip,
          fail_count = auth_login_attempts.fail_count + 1,
          locked_until = CASE
-           WHEN auth_login_attempts.fail_count + 1 >= $7 THEN $5
+           WHEN auth_login_attempts.fail_count + 1 >= $7 THEN $5::timestamptz
            ELSE auth_login_attempts.locked_until
          END,
          last_attempt_at = EXCLUDED.last_attempt_at,
