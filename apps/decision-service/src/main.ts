@@ -93,7 +93,7 @@ async function bootstrap(): Promise<void> {
     const relay = new OutboxService(outbox, publisher, { tenantId, traceId: "decision-relay", producer: "decision" });
     relay.start();
     setDefaultPublisher(publisher);
-    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, knowledge, outbox, publisher, tenantId, fetchRainProbability, fetchPlotArea, ai, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
+    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, knowledge, outbox, publisher, tenantId, fetchRainProbability, fetchPlotArea, ...(ai ? { ai } : {}), withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
     // 消费控制服务的结单事件，把处方实际执行的水肥用量回流到 decision_prescription_executions；
     // 同时消费遥测越限事件（A18）：EC/pH 偏离生成保守配比调整处方，复用同一条消息表中继发布
@@ -122,7 +122,7 @@ async function bootstrap(): Promise<void> {
     const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
     const fetchRainProbability = createRainProbabilityFetcher(weatherUrl);
     const fetchPlotArea = createPlotAreaFetcher(process.env.PLOT_SERVICE_URL ?? "http://127.0.0.1:3002");
-    const server = createDecisionHttpServer({ fetchRainProbability, fetchPlotArea, ai });
+    const server = createDecisionHttpServer({ fetchRainProbability, fetchPlotArea, ...(ai ? { ai } : {}) });
     server.listen(port, "127.0.0.1", () => logger.warn("decision-service HTTP 已启动（仅供内存测试，无事务保证）", { port }));
     return;
   }
