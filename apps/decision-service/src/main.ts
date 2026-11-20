@@ -8,6 +8,8 @@ import { configureDecorators, LoggerService } from "@agri/observability";
 import { createDecisionEventConsumer } from "./consumer.js";
 import { createDecisionHttpServer } from "./http.js";
 import type { DecisionDependencies } from "./http.js";
+import { buildAiChatFromEnv, createAiChatClient } from "./ai.client.js";
+import type { AiChatClient } from "./ai.client.js";
 import { SqlExecutionRepository } from "./execution.repository.js";
 import { SqlOutcomeRepository } from "./outcome.repository.js";
 import { SqlPrescriptionRepository } from "./prescription.repository.js";
@@ -46,10 +48,20 @@ function createPlotAreaFetcher(plotUrl: string): NonNullable<DecisionDependencie
   };
 }
 
+/** AI 问答通道：凭据不全时返回 undefined，/ask 降级规则式回答，不影响启动 */
+function createAiClientFromEnv(logger: LoggerService): AiChatClient | undefined {
+  const config = buildAiChatFromEnv(process.env);
+  if (!config) return undefined;
+  const client = createAiChatClient(config);
+  logger.info("AI 问答通道已启用", { model: config.model, baseUrl: config.baseUrl });
+  return client;
+}
+
 async function bootstrap(): Promise<void> {
   const port = Number(process.env.PORT ?? 3006);
   const logger = new LoggerService({ serviceName: "decision-service", level: parseLogLevel(process.env.LOG_LEVEL) });
   configureDecorators({ logger });
+  const ai = createAiClientFromEnv(logger);
 
   // 默认连接数据库持久化规则与处方留痕；内存路径仅供测试，
   // 不提供持久化、事务或自动控制可靠性保证。
@@ -81,7 +93,7 @@ async function bootstrap(): Promise<void> {
     const relay = new OutboxService(outbox, publisher, { tenantId, traceId: "decision-relay", producer: "decision" });
     relay.start();
     setDefaultPublisher(publisher);
-    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, knowledge, outbox, publisher, tenantId, fetchRainProbability, fetchPlotArea, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
+    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, knowledge, outbox, publisher, tenantId, fetchRainProbability, fetchPlotArea, ai, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
     // 消费控制服务的结单事件，把处方实际执行的水肥用量回流到 decision_prescription_executions；
     // 同时消费遥测越限事件（A18）：EC/pH 偏离生成保守配比调整处方，复用同一条消息表中继发布
@@ -110,7 +122,7 @@ async function bootstrap(): Promise<void> {
     const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
     const fetchRainProbability = createRainProbabilityFetcher(weatherUrl);
     const fetchPlotArea = createPlotAreaFetcher(process.env.PLOT_SERVICE_URL ?? "http://127.0.0.1:3002");
-    const server = createDecisionHttpServer({ fetchRainProbability, fetchPlotArea });
+    const server = createDecisionHttpServer({ fetchRainProbability, fetchPlotArea, ai });
     server.listen(port, "127.0.0.1", () => logger.warn("decision-service HTTP 已启动（仅供内存测试，无事务保证）", { port }));
     return;
   }

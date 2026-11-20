@@ -1060,11 +1060,12 @@ export const controlApi = {
   }
 }
 
-/** 智能问答回答（C4）：知识库检索命中 + 当前规则引用 */
+/** 智能问答回答（C4）：知识库检索命中 + 当前规则引用；mode 区分 AI 生成与规则式回答 */
 export interface AskResult {
   answer: string
   sources: string[]
   confidence: number
+  mode?: 'ai' | 'rule'
 }
 
 /** 农艺知识条目（C4） */

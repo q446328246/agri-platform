@@ -22,8 +22,9 @@ import type { RuleEvaluationInput } from "./rule.engine.js";
 import { defaultRule, InMemoryRuleRepository, isRuleType, normalizeAction, normalizeCondition } from "./rule.repository.js";
 import type { CreateRuleInput, RuleRepository, RuleType, UpdateRuleInput } from "./rule.repository.js";
 import { InMemoryKnowledgeRepository, SqlKnowledgeRepository, DEFAULT_KNOWLEDGE } from "./knowledge.repository.js";
-import type { KnowledgeCategory, KnowledgeInput, KnowledgeRepository } from "./knowledge.repository.js";
+import type { AgronomyKnowledge, KnowledgeCategory, KnowledgeInput, KnowledgeRepository } from "./knowledge.repository.js";
 import { KNOWLEDGE_CATEGORIES, newKnowledgeId } from "./knowledge.repository.js";
+import type { AiChatClient, AiChatMessage } from "./ai.client.js";
 
 const API_PREFIX = "/api/v1/decision";
 
@@ -49,6 +50,8 @@ export interface DecisionDependencies {
   fetchPlotArea?: (plotCode: string, identity: Record<string, string>) => Promise<number | undefined>;
   /** 农艺知识库（C4）：问答检索与知识条目维护；缺省内存实现 */
   knowledge?: KnowledgeRepository;
+  /** AI 问答通道（C4 增强）：配置后 /ask 走检索增强生成，未配置或调用失败降级规则式回答 */
+  ai?: AiChatClient;
   tenantId?: string;
 }
 
@@ -120,6 +123,23 @@ const PLAN_TYPE_BY_RULE: Record<RuleType, "irrigation" | "fertilization" | "pest
   PEST_WARNING: "pesticide",
 };
 
+/** RAG 提示词：只允许基于检索到的知识条目与规则上下文作答，引用标注条目标题 */
+function buildAskMessages(question: string, hits: AgronomyKnowledge[], matched: string): AiChatMessage[] {
+  const knowledgeText = hits.length > 0
+    ? hits.map((hit) => `【${hit.title}】${hit.content}${hit.source ? `（依据：${hit.source}）` : ""}`).join("\n")
+    : "（无直接命中的农艺知识条目）";
+  return [
+    {
+      role: "system",
+      content: "你是无人农场 AI 平台的农艺助手。只依据提供的农艺知识条目与规则上下文用中文回答；引用知识时以【标题】标注条目；不得编造未提供的数值或口径；知识不足时说明还需要哪些信息。回答简洁、可执行。",
+    },
+    {
+      role: "user",
+      content: `农艺知识条目：\n${knowledgeText}\n\n当前地块最近命中规则：${matched || "无"}\n\n用户问题：${question}`,
+    },
+  ];
+}
+
 export function createDecisionHttpServer(dependencies?: Partial<DecisionDependencies>): Server {
   const rules = dependencies?.rules ?? new InMemoryRuleRepository([defaultRule(new Date().toISOString())]);
   const prescriptions = dependencies?.prescriptions ?? new InMemoryPrescriptionRepository();
@@ -128,6 +148,7 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
   const tenantId = dependencies?.tenantId ?? "tenant-demo";
   const knowledge = dependencies?.knowledge
     ?? new InMemoryKnowledgeRepository(DEFAULT_KNOWLEDGE.map((entry) => ({ ...entry, tenantId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })));
+  const ai = dependencies?.ai;
   const engine = new RuleEngine(rules);
   const fetchSoilMoisture = dependencies?.fetchSoilMoisture;
   const fetchRainProbability = dependencies?.fetchRainProbability;
@@ -352,8 +373,8 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
         return;
       }
 
-      // 智能问答（C4）：先检索农艺知识库给出口径内容，未命中再回落规则式回答；
-      // 回答始终附当前地块最近命中的规则，保证建议可追溯
+      // 智能问答（C4）：检索农艺知识库后交给 AI 生成回答（RAG），未配置 AI 或调用失败
+      // 降级为知识库拼接/规则式回答；回答始终附当前地块最近命中的规则，保证建议可追溯
       if (req.method === "POST" && url.pathname === `${API_PREFIX}/ask`) {
         const body = await json(req);
         const question = String(body.question ?? "").trim();
@@ -362,16 +383,27 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
         const latest = history[0];
         const matched = latest?.matchedRules.map((rule) => rule.name).join("、") ?? "土壤含水率低于阈值补灌";
         const hits = await knowledge.search(tenantId, question);
+        const sources = hits.length > 0 ? hits.map((hit) => hit.title) : matched.split("、").filter(Boolean);
+        const confidence = hits.length > 0 ? 0.9 : 0.86;
+        if (ai) {
+          try {
+            const answer = await ai.chat(buildAskMessages(question, hits, matched));
+            send(res, 200, { answer, sources, confidence, mode: "ai" }, traceId);
+            return;
+          } catch {
+            // AI 不可用不中断问答，落回下方规则式回答
+          }
+        }
         if (hits.length > 0) {
           const answer = hits.map((hit) => `【${hit.title}】${hit.content}`).join("\n");
           const ruleRef = matched ? `\n当前地块最近命中规则：${matched}。` : "";
-          send(res, 200, { answer: answer + ruleRef, sources: hits.map((hit) => hit.title), confidence: 0.9 }, traceId);
+          send(res, 200, { answer: answer + ruleRef, sources, confidence, mode: "rule" }, traceId);
           return;
         }
         const answer = question.includes("灌溉")
           ? `建议先查看地块土壤含水率与未来三天降雨概率；含水率低于 30% 且无明显降雨时生成补灌处方，最近命中的规则为：${matched}。`
           : `请提供地块、作物生育期或监测指标，我会结合当前规则给出可追溯建议；最近一次评估命中规则：${matched}。`;
-        send(res, 200, { answer, sources: matched.split("、").filter(Boolean), confidence: 0.86 }, traceId);
+        send(res, 200, { answer, sources, confidence, mode: "rule" }, traceId);
         return;
       }
 

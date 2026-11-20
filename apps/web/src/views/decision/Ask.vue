@@ -3,7 +3,7 @@
     <el-card shadow="never">
       <template #header>
         <span class="card-title">智能问答</span>
-        <span class="card-sub">检索农艺知识库，回答附依据来源与当前规则引用</span>
+        <span class="card-sub">检索农艺知识库，AI 生成回答并附依据来源（未配置 AI 时降级规则式回答）</span>
       </template>
       <el-input
         v-model="question"
@@ -31,6 +31,7 @@
     <el-card v-if="result" shadow="never" class="ask-result">
       <template #header>
         <span class="card-title">回答</span>
+        <el-tag size="small" :type="result.mode === 'ai' ? 'success' : 'info'" class="mode-tag">{{ result.mode === 'ai' ? 'AI 回答' : '规则回答' }}</el-tag>
         <span class="card-sub">置信度 {{ (result.confidence * 100).toFixed(0) }}%</span>
       </template>
       <div class="answer">{{ result.answer }}</div>
@@ -84,6 +85,9 @@ async function submit() {
   margin-left: 8px;
   font-size: 12px;
   color: #909399;
+}
+.mode-tag {
+  margin-left: 8px;
 }
 .ask-examples {
   margin-top: 12px;
