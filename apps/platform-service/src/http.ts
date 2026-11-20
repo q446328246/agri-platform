@@ -42,7 +42,7 @@ const permissionCodes = new Set(permissionCatalog.flatMap((group) => group.items
 const PLATFORM_POLICY = {
   read: "system:role",
   write: "system:role",
-  publicPaths: ["/api/v1/internal/platform/role-permissions"],
+  publicPaths: ["/api/v1/internal/platform/role-permissions", "/api/v1/internal/platform/audit-logs"],
   sessionPaths: ["/api/v1/platform/tenant", "/api/v1/platform/permissions"],
   pathPermissions: [{ prefix: "/api/v1/platform/audit-logs", permission: "system:audit" }, { prefix: "/api/v1/platform/audit-retention", permission: "system:audit" }, { prefix: "/api/v1/platform/backups", permission: "system:backup" }, { prefix: "/api/v1/platform/data-assets", permission: "system:data" }, { prefix: "/api/v1/platform/data-dictionary", permission: "system:data" }, { prefix: "/api/v1/platform/monitor", permission: "system:monitor" }],
 };
@@ -102,6 +102,26 @@ export function createPlatformHttpServer(options: PlatformHttpOptions = {}): Ser
         if (role && role.status === "ACTIVE") items.push({ code: role.code, permissions: role.permissions });
       }
       send(response, 200, { items }, traceId);
+      return;
+    }
+    // 内部审计写入（F2）：认证服务把登录成功/失败等行为经内部凭证落审计日志
+    if (request.method === "POST" && url.pathname === "/api/v1/internal/platform/audit-logs") {
+      if (!fromGateway(request)) { send(response, 401, null, traceId, "内部接口凭证无效"); return; }
+      const body = await readJson(request);
+      const action = text(body.action);
+      const operator = text(body.operator);
+      if (!action || !operator) { send(response, 400, null, traceId, "action 与 operator 不能为空"); return; }
+      const record: AuditRecord = {
+        id: `audit-${randomUUID().slice(0, 8)}`,
+        tenantId: text(body.tenantId) || tenantOf(request),
+        action,
+        operator,
+        resource: text(body.resource),
+        detail: text(body.detail),
+        createdAt: new Date().toISOString(),
+      };
+      await audits.create(record);
+      send(response, 201, record, traceId);
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/v1/platform/tenant") {

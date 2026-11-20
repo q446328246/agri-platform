@@ -9,6 +9,8 @@ import { hashPassword, InMemoryUserRepository, needsRehash, seedUsers, verifyPas
 import type { UserRecord, UserRepository, UserStatus } from "./user.repository.js";
 import { createSessionToken, InMemorySessionRepository } from "./session.repository.js";
 import type { SessionRepository } from "./session.repository.js";
+import { InMemoryLoginAttemptRepository } from "./login-attempt.repository.js";
+import type { LoginAttemptRepository } from "./login-attempt.repository.js";
 
 /**
  * 认证与账号管理 HTTP 接口。
@@ -23,12 +25,39 @@ export interface AuthHttpOptions {
   users?: UserRepository;
   /** 会话仓储，缺省为内存实现；接数据库时注入 SqlSessionRepository */
   sessions?: SessionRepository;
+  /** 登录尝试台账（F2 防暴破），缺省内存实现 */
+  attempts?: LoginAttemptRepository;
+  /**
+   * 登录审计上报（F2）：把登录成功/失败写入平台审计日志。
+   * 组合根注入平台内部审计端点的调用，缺省不上报；上报失败不影响登录主流程。
+   */
+  audit?: (input: { tenantId: string; action: string; operator: string; resource: string; detail: string }) => Promise<void>;
 }
 
 /** 对外返回的账号视图，不含口令散列 */
 type PublicUser = Omit<UserRecord, "passwordHash">;
 
 const DEFAULT_SESSION_TTL_SECONDS = 7200;
+
+/** 等保登录失败处置：连续失败达阈值锁定账号，阈值与时长可配（缺省 5 次 / 15 分钟） */
+const DEFAULT_LOGIN_MAX_FAILURES = 5;
+const DEFAULT_LOGIN_LOCK_MINUTES = 15;
+
+function loginPolicy(): { maxFailures: number; lockMinutes: number } {
+  const failures = Number(process.env.AUTH_LOGIN_MAX_FAILURES ?? "");
+  const minutes = Number(process.env.AUTH_LOGIN_LOCK_MINUTES ?? "");
+  return {
+    maxFailures: Number.isInteger(failures) && failures >= 1 ? failures : DEFAULT_LOGIN_MAX_FAILURES,
+    lockMinutes: Number.isInteger(minutes) && minutes >= 1 ? minutes : DEFAULT_LOGIN_LOCK_MINUTES,
+  };
+}
+
+/** 等保口令复杂度：6~32 位，须同时含字母与数字 */
+function passwordPolicyError(password: string): string | undefined {
+  if (password.length < 6 || password.length > 32) return "密码需为 6~32 位";
+  if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) return "密码须同时包含字母与数字";
+  return undefined;
+}
 
 /** 会话有效期（秒），部署时可用 AUTH_SESSION_TTL_SECONDS 调整 */
 function sessionTtlSeconds(): number {
@@ -83,6 +112,28 @@ async function publicUserWithPermissions(record: UserRecord): Promise<PublicUser
   return { ...publicUser(record), permissions: await effectivePermissions(record) };
 }
 
+/**
+ * 登录审计上报：成功失败都留痕，带上来源地址与锁定说明。
+ * 审计是旁路：未注入或上报失败都不影响登录主流程。
+ */
+async function auditLogin(
+  audit: AuthHttpOptions["audit"],
+  tenantId: string,
+  username: string,
+  ip: string,
+  success: boolean,
+  detail: string,
+): Promise<void> {
+  if (!audit) return;
+  await audit({
+    tenantId,
+    action: success ? "auth.login.succeeded" : "auth.login.failed",
+    operator: username,
+    resource: `user:${username}`,
+    detail: `${ip}${detail ? `，${detail}` : ""}`,
+  }).catch(() => {});
+}
+
 /** 服务侧权限守卫：账号管理需 system:user，登录与内部会话接口公开，个人信息仅需登录 */
 const AUTH_POLICY = {
   read: "system:user",
@@ -105,9 +156,10 @@ async function authorized(request: IncomingMessage, users: UserRepository, sessi
 function buildNewUser(request: IncomingMessage, body: Record<string, unknown>): { error: string; record?: undefined } | { error?: undefined; record: UserRecord } {
   const username = text(body.username);
   const name = text(body.name);
-  const password = text(body.password) || "123456";
+  const password = text(body.password) || "Aa123456";
   if (!/^[a-zA-Z][a-zA-Z0-9_-]{2,31}$/.test(username)) return { error: "用户名需以字母开头，3~32 位字母、数字、下划线或短横线" };
-  if (password.length < 6) return { error: "密码至少 6 位" };
+  const passwordError = passwordPolicyError(password);
+  if (passwordError) return { error: passwordError };
   if (!name) return { error: "姓名不能为空" };
   const now = new Date().toISOString();
   return {
@@ -168,9 +220,37 @@ export function createAuthHttpServer(options: AuthHttpOptions = {}): Server {
       const username = text(body.username);
       const password = text(body.password);
       // 登录尚未建立可信身份，允许通过请求体选择登录租户。
-      const user = await users.findByUsername(text(body.tenantId) || tenantOf(request), username);
-      if (!user || !verifyPassword(password, user.passwordHash)) { send(response, 401, null, traceId, "用户名或密码错误"); return; }
+      const tenantId = text(body.tenantId) || tenantOf(request);
+      const ip = request.socket.remoteAddress ?? "";
+      const attempts = options.attempts;
+      // 防暴破：锁定期内的尝试直接拒绝，不再消耗口令比对
+      if (attempts) {
+        const existing = await attempts.find(tenantId, username);
+        if (existing?.lockedUntil && Date.parse(existing.lockedUntil) > Date.now()) {
+          const minutes = Math.max(1, Math.ceil((Date.parse(existing.lockedUntil) - Date.now()) / 60_000));
+          send(response, 423, null, traceId, `账号已锁定，请 ${minutes} 分钟后重试或联系管理员`);
+          return;
+        }
+      }
+      const user = await users.findByUsername(tenantId, username);
+      if (!user || !verifyPassword(password, user.passwordHash)) {
+        if (attempts) {
+          const policy = loginPolicy();
+          const record = await attempts.recordFailure({ tenantId, username, lastIp: ip }, policy.maxFailures, policy.lockMinutes, new Date());
+          await auditLogin(options.audit, tenantId, username, ip, false, record.lockedUntil ? `连续失败 ${record.failCount} 次，锁定至 ${record.lockedUntil}` : `连续失败 ${record.failCount} 次`);
+          if (record.lockedUntil) {
+            const minutes = Math.max(1, Math.ceil((Date.parse(record.lockedUntil) - Date.now()) / 60_000));
+            send(response, 423, null, traceId, `用户名或密码错误，账号已锁定，请 ${minutes} 分钟后重试或联系管理员`);
+            return;
+          }
+        }
+        send(response, 401, null, traceId, "用户名或密码错误");
+        return;
+      }
       if (user.status === "DISABLED") { send(response, 403, null, traceId, "账号已停用，请联系管理员"); return; }
+      // 登录成功清零失败台账，并留审计
+      if (attempts) await attempts.clear(tenantId, username);
+      await auditLogin(options.audit, tenantId, username, ip, true, "");
       // 旧 sha256 散列在登录成功时就地升级，历史账号无需批量改密
       if (needsRehash(user.passwordHash)) {
         const upgraded = hashPassword(password);
@@ -246,7 +326,8 @@ export function createAuthHttpServer(options: AuthHttpOptions = {}): Server {
       const user = await users.findById(id);
       if (!user || user.tenantId !== tenantOf(request)) { send(response, 404, null, traceId, "用户不存在"); return; }
       const password = text((await readJson(request)).password);
-      if (password.length < 6) { send(response, 400, null, traceId, "密码至少 6 位"); return; }
+      const passwordError = passwordPolicyError(password);
+      if (passwordError) { send(response, 400, null, traceId, passwordError); return; }
       await users.updatePassword(user.id, hashPassword(password), new Date().toISOString());
       // 改密后回收该账号全部会话，旧 token 立即失效
       await sessions.removeByUser(user.id);
@@ -254,5 +335,9 @@ export function createAuthHttpServer(options: AuthHttpOptions = {}): Server {
       return;
     }
     send(response, 404, null, traceId, "接口不存在");
-  } catch (error) { send(response, 400, null, traceId, error instanceof Error ? error.message : "请求处理失败"); } });
+  } catch (error) {
+    // 等保错误处理：生产环境错误响应不泄露内部细节，仅开发/测试保留原始信息便于排查
+    const detail = process.env.NODE_ENV === "production" ? "请求处理失败" : (error instanceof Error ? error.message : "请求处理失败");
+    send(response, 400, null, traceId, detail);
+  } });
 }

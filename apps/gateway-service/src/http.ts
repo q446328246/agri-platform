@@ -13,6 +13,14 @@ import type { GatewayAuthorizer } from "./authz.js";
  * 客户端自带的 `x-user-id` / `x-tenant-id` / `x-permissions` 一律丢弃，避免越权。
  */
 
+/** F2 安全响应头：网关自身响应与转发响应统一附加（等保安全基线） */
+const SECURITY_HEADERS: Record<string, string> = {
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "x-xss-protection": "1; mode=block",
+  "referrer-policy": "no-referrer",
+};
+
 export interface GatewayRoute { prefix: string; target: string }
 
 export interface GatewayOptions {
@@ -50,7 +58,7 @@ async function body(request: IncomingMessage): Promise<Buffer> {
 }
 
 function reply(response: ServerResponse, status: number, code: string, message: string): void {
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", ...SECURITY_HEADERS });
   response.end(JSON.stringify({ code, message, data: null, timestamp: Date.now() }));
 }
 
@@ -60,7 +68,7 @@ export function createGatewayHttpServer(options: GatewayOptions = {}): Server {
   return createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && url.pathname === "/health") {
-      response.writeHead(200, { "content-type": "application/json" });
+      response.writeHead(200, { "content-type": "application/json", ...SECURITY_HEADERS });
       response.end(JSON.stringify({ code: "OK", data: { status: "ok", service: "gateway" }, timestamp: Date.now() }));
       return;
     }
@@ -97,18 +105,23 @@ export function createGatewayHttpServer(options: GatewayOptions = {}): Server {
       const upstream = await fetch(`${route.target}${url.pathname}${url.search}`, init);
       const outHeaders: Record<string, string> = {
         "content-type": upstream.headers.get("content-type") || "application/json",
+        ...SECURITY_HEADERS,
       };
       // 透传下载相关响应头，保留上游给出的文件名与安全/缓存语义
       for (const name of ["content-disposition", "content-length", "cache-control", "x-content-type-options"]) {
         const value = upstream.headers.get(name);
         if (value) outHeaders[name] = value;
       }
+      // 认证相关响应（令牌/身份）一律禁止缓存
+      if (pathname.startsWith("/api/v1/auth")) outHeaders["cache-control"] = "no-store";
       response.writeHead(upstream.status, outHeaders);
       // 流式转发上游响应，避免大文件（如备份包）在网关内存中整包缓冲
       if (!upstream.body) { response.end(); return; }
       Readable.fromWeb(upstream.body as unknown as WebReadableStream).on("error", () => response.destroy()).pipe(response);
     } catch (error) {
-      reply(response, 502, "GATEWAY-502", error instanceof Error ? error.message : "下游服务不可用");
+      // 等保错误处理：对客户端只给通用文案，内部细节仅记服务端日志
+      console.error("[gateway] 下游转发失败", { pathname, message: error instanceof Error ? error.message : String(error) });
+      reply(response, 502, "GATEWAY-502", "下游服务不可用");
     }
   });
 }

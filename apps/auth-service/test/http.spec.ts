@@ -60,7 +60,7 @@ describe("auth HTTP API 用户管理", () => {
     expect((await updated.json() as { data: { name: string; roles: string[]; status: string } }).data).toMatchObject({ name: "张农技（新）", roles: ["agronomist", "operator"], status: "DISABLED" });
 
     // 停用后不允许登录
-    const denied = await post(base, "/api/v1/auth/login", { username: "agronomist01", password: "123456" });
+    const denied = await post(base, "/api/v1/auth/login", { username: "agronomist01", password: "Aa123456" });
     expect(denied.status).toBe(403);
 
     const reset = await post(base, `/api/v1/auth/users/${createdUser.id}/password`, { password: "newpass123" });
@@ -68,8 +68,8 @@ describe("auth HTTP API 用户管理", () => {
     // 启用后新密码可登录，旧密码失效
     expect((await put(base, `/api/v1/auth/users/${createdUser.id}`, { status: "ACTIVE" })).status).toBe(200);
     expect((await post(base, "/api/v1/auth/login", { username: "agronomist01", password: "newpass123" })).status).toBe(200);
-    expect((await post(base, "/api/v1/auth/login", { username: "agronomist01", password: "123456" })).status).toBe(401);
-
+    // 旧默认口令失效（建号缺省口令为 Aa123456）
+    expect((await post(base, "/api/v1/auth/login", { username: "agronomist01", password: "Aa123456" })).status).toBe(401);
     const removed = await fetch(`${base}/api/v1/auth/users/${createdUser.id}`, { method: "DELETE" });
     expect(removed.status).toBe(200);
     const after = await fetch(`${base}/api/v1/auth/users?keyword=agronomist01`);
