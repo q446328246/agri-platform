@@ -650,6 +650,32 @@ export interface MonitorAlert {
   resolvedAt?: string
 }
 
+// 预测指标（C3）：墒情趋势、虫害风险、产量估算
+export type PredictionMetric = 'SOIL_MOISTURE' | 'PEST_RISK' | 'YIELD'
+
+// 预测等级：正常、预警、严重、数据不足（无依据时不编预测值）
+export type PredictionLevel = 'NORMAL' | 'WARNING' | 'CRITICAL' | 'INSUFFICIENT_DATA'
+
+// 决策预测台账记录（迁移 063 decision_predictions）
+export interface PredictionRecord {
+  id: string
+  tenantId: string
+  plotCode: string
+  seasonId: string
+  metric: PredictionMetric
+  /** 预测时点（ISO 8601 UTC） */
+  predictedAt: string
+  horizonHours: number
+  predictedValue: number
+  level: PredictionLevel
+  unit: string
+  basis: string
+  inputs: Record<string, unknown>
+  threshold?: number
+  direction?: 'above' | 'below'
+  createdAt: string
+}
+
 // 权限目录分组
 export interface PermissionGroup {
   group: string

@@ -65,6 +65,42 @@ describe("消息模板与去重键", () => {
     expect(first?.dedupeKey).not.toBe(second?.dedupeKey);
   });
 
+  it("预测预警按预测窗口去重，级别随预测值走", () => {
+    const payload = {
+      parcelId: "P-8",
+      seasonId: "2026",
+      metric: "SOIL_MOISTURE" as const,
+      level: "WARNING" as const,
+      predictedValue: 27.4,
+      unit: "%",
+      threshold: 30,
+      direction: "below" as const,
+      predictedAt: "2026-11-05T05:00:00.000Z",
+      horizonHours: 24,
+      basis: "近 72 小时均值 29.8%，趋势 -0.15%/小时，预测 24 小时后 27.4%",
+    };
+    const draft = buildMessageDraft(EventTopic.DecisionPredictionAlert, payload, context);
+    expect(draft).toMatchObject({ type: "ALERT", level: "WARNING", plotCode: "P-8" });
+    expect(draft?.title).toBe("预测预警：土壤墒情·P-8");
+    expect(draft?.content).toContain("预测 27.4%");
+    expect(draft?.content).toContain("判定阈值 30");
+    expect(draft?.content).toContain(payload.basis);
+
+    // 同一预测窗口内数值小幅波动只提醒一次；换窗口才另开一条
+    const sameWindow = buildMessageDraft(EventTopic.DecisionPredictionAlert, { ...payload, predictedValue: 26.9 }, context);
+    expect(sameWindow?.dedupeKey).toBe(draft?.dedupeKey);
+    const nextWindow = buildMessageDraft(EventTopic.DecisionPredictionAlert, { ...payload, predictedAt: "2026-11-05T06:00:00.000Z" }, context);
+    expect(nextWindow?.dedupeKey).not.toBe(draft?.dedupeKey);
+
+    const critical = buildMessageDraft(EventTopic.DecisionPredictionAlert, { ...payload, level: "CRITICAL", predictedAt: "2026-11-05T07:00:00.000Z" }, context);
+    expect(critical?.level).toBe("CRITICAL");
+    const pest = buildMessageDraft(EventTopic.DecisionPredictionAlert, {
+      ...payload, metric: "PEST_RISK", level: "CRITICAL", predictedValue: 72, unit: "分", threshold: 65, direction: "above", predictedAt: "2026-11-05T07:30:00.000Z",
+    }, context);
+    expect(pest?.title).toBe("预测预警：虫害风险·P-8");
+    expect(pest?.content).toContain("预测 72分");
+  });
+
   it("虫情识别按等级生成告警与消息", () => {
     const severe = buildMessageDraft(
       EventTopic.TelemetryPestDetected,
@@ -203,6 +239,7 @@ describe("消息模板与去重键", () => {
       EventTopic.TelemetryPestDetected,
       EventTopic.TelemetryAiDetected,
       EventTopic.DecisionPrescriptionIssued,
+      EventTopic.DecisionPredictionAlert,
       EventTopic.PlotCreated,
       EventTopic.ControlCommandTimeout,
       EventTopic.ControlIrrigationFinished,

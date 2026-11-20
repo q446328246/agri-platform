@@ -16,6 +16,7 @@ import type {
   DataAsset, DataAssetCategory, DataDictionaryEntry, TaskWeatherConflict,
   BackupRecord, BackupRunResult,
   MonitorServiceStatus, MonitorRule, MonitorAlert,
+  PredictionRecord, PredictionMetric, PredictionLevel,
 } from '@/types'
 
 /** 剥掉查询参数里的 undefined/null/空串，避免发 ?keyword=&type= 这种无意义空条件 */
@@ -1123,6 +1124,14 @@ export const decisionApi = {
   /** 删除农艺知识条目 */
   deleteKnowledge(id: string): Promise<{ removed: string }> {
     return del<{ removed: string }>(`/decision/knowledge/${encodeURIComponent(id)}`)
+  },
+  /** 预测台账（C3）：按地块/指标/等级查询预测留痕 */
+  getPredictions(params?: { plotCode?: string; metric?: PredictionMetric; level?: PredictionLevel; page?: number; size?: number }): Promise<PageResult<PredictionRecord>> {
+    return get<PageResult<PredictionRecord>>('/decision/predictions', cleanParams(params))
+  },
+  /** 立即执行一轮全量预测（与定时扫描同一入口） */
+  runPredictions(): Promise<{ status: string }> {
+    return post<{ status: string }>('/decision/predictions/run', {})
   }
 }
 

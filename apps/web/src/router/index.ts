@@ -154,6 +154,12 @@ const routes: RouteRecordRaw[] = [
             name: 'DecisionKnowledge',
             component: () => import('@/views/decision/Knowledge.vue'),
             meta: { title: '农艺知识库', permission: 'decision:read' }
+          },
+          {
+            path: 'prediction',
+            name: 'DecisionPrediction',
+            component: () => import('@/views/decision/Prediction.vue'),
+            meta: { title: '预测预警', permission: 'decision:read' }
           }
         ]
       },

@@ -128,6 +128,34 @@ export interface PrescriptionIssuedPayload {
   items: PrescriptionItem[];
 }
 
+/** 预测指标：墒情趋势、虫害风险、产量估算 */
+export type PredictionMetric = "SOIL_MOISTURE" | "PEST_RISK" | "YIELD";
+
+/** 预测等级：正常、预警、严重、数据不足（无依据时不编预测值） */
+export type PredictionLevel = "NORMAL" | "WARNING" | "CRITICAL" | "INSUFFICIENT_DATA";
+
+/** decision.prediction.alert —— 预测结果达到预警/严重级别，提示提前处置 */
+export interface PredictionAlertPayload {
+  parcelId: string;
+  seasonId: string;
+  metric: PredictionMetric;
+  /** 只发布预警与严重级，正常与数据不足不扰人 */
+  level: "WARNING" | "CRITICAL";
+  /** 预测值：墒情为百分数、虫害风险为分值、产量为千克/亩 */
+  predictedValue: number;
+  unit: string;
+  /** 判定所用阈值，无阈值指标（如产量）缺省 */
+  threshold?: number;
+  /** 方向：below 低于下限、above 高于上限 */
+  direction?: "above" | "below";
+  /** 预测时点，ISO 8601 UTC */
+  predictedAt: string;
+  /** 预测时距预测起点的小时数 */
+  horizonHours: number;
+  /** 推算依据说明，保证可追溯、不编数 */
+  basis: string;
+}
+
 /** operation.task.completed —— 作业任务完成 */
 export interface TaskCompletedPayload {
   taskId: string;

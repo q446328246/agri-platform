@@ -5,6 +5,7 @@ import type {
   IrrigationFinishedPayload,
   PestDetectedPayload,
   PlotCreatedPayload,
+  PredictionAlertPayload,
   PrescriptionIssuedPayload,
   ServiceDownPayload,
   ServiceRecoveredPayload,
@@ -63,6 +64,13 @@ const PLAN_LABELS: Record<PrescriptionIssuedPayload["planType"], string> = {
   irrigation: "灌溉",
   fertilization: "施肥",
   pesticide: "植保",
+};
+
+/** 预测指标中文名 */
+const PREDICTION_METRIC_LABELS: Record<PredictionAlertPayload["metric"], string> = {
+  SOIL_MOISTURE: "土壤墒情",
+  PEST_RISK: "虫害风险",
+  YIELD: "产量",
 };
 
 /** 渲染上下文：事件信封中与消息相关的字段 */
@@ -139,6 +147,32 @@ const prescriptionTemplate: MessageTemplate<PrescriptionIssuedPayload> = {
       plotCode: payload.parcelId,
       occurredAt: context.occurredAt,
       dedupeKey: `${EventTopic.DecisionPrescriptionIssued}:${context.eventId}`,
+    };
+  },
+};
+
+/**
+ * 预测预警：墒情/虫害预测达到预警或严重级别，提示提前处置而非等越限再补。
+ * 去重按「地块 + 指标 + 预测时点小时前缀」——同一预测窗口只提醒一次，
+ * 扫描器重跑或事件重放不会重复刷屏。
+ */
+const predictionAlertTemplate: MessageTemplate<PredictionAlertPayload> = {
+  topic: EventTopic.DecisionPredictionAlert,
+  label: "预测预警",
+  type: "ALERT",
+  render(payload, context) {
+    const plotCode = payload.parcelId || "未绑定地块";
+    const metric = PREDICTION_METRIC_LABELS[payload.metric] ?? payload.metric;
+    const threshold = payload.threshold === undefined ? "" : `，判定阈值 ${payload.threshold}`;
+    const occurredAt = payload.predictedAt || context.occurredAt;
+    return {
+      type: "ALERT",
+      level: payload.level,
+      title: `预测预警：${metric}·${plotCode}`,
+      content: `${metric}预测 ${payload.predictedValue}${payload.unit}（${payload.horizonHours} 小时后时点 ${occurredAt}）${threshold}，级别 ${payload.level}。推算依据：${payload.basis}。请提前安排处置。`,
+      plotCode: payload.parcelId,
+      occurredAt,
+      dedupeKey: `${EventTopic.DecisionPredictionAlert}:${payload.parcelId}:${payload.metric}:${hourOf(occurredAt)}`,
     };
   },
 };
@@ -396,6 +430,7 @@ export const MESSAGE_TEMPLATES = {
   [EventTopic.TelemetryPestDetected]: pestDetectedTemplate,
   [EventTopic.TelemetryAiDetected]: aiDetectedTemplate,
   [EventTopic.DecisionPrescriptionIssued]: prescriptionTemplate,
+  [EventTopic.DecisionPredictionAlert]: predictionAlertTemplate,
   [EventTopic.PlotCreated]: plotCreatedTemplate,
   [EventTopic.ControlCommandTimeout]: commandTimeoutTemplate,
   [EventTopic.ControlIrrigationFinished]: irrigationFinishedTemplate,

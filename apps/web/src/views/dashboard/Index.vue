@@ -259,6 +259,7 @@ const panelComps: Record<string, Component> = {
   '/agro': markRaw(defineAsyncComponent(() => import('@/views/agro/Index.vue'))),
   '/decision/ask': markRaw(defineAsyncComponent(() => import('@/views/decision/Ask.vue'))),
   '/decision/knowledge': markRaw(defineAsyncComponent(() => import('@/views/decision/Knowledge.vue'))),
+  '/decision/prediction': markRaw(defineAsyncComponent(() => import('@/views/decision/Prediction.vue'))),
   '/weather': markRaw(defineAsyncComponent(() => import('@/views/weather/Index.vue'))),
   '/finance': markRaw(defineAsyncComponent(() => import('@/views/finance/Index.vue'))),
   '/trace': markRaw(defineAsyncComponent(() => import('@/views/trace/Index.vue'))),
@@ -305,6 +306,7 @@ const menuGroups: MenuGroup[] = [
     items: [
       { label: '智能问答', panel: '/decision/ask', perm: 'decision:read' },
       { label: '农艺知识库', panel: '/decision/knowledge', perm: 'decision:read' },
+      { label: '预测预警', panel: '/decision/prediction', perm: 'decision:read' },
     ],
   },
   {

@@ -24,6 +24,8 @@ import type { CreateRuleInput, RuleRepository, RuleType, UpdateRuleInput } from 
 import { InMemoryKnowledgeRepository, SqlKnowledgeRepository, DEFAULT_KNOWLEDGE } from "./knowledge.repository.js";
 import type { AgronomyKnowledge, KnowledgeCategory, KnowledgeInput, KnowledgeRepository } from "./knowledge.repository.js";
 import { KNOWLEDGE_CATEGORIES, newKnowledgeId } from "./knowledge.repository.js";
+import { InMemoryPredictionRepository, PREDICTION_LEVELS, PREDICTION_METRICS } from "./prediction.repository.js";
+import type { PredictionLevel, PredictionMetric, PredictionRepository } from "./prediction.repository.js";
 import type { AiChatClient, AiChatMessage } from "./ai.client.js";
 
 const API_PREFIX = "/api/v1/decision";
@@ -52,6 +54,10 @@ export interface DecisionDependencies {
   knowledge?: KnowledgeRepository;
   /** AI 问答通道（C4 增强）：配置后 /ask 走检索增强生成，未配置或调用失败降级规则式回答 */
   ai?: AiChatClient;
+  /** 预测台账（C3）：查询预测留痕，缺省内存实现 */
+  predictions?: PredictionRepository;
+  /** 预测扫描器（C3）：人工触发立即执行一轮，缺省不提供 */
+  predictionSweeper?: { runOnce(): Promise<void> };
   tenantId?: string;
 }
 
@@ -149,6 +155,8 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
   const knowledge = dependencies?.knowledge
     ?? new InMemoryKnowledgeRepository(DEFAULT_KNOWLEDGE.map((entry) => ({ ...entry, tenantId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })));
   const ai = dependencies?.ai;
+  const predictions = dependencies?.predictions ?? new InMemoryPredictionRepository();
+  const predictionSweeper = dependencies?.predictionSweeper;
   const engine = new RuleEngine(rules);
   const fetchSoilMoisture = dependencies?.fetchSoilMoisture;
   const fetchRainProbability = dependencies?.fetchRainProbability;
@@ -444,6 +452,37 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
         if (!id) { send(res, 400, null, traceId, "知识条目标识不能为空"); return; }
         if (!(await knowledge.remove(tenantId, id))) { send(res, 404, null, traceId, "知识条目不存在"); return; }
         send(res, 200, { removed: id }, traceId);
+        return;
+      }
+
+      // 预测台账（C3）：按地块/指标/等级查询预测留痕
+      if (req.method === "GET" && url.pathname === `${API_PREFIX}/predictions`) {
+        const plotCode = url.searchParams.get("plotCode") ?? undefined;
+        const metric = url.searchParams.get("metric") ?? undefined;
+        const level = url.searchParams.get("level") ?? undefined;
+        if (metric !== undefined && !PREDICTION_METRICS.includes(metric as PredictionMetric)) {
+          send(res, 400, null, traceId, `metric 需为 ${PREDICTION_METRICS.join("/")} 之一`);
+          return;
+        }
+        if (level !== undefined && !PREDICTION_LEVELS.includes(level as PredictionLevel)) {
+          send(res, 400, null, traceId, `level 需为 ${PREDICTION_LEVELS.join("/")} 之一`);
+          return;
+        }
+        const records = await predictions.list({
+          ...(plotCode ? { plotCode } : {}),
+          ...(metric ? { metric: metric as PredictionMetric } : {}),
+          ...(level ? { level: level as PredictionLevel } : {}),
+          limit: Number(url.searchParams.get("size") ?? 20),
+        });
+        send(res, 200, page(records, url.searchParams), traceId);
+        return;
+      }
+
+      // 人工触发：立即执行一轮全量预测，与定时扫描同一入口
+      if (req.method === "POST" && url.pathname === `${API_PREFIX}/predictions/run`) {
+        if (!predictionSweeper) { send(res, 400, null, traceId, "预测扫描器未配置"); return; }
+        await predictionSweeper.runOnce();
+        send(res, 200, { status: "ok" }, traceId);
         return;
       }
 
