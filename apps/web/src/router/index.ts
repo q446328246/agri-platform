@@ -138,6 +138,26 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '四情监控', icon: 'Sunny', permission: 'telemetry:read' }
       },
       {
+        path: 'decision',
+        name: 'Decision',
+        redirect: '/decision/ask',
+        meta: { title: '智能决策', icon: 'ChatDotRound', permission: 'decision:read' },
+        children: [
+          {
+            path: 'ask',
+            name: 'DecisionAsk',
+            component: () => import('@/views/decision/Ask.vue'),
+            meta: { title: '智能问答', permission: 'decision:read' }
+          },
+          {
+            path: 'knowledge',
+            name: 'DecisionKnowledge',
+            component: () => import('@/views/decision/Knowledge.vue'),
+            meta: { title: '农艺知识库', permission: 'decision:read' }
+          }
+        ]
+      },
+      {
         path: 'weather',
         name: 'Weather',
         component: () => import('@/views/weather/Index.vue'),

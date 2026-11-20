@@ -1060,6 +1060,51 @@ export const controlApi = {
   }
 }
 
+/** 智能问答回答（C4）：知识库检索命中 + 当前规则引用 */
+export interface AskResult {
+  answer: string
+  sources: string[]
+  confidence: number
+}
+
+/** 农艺知识条目（C4） */
+export interface KnowledgeEntry {
+  id: string
+  tenantId: string
+  category: 'CROP' | 'INDICATOR' | 'DISPOSAL' | 'CRITERIA'
+  title: string
+  keywords: string
+  content: string
+  source?: string
+  enabled: boolean
+  sort: number
+  createdAt: string
+  updatedAt: string
+}
+
+export const decisionApi = {
+  /** 智能问答：按问题检索农艺知识库，回答附来源与当前规则引用 */
+  ask(question: string): Promise<AskResult> {
+    return post<AskResult>('/decision/ask', { question })
+  },
+  /** 农艺知识库列表 */
+  getKnowledge(params?: { page?: number; size?: number }): Promise<PageResult<KnowledgeEntry>> {
+    return get<PageResult<KnowledgeEntry>>('/decision/knowledge', cleanParams(params))
+  },
+  /** 新增农艺知识条目 */
+  createKnowledge(data: { category: KnowledgeEntry['category']; title: string; keywords: string; content: string; source?: string; enabled?: boolean; sort?: number }): Promise<KnowledgeEntry> {
+    return post<KnowledgeEntry>('/decision/knowledge', data)
+  },
+  /** 更新农艺知识条目（整行覆盖） */
+  updateKnowledge(id: string, data: { category: KnowledgeEntry['category']; title: string; keywords: string; content: string; source?: string; enabled?: boolean; sort?: number }): Promise<KnowledgeEntry> {
+    return put<KnowledgeEntry>(`/decision/knowledge/${encodeURIComponent(id)}`, data)
+  },
+  /** 删除农艺知识条目 */
+  deleteKnowledge(id: string): Promise<{ removed: string }> {
+    return del<{ removed: string }>(`/decision/knowledge/${encodeURIComponent(id)}`)
+  }
+}
+
 /** 一条作业授权（A8）：设备/地块缺省表示全部，窗口闭区间 */
 export interface ControlAuthorization {
   id: string

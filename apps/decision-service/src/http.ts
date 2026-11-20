@@ -21,6 +21,9 @@ import { optionalFiniteNumber, RuleEngine } from "./rule.engine.js";
 import type { RuleEvaluationInput } from "./rule.engine.js";
 import { defaultRule, InMemoryRuleRepository, isRuleType, normalizeAction, normalizeCondition } from "./rule.repository.js";
 import type { CreateRuleInput, RuleRepository, RuleType, UpdateRuleInput } from "./rule.repository.js";
+import { InMemoryKnowledgeRepository, SqlKnowledgeRepository, DEFAULT_KNOWLEDGE } from "./knowledge.repository.js";
+import type { KnowledgeCategory, KnowledgeInput, KnowledgeRepository } from "./knowledge.repository.js";
+import { KNOWLEDGE_CATEGORIES, newKnowledgeId } from "./knowledge.repository.js";
 
 const API_PREFIX = "/api/v1/decision";
 
@@ -44,6 +47,8 @@ export interface DecisionDependencies {
    * 只认地块服务的权威值，不接受请求体自报——面积直接决定阀门开多久，不能让调用方填。
    */
   fetchPlotArea?: (plotCode: string, identity: Record<string, string>) => Promise<number | undefined>;
+  /** 农艺知识库（C4）：问答检索与知识条目维护；缺省内存实现 */
+  knowledge?: KnowledgeRepository;
   tenantId?: string;
 }
 
@@ -74,6 +79,27 @@ function page<T>(items: T[], query: URLSearchParams): PageResult<T> {
   return { items: items.slice(start, start + size), total: items.length, page: current, size, pages: Math.ceil(items.length / size) };
 }
 
+/** 解析农艺知识条目入参：分类白名单、必填字段、关键词非空 */
+function parseKnowledgeInput(body: Record<string, unknown>): { input?: KnowledgeInput; error?: string } {
+  const category = String(body.category ?? "");
+  if (!KNOWLEDGE_CATEGORIES.includes(category as KnowledgeCategory)) {
+    return { error: `category 需为 ${KNOWLEDGE_CATEGORIES.join("/")} 之一` };
+  }
+  const title = String(body.title ?? "").trim();
+  if (!title) return { error: "title 不能为空" };
+  const keywords = String(body.keywords ?? "").trim();
+  if (!keywords) return { error: "keywords 不能为空（逗号分隔检索关键词）" };
+  const content = String(body.content ?? "").trim();
+  if (!content) return { error: "content 不能为空" };
+  const input: KnowledgeInput = { category: category as KnowledgeCategory, title, keywords, content };
+  const source = String(body.source ?? "").trim();
+  if (source) input.source = source;
+  if (body.enabled !== undefined) input.enabled = body.enabled === true || body.enabled === "true";
+  const sort = Number(body.sort);
+  if (Number.isFinite(sort)) input.sort = Math.max(0, Math.round(sort));
+  return { input };
+}
+
 function rulePayload(body: Record<string, unknown>): Omit<CreateRuleInput, "id" | "createdAt" | "updatedAt"> {
   const type: RuleType = isRuleType(body.type) ? body.type : "IRRIGATION";
   return {
@@ -100,6 +126,8 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
   const outcomes = dependencies?.outcomes ?? new InMemoryOutcomeRepository();
   const executions = dependencies?.executions ?? new InMemoryExecutionRepository();
   const tenantId = dependencies?.tenantId ?? "tenant-demo";
+  const knowledge = dependencies?.knowledge
+    ?? new InMemoryKnowledgeRepository(DEFAULT_KNOWLEDGE.map((entry) => ({ ...entry, tenantId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })));
   const engine = new RuleEngine(rules);
   const fetchSoilMoisture = dependencies?.fetchSoilMoisture;
   const fetchRainProbability = dependencies?.fetchRainProbability;
@@ -324,17 +352,66 @@ export function createDecisionHttpServer(dependencies?: Partial<DecisionDependen
         return;
       }
 
-      // 智能问答：结合处方留痕给出可追溯建议
+      // 智能问答（C4）：先检索农艺知识库给出口径内容，未命中再回落规则式回答；
+      // 回答始终附当前地块最近命中的规则，保证建议可追溯
       if (req.method === "POST" && url.pathname === `${API_PREFIX}/ask`) {
         const body = await json(req);
-        const question = String(body.question ?? "");
+        const question = String(body.question ?? "").trim();
+        if (!question) { send(res, 400, null, traceId, "问题不能为空"); return; }
         const history = await prescriptions.listByPlot({ limit: 3 });
         const latest = history[0];
         const matched = latest?.matchedRules.map((rule) => rule.name).join("、") ?? "土壤含水率低于阈值补灌";
+        const hits = await knowledge.search(tenantId, question);
+        if (hits.length > 0) {
+          const answer = hits.map((hit) => `【${hit.title}】${hit.content}`).join("\n");
+          const ruleRef = matched ? `\n当前地块最近命中规则：${matched}。` : "";
+          send(res, 200, { answer: answer + ruleRef, sources: hits.map((hit) => hit.title), confidence: 0.9 }, traceId);
+          return;
+        }
         const answer = question.includes("灌溉")
           ? `建议先查看地块土壤含水率与未来三天降雨概率；含水率低于 30% 且无明显降雨时生成补灌处方，最近命中的规则为：${matched}。`
           : `请提供地块、作物生育期或监测指标，我会结合当前规则给出可追溯建议；最近一次评估命中规则：${matched}。`;
         send(res, 200, { answer, sources: matched.split("、").filter(Boolean), confidence: 0.86 }, traceId);
+        return;
+      }
+
+      // 农艺知识库管理（C4）：列表读取走全局决策读权限，写入需决策知识库维护权限
+      if (req.method === "GET" && url.pathname === `${API_PREFIX}/knowledge`) {
+        send(res, 200, page(await knowledge.list(tenantId), url.searchParams), traceId);
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === `${API_PREFIX}/knowledge`) {
+        const knowledgeDenied = authorizeRequest(req, { read: "decision:read", write: "decision:knowledge" });
+        if (knowledgeDenied) { send(res, knowledgeDenied.status, null, traceId, knowledgeDenied.message); return; }
+        const body = await json(req);
+        const input = parseKnowledgeInput(body);
+        if (input.error) { send(res, 400, null, traceId, input.error); return; }
+        const saved = await knowledge.save(tenantId, newKnowledgeId(), input.input!);
+        send(res, 201, saved, traceId);
+        return;
+      }
+
+      if (req.method === "PUT" && url.pathname.startsWith(`${API_PREFIX}/knowledge/`)) {
+        const knowledgeDenied = authorizeRequest(req, { read: "decision:read", write: "decision:knowledge" });
+        if (knowledgeDenied) { send(res, knowledgeDenied.status, null, traceId, knowledgeDenied.message); return; }
+        const id = url.pathname.slice(`${API_PREFIX}/knowledge/`.length).trim();
+        if (!id) { send(res, 400, null, traceId, "知识条目标识不能为空"); return; }
+        const body = await json(req);
+        const input = parseKnowledgeInput(body);
+        if (input.error) { send(res, 400, null, traceId, input.error); return; }
+        const saved = await knowledge.save(tenantId, id, input.input!);
+        send(res, 200, saved, traceId);
+        return;
+      }
+
+      if (req.method === "DELETE" && url.pathname.startsWith(`${API_PREFIX}/knowledge/`)) {
+        const knowledgeDenied = authorizeRequest(req, { read: "decision:read", write: "decision:knowledge" });
+        if (knowledgeDenied) { send(res, knowledgeDenied.status, null, traceId, knowledgeDenied.message); return; }
+        const id = url.pathname.slice(`${API_PREFIX}/knowledge/`.length).trim();
+        if (!id) { send(res, 400, null, traceId, "知识条目标识不能为空"); return; }
+        if (!(await knowledge.remove(tenantId, id))) { send(res, 404, null, traceId, "知识条目不存在"); return; }
+        send(res, 200, { removed: id }, traceId);
         return;
       }
 

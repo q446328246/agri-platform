@@ -257,6 +257,8 @@ const panelComps: Record<string, Component> = {
   '/device/commands': markRaw(defineAsyncComponent(() => import('@/views/device/Commands.vue'))),
   '/device/irrigation': markRaw(defineAsyncComponent(() => import('@/views/irrigation/Index.vue'))),
   '/agro': markRaw(defineAsyncComponent(() => import('@/views/agro/Index.vue'))),
+  '/decision/ask': markRaw(defineAsyncComponent(() => import('@/views/decision/Ask.vue'))),
+  '/decision/knowledge': markRaw(defineAsyncComponent(() => import('@/views/decision/Knowledge.vue'))),
   '/weather': markRaw(defineAsyncComponent(() => import('@/views/weather/Index.vue'))),
   '/finance': markRaw(defineAsyncComponent(() => import('@/views/finance/Index.vue'))),
   '/trace': markRaw(defineAsyncComponent(() => import('@/views/trace/Index.vue'))),
@@ -294,6 +296,14 @@ const menuGroups: MenuGroup[] = [
       { label: '虫情', panel: '/agro', perm: 'telemetry:read' },
       { label: '灾情', panel: '/agro', perm: 'telemetry:read' },
       { label: '气象服务', panel: '/weather', perm: 'weather:read' },
+    ],
+  },
+  {
+    title: '智能决策',
+    icon: icon('M21 6h-2v9H6v2a1 1 0 0 0 1 1h11l4 4V7a1 1 0 0 0-1-1Zm-4 6V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v14l4-4h10a1 1 0 0 0 1-1Z'),
+    items: [
+      { label: '智能问答', panel: '/decision/ask', perm: 'decision:read' },
+      { label: '农艺知识库', panel: '/decision/knowledge', perm: 'decision:read' },
     ],
   },
   {

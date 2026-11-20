@@ -39,7 +39,7 @@ export const PERMISSION_CATALOG: PermissionGroup[] = [
       { code: "operation:write", name: "维护农事任务" },
     ],
   },
-  { group: "智能决策", items: [{ code: "decision:read", name: "查看规则与处方" }, { code: "decision:write", name: "维护规则与处方" }] },
+  { group: "智能决策", items: [{ code: "decision:read", name: "查看规则与处方" }, { code: "decision:write", name: "维护规则与处方" }, { code: "decision:knowledge", name: "维护农艺知识库" }] },
   {
     group: "核算与溯源",
     items: [
@@ -68,6 +68,7 @@ export type PermissionCode =
   | "operation:write"
   | "decision:read"
   | "decision:write"
+  | "decision:knowledge"
   | "finance:read"
   | "finance:write"
   | "trace:read"

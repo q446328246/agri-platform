@@ -11,6 +11,7 @@ import type { DecisionDependencies } from "./http.js";
 import { SqlExecutionRepository } from "./execution.repository.js";
 import { SqlOutcomeRepository } from "./outcome.repository.js";
 import { SqlPrescriptionRepository } from "./prescription.repository.js";
+import { DEFAULT_KNOWLEDGE, SqlKnowledgeRepository } from "./knowledge.repository.js";
 import { SqlOutboxStore } from "./outbox.repository.js";
 import { defaultRule, SqlRuleRepository } from "./rule.repository.js";
 import { optionalFiniteNumber } from "./rule.engine.js";
@@ -65,6 +66,12 @@ async function bootstrap(): Promise<void> {
     const executions = new SqlExecutionRepository(client);
     const outbox = new SqlOutboxStore(client);
     const tenantId = process.env.TENANT_ID ?? "tenant-demo";
+    const knowledge = new SqlKnowledgeRepository(client);
+    // 首次启动播种默认农艺知识（迁移 061 已种种子，空表时回填保证开箱可用）
+    if ((await knowledge.count(tenantId)) === 0) {
+      const now = new Date().toISOString();
+      await knowledge.seed(DEFAULT_KNOWLEDGE.map((entry) => ({ ...entry, tenantId, createdAt: now, updatedAt: now })));
+    }
     const weatherUrl = process.env.WEATHER_SERVICE_URL ?? "http://127.0.0.1:3005";
     const fetchRainProbability = createRainProbabilityFetcher(weatherUrl);
     const fetchPlotArea = createPlotAreaFetcher(process.env.PLOT_SERVICE_URL ?? "http://127.0.0.1:3002");
@@ -74,7 +81,7 @@ async function bootstrap(): Promise<void> {
     const relay = new OutboxService(outbox, publisher, { tenantId, traceId: "decision-relay", producer: "decision" });
     relay.start();
     setDefaultPublisher(publisher);
-    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, outbox, publisher, tenantId, fetchRainProbability, fetchPlotArea, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
+    const server = createDecisionHttpServer({ rules, prescriptions, outcomes, executions, knowledge, outbox, publisher, tenantId, fetchRainProbability, fetchPlotArea, withTransaction: (run) => client.$transaction(run) } satisfies Partial<DecisionDependencies>);
     server.listen(port, "127.0.0.1", () => logger.info("decision-service HTTP 已启动（SQL 持久化）", { port }));
     // 消费控制服务的结单事件，把处方实际执行的水肥用量回流到 decision_prescription_executions；
     // 同时消费遥测越限事件（A18）：EC/pH 偏离生成保守配比调整处方，复用同一条消息表中继发布
