@@ -131,20 +131,23 @@ export class InMemoryPredictionRepository implements PredictionRepository {
   }
 }
 
+/** 查询执行器：客户端与事务共用 $queryRawUnsafe 这一最小能力面 */
+type QueryExecutor = Pick<PrismaClientLike, "$queryRawUnsafe">;
+
 /** SQL 实现：迁移 063 的 decision_predictions，唯一索引保证幂等 */
 export class SqlPredictionRepository implements PredictionRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
   async save(tx: Tx | undefined, input: CreatePredictionInput): Promise<{ record: PredictionRecord; inserted: boolean }> {
-    const client = tx ?? this.client;
-    const row = await this.insert(client, input);
+    const executor: QueryExecutor = tx ?? this.client;
+    const row = await this.insert(executor, input);
     if (row !== undefined) return { record: toRecord(row), inserted: true };
     // 冲突时返回既有行，inserted=false：扫描器据此不重复发布预警
-    const existing = await this.findByKey(client, input);
+    const existing = await this.findByKey(executor, input);
     return { record: toRecord(existing!), inserted: false };
   }
 
-  private async insert(client: PrismaClientLike, input: CreatePredictionInput): Promise<Record<string, unknown> | undefined> {
+  private async insert(executor: QueryExecutor, input: CreatePredictionInput): Promise<Record<string, unknown> | undefined> {
     const columns = [
       "id", "tenant_id", "plot_code", "season_id", "metric", "predicted_at", "horizon_hours",
       "predicted_value", "level", "unit", "basis", "inputs", "created_at",
@@ -158,7 +161,7 @@ export class SqlPredictionRepository implements PredictionRepository {
     if (input.threshold !== undefined) { columns.push("threshold"); values.push(input.threshold); }
     if (input.direction !== undefined) { columns.push("direction"); values.push(input.direction); }
     const placeholders = columns.map((_, index) => `$${index + 1}`).join(", ");
-    const rows = await client.$queryRawUnsafe(
+    const rows = await executor.$queryRawUnsafe(
       `INSERT INTO decision_predictions (${columns.join(", ")}) VALUES (${placeholders})
        ON CONFLICT (tenant_id, plot_code, metric, predicted_at) DO NOTHING RETURNING *`,
       ...values,
@@ -166,8 +169,8 @@ export class SqlPredictionRepository implements PredictionRepository {
     return rows[0];
   }
 
-  private async findByKey(client: PrismaClientLike, input: CreatePredictionInput): Promise<Record<string, unknown> | undefined> {
-    const rows = await client.$queryRawUnsafe(
+  private async findByKey(executor: QueryExecutor, input: CreatePredictionInput): Promise<Record<string, unknown> | undefined> {
+    const rows = await executor.$queryRawUnsafe(
       `SELECT * FROM decision_predictions
        WHERE tenant_id = $1 AND plot_code = $2 AND metric = $3 AND predicted_at = $4
        LIMIT 1`,

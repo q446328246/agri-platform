@@ -231,8 +231,17 @@ export function predictYield(
       predictedValue: -1,
       level: "INSUFFICIENT_DATA",
       unit: "千克/亩",
-      basis: `生育期「${latest?.stage ?? "未登记"}」未在进度口径内，不估算产量`,
+      basis: latest ? `生育期「${latest.stage}」未在进度口径内，不估算产量` : "未登记生育期，不估算产量",
       inputs: { stage: latest?.stage, progress: null },
+    };
+  }
+  if (!latest) {
+    return {
+      predictedValue: -1,
+      level: "INSUFFICIENT_DATA",
+      unit: "千克/亩",
+      basis: "未登记生育期，不估算产量",
+      inputs: { stage: null, progress },
     };
   }
   return {
