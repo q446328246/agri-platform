@@ -151,10 +151,10 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
         return;
       }
 
-      // 作业详情：作业 + 分步指令序列
-      const jobMatch = url.pathname.match(/^\/api\/v1\/tractor\/jobs\/([^/]+)$/);
+      // 作业详情：作业 + 分步指令序列（stop/resume 子路径共用同一作业标识提取）
+      const jobMatch = url.pathname.match(/^\/api\/v1\/tractor\/jobs\/([^/]+)(?:\/(?:stop|resume))?$/);
       const jobId = jobMatch?.[1] ? decodeURIComponent(jobMatch[1]) : undefined;
-      if (jobId && req.method === "GET") {
+      if (jobId && req.method === "GET" && url.pathname === `${API_PREFIX}/jobs/${jobId}`) {
         const job = await jobs.findJob(jobId);
         if (!job) { send(res, 404, null, traceId, "作业不存在"); return; }
         const stages = await jobs.listStages(job.id);
