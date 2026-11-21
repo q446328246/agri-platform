@@ -45,9 +45,11 @@ async function getJson(url: string, identity: Record<string, string> = SERVICE_I
   return response.json();
 }
 
-/** 环境变量数值解析：缺省或非法一律用缺省值 */
+/** 环境变量数值解析：缺省或非法一律用缺省值（空串解析为 0，必须先判空） */
 function envNumber(name: string, fallback: number): number {
-  const value = Number(process.env[name] ?? "");
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
