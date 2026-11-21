@@ -21,6 +21,7 @@
     { "path": "./apps/operation-service" },
     { "path": "./apps/platform-service" },
     { "path": "./apps/telemetry-service" },
+    { "path": "./apps/tractor-service" },
     { "path": "./apps/trace-service" },
     { "path": "./apps/video-service" },
     { "path": "./apps/weather-service" }

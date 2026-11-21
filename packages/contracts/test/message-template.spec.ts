@@ -101,6 +101,32 @@ describe("消息模板与去重键", () => {
     expect(pest?.content).toContain("预测 72分");
   });
 
+  it("拖拉机安全事件按类型定级，同现场同类一小时聚合", () => {
+    const breach = buildMessageDraft(
+      EventTopic.TractorSafetyEvent,
+      { parcelId: "P-9", deviceId: "tractor-001", kind: "GEOFENCE_BREACH", level: "CRITICAL", message: "作业轨迹越过地块边界 12 米", lng: 107.42, lat: 30.98, occurredAt: "2026-11-05T08:00:00.000Z" },
+      context,
+    );
+    expect(breach).toMatchObject({ type: "ALERT", level: "CRITICAL", plotCode: "P-9" });
+    expect(breach?.title).toBe("拖拉机安全告警：P-9 电子围栏越界");
+    expect(breach?.content).toContain("tractor-001");
+    expect(breach?.content).toContain("（107.42, 30.98）");
+
+    const sameHour = buildMessageDraft(
+      EventTopic.TractorSafetyEvent,
+      { ...breach && { parcelId: "P-9", deviceId: "tractor-001", kind: "GEOFENCE_BREACH", level: "CRITICAL", message: "再次越界", occurredAt: "2026-11-05T08:30:00.000Z" } },
+      context,
+    );
+    expect(sameHour?.dedupeKey).toBe(breach?.dedupeKey);
+    const otherKind = buildMessageDraft(
+      EventTopic.TractorSafetyEvent,
+      { parcelId: "P-9", deviceId: "tractor-001", kind: "ESTOP", level: "CRITICAL", message: "人工急停", occurredAt: "2026-11-05T08:40:00.000Z" },
+      context,
+    );
+    expect(otherKind?.title).toContain("急停触发");
+    expect(otherKind?.dedupeKey).not.toBe(breach?.dedupeKey);
+  });
+
   it("虫情识别按等级生成告警与消息", () => {
     const severe = buildMessageDraft(
       EventTopic.TelemetryPestDetected,
@@ -240,6 +266,7 @@ describe("消息模板与去重键", () => {
       EventTopic.TelemetryAiDetected,
       EventTopic.DecisionPrescriptionIssued,
       EventTopic.DecisionPredictionAlert,
+      EventTopic.TractorSafetyEvent,
       EventTopic.PlotCreated,
       EventTopic.ControlCommandTimeout,
       EventTopic.ControlIrrigationFinished,

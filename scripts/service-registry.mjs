@@ -13,6 +13,7 @@ const defaults = [
   ["message", 3012, "apps/message-service/dist/main.js"],
   ["file", 3013, "apps/file-service/dist/main.js"],
   ["platform", 3014, "apps/platform-service/dist/main.js"],
+  ["tractor", 3015, "apps/tractor-service/dist/main.js"],
   ["gateway", 8080, "apps/gateway-service/dist/main.js"],
 ];
 

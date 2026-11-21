@@ -50,6 +50,12 @@ export class MessageEventConsumer {
     await this.deliver(event);
   }
 
+  /** 拖拉机安全事件：作业前预检失败与作业期围栏越界/RTK 劣化/失联/急停 */
+  @registerHandler(EventTopic.TractorSafetyEvent)
+  async onTractorSafety(event: DomainEvent<unknown>): Promise<void> {
+    await this.deliver(event);
+  }
+
   /** 虫情识别：视频 AI 与田间上报共用，按发生等级生成告警或提醒 */
   @registerHandler(EventTopic.TelemetryPestDetected)
   async onPestDetected(event: DomainEvent<unknown>): Promise<void> {

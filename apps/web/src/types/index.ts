@@ -676,6 +676,60 @@ export interface PredictionRecord {
   createdAt: string
 }
 
+// 拖拉机作业（B2）：一次作业的编排留痕与分步指令
+export type TractorOperationType = 'SEEDING' | 'TILLAGE' | 'WEEDING'
+
+export type TractorJobStatus = 'PLANNED' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'ESTOPPED'
+
+export type TractorStageKind = 'TOOL_SWITCH' | 'OPERATION' | 'RETURN_HOME'
+
+export type TractorStageStatus = 'PENDING' | 'SENT' | 'DONE' | 'FAILED' | 'SKIPPED'
+
+export interface TractorJob {
+  id: string
+  tenantId: string
+  plotCode: string
+  deviceId: string
+  operationType: TractorOperationType
+  parameters: Record<string, unknown>
+  status: TractorJobStatus
+  currentStage: number
+  operator: string
+  reason: string
+  startedAt?: string
+  finishedAt?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TractorJobStage {
+  id: string
+  jobId: string
+  stage: TractorStageKind
+  commandType: string
+  commandId?: string
+  status: TractorStageStatus
+  detail: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type TractorSafetyKind = 'PRECHECK_FAIL' | 'GEOFENCE_BREACH' | 'RTK_QUALITY' | 'COMM_LOSS' | 'ESTOP'
+
+export interface TractorSafetyEvent {
+  id: string
+  tenantId: string
+  jobId?: string
+  plotCode: string
+  deviceId: string
+  kind: TractorSafetyKind
+  level: 'WARNING' | 'CRITICAL'
+  message: string
+  lng?: number
+  lat?: number
+  createdAt: string
+}
+
 // 权限目录分组
 export interface PermissionGroup {
   group: string

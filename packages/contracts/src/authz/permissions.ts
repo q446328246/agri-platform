@@ -37,6 +37,8 @@ export const PERMISSION_CATALOG: PermissionGroup[] = [
       { code: "device:control", name: "下发设备控制指令" },
       { code: "operation:read", name: "查询农事任务" },
       { code: "operation:write", name: "维护农事任务" },
+      { code: "tractor:read", name: "查询拖拉机作业" },
+      { code: "tractor:write", name: "下发拖拉机作业" },
     ],
   },
   { group: "智能决策", items: [{ code: "decision:read", name: "查看规则与处方" }, { code: "decision:write", name: "维护规则与处方" }, { code: "decision:knowledge", name: "维护农艺知识库" }] },
@@ -66,6 +68,8 @@ export type PermissionCode =
   | "device:control"
   | "operation:read"
   | "operation:write"
+  | "tractor:read"
+  | "tractor:write"
   | "decision:read"
   | "decision:write"
   | "decision:knowledge"

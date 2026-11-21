@@ -17,6 +17,7 @@ import type {
   BackupRecord, BackupRunResult,
   MonitorServiceStatus, MonitorRule, MonitorAlert,
   PredictionRecord, PredictionMetric, PredictionLevel,
+  TractorJob, TractorJobStage, TractorSafetyEvent, TractorOperationType, TractorJobStatus, TractorSafetyKind,
 } from '@/types'
 
 /** 剥掉查询参数里的 undefined/null/空串，避免发 ?keyword=&type= 这种无意义空条件 */
@@ -1132,6 +1133,33 @@ export const decisionApi = {
   /** 立即执行一轮全量预测（与定时扫描同一入口） */
   runPredictions(): Promise<{ status: string }> {
     return post<{ status: string }>('/decision/predictions/run', {})
+  }
+}
+
+export const tractorApi = {
+  /** 作业列表：按地块/设备/状态筛选 */
+  getJobs(params?: { plotCode?: string; deviceId?: string; status?: TractorJobStatus; page?: number; size?: number }): Promise<PageResult<TractorJob>> {
+    return get<PageResult<TractorJob>>('/tractor/jobs', cleanParams(params))
+  },
+  /** 作业详情：作业 + 分步指令序列 */
+  getJobDetail(id: string): Promise<{ job: TractorJob; stages: TractorJobStage[] }> {
+    return get<{ job: TractorJob; stages: TractorJobStage[] }>(`/tractor/jobs/${encodeURIComponent(id)}`)
+  },
+  /** 下发作业：服务端做安全预检，通过后排程并启动执行 */
+  createJob(data: { plotCode: string; deviceId: string; operationType: TractorOperationType; parameters: { areaMu: number; durationMin: number }; reason?: string }): Promise<TractorJob> {
+    return post<TractorJob>('/tractor/jobs', data)
+  },
+  /** 人工处置：暂停或急停 */
+  stopJob(id: string, emergency = false): Promise<TractorJob> {
+    return post<TractorJob>(`/tractor/jobs/${encodeURIComponent(id)}/stop`, { emergency })
+  },
+  /** 恢复作业：重新安全预检后从断点续跑 */
+  resumeJob(id: string): Promise<TractorJob> {
+    return post<TractorJob>(`/tractor/jobs/${encodeURIComponent(id)}/resume`, {})
+  },
+  /** 安全事件列表：作业前预检失败与作业期安全验证事件 */
+  getSafetyEvents(params?: { jobId?: string; plotCode?: string; kind?: TractorSafetyKind; page?: number; size?: number }): Promise<PageResult<TractorSafetyEvent>> {
+    return get<PageResult<TractorSafetyEvent>>('/tractor/safety-events', cleanParams(params))
   }
 }
 

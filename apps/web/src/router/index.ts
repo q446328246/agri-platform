@@ -124,6 +124,12 @@ const routes: RouteRecordRaw[] = [
             meta: { title: '控制指令', permission: 'device:read' }
           },
           {
+            path: 'tractor',
+            name: 'DeviceTractor',
+            component: () => import('@/views/device/Tractor.vue'),
+            meta: { title: '拖拉机作业', permission: 'tractor:read' }
+          },
+          {
             path: 'irrigation',
             name: 'DeviceIrrigation',
             component: () => import('@/views/irrigation/Index.vue'),

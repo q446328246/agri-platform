@@ -44,6 +44,7 @@ function defaultRoutes(): GatewayRoute[] {
     { prefix: "/api/v1/operations", target: process.env.OPERATION_SERVICE_URL ?? "http://127.0.0.1:3007" },
     { prefix: "/api/v1/control", target: process.env.CONTROL_SERVICE_URL ?? "http://127.0.0.1:3008" },
     { prefix: "/api/v1/decision", target: process.env.DECISION_SERVICE_URL ?? "http://127.0.0.1:3006" },
+    { prefix: "/api/v1/tractor", target: process.env.TRACTOR_SERVICE_URL ?? "http://127.0.0.1:3015" },
     { prefix: "/api/v1/finance", target: process.env.FINANCE_SERVICE_URL ?? "http://127.0.0.1:3010" },
     { prefix: "/api/v1/trace", target: process.env.TRACE_SERVICE_URL ?? "http://127.0.0.1:3011" },
     { prefix: "/api/v1/files", target: process.env.FILE_SERVICE_URL ?? "http://127.0.0.1:3013" },

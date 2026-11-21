@@ -37,6 +37,7 @@ const SERVICE_TARGETS: Array<{ target: string; label: string; envVar: string; po
   { target: "message", label: "消息中心服务", envVar: "MESSAGE_SERVICE_URL", port: 3012 },
   { target: "file", label: "文件服务", envVar: "FILE_SERVICE_URL", port: 3013 },
   { target: "platform", label: "平台管理服务", envVar: "PLATFORM_SERVICE_URL", port: 3014 },
+  { target: "tractor", label: "拖拉机作业服务", envVar: "TRACTOR_SERVICE_URL", port: 3015 },
   { target: "gateway", label: "API 网关", envVar: "GATEWAY_SERVICE_URL", port: 8080 },
 ];
 

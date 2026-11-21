@@ -618,6 +618,43 @@ importers:
         specifier: ^3.0.0
         version: 3.2.7(@types/node@24.19.2)(sass@1.107.1)(supports-color@8.1.1)(terser@5.51.2)
 
+  apps/tractor-service:
+    dependencies:
+      '@agri/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@agri/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@agri/mq':
+        specifier: workspace:*
+        version: link:../../packages/mq
+      '@agri/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@agri/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@nestjs/common':
+        specifier: ^11.2.8
+        version: 11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1)
+      reflect-metadata:
+        specifier: ^0.2.2
+        version: 0.2.2
+    devDependencies:
+      '@agri/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
+      '@agri/tsconfig':
+        specifier: workspace:*
+        version: link:../../packages/tsconfig
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@24.19.2)(sass@1.107.1)(supports-color@8.1.1)(terser@5.51.2)
+
   apps/video-service:
     dependencies:
       '@agri/config':

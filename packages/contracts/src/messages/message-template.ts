@@ -7,6 +7,7 @@ import type {
   PlotCreatedPayload,
   PredictionAlertPayload,
   PrescriptionIssuedPayload,
+  TractorSafetyEventPayload,
   ServiceDownPayload,
   ServiceRecoveredPayload,
   ThresholdBreachedPayload,
@@ -173,6 +174,40 @@ const predictionAlertTemplate: MessageTemplate<PredictionAlertPayload> = {
       plotCode: payload.parcelId,
       occurredAt,
       dedupeKey: `${EventTopic.DecisionPredictionAlert}:${payload.parcelId}:${payload.metric}:${hourOf(occurredAt)}`,
+    };
+  },
+};
+
+/**
+ * 拖拉机作业安全事件：作业前预检失败、作业中围栏越界、RTK 质量劣化、
+ * 通信失联、急停。安全事件必须让作业侧立即看到，一律按告警处理；
+ * 去重按「地块 + 设备 + 类型 + 小时」聚合，同一现场一小时内同类事件只提醒一次。
+ */
+const TRACTOR_SAFETY_LABELS: Record<TractorSafetyEventPayload["kind"], string> = {
+  PRECHECK_FAIL: "作业前预检失败",
+  GEOFENCE_BREACH: "电子围栏越界",
+  RTK_QUALITY: "RTK 定位质量劣化",
+  COMM_LOSS: "通信失联",
+  ESTOP: "急停触发",
+};
+
+const tractorSafetyTemplate: MessageTemplate<TractorSafetyEventPayload> = {
+  topic: EventTopic.TractorSafetyEvent,
+  label: "拖拉机安全告警",
+  type: "ALERT",
+  render(payload, context) {
+    const plotCode = payload.parcelId || "未绑定地块";
+    const kind = TRACTOR_SAFETY_LABELS[payload.kind] ?? payload.kind;
+    const position = payload.lng !== undefined && payload.lat !== undefined ? `，位置（${payload.lng}, ${payload.lat}）` : "";
+    const occurredAt = payload.occurredAt || context.occurredAt;
+    return {
+      type: "ALERT",
+      level: payload.level,
+      title: `拖拉机安全告警：${plotCode} ${kind}`,
+      content: `拖拉机 ${payload.deviceId} ${kind}（级别 ${payload.level}）：${payload.message}${position}。请立即核查现场与拖拉机作业状态。`,
+      plotCode: payload.parcelId,
+      occurredAt,
+      dedupeKey: `${EventTopic.TractorSafetyEvent}:${payload.parcelId}:${payload.deviceId}:${payload.kind}:${hourOf(occurredAt)}`,
     };
   },
 };
@@ -431,6 +466,7 @@ export const MESSAGE_TEMPLATES = {
   [EventTopic.TelemetryAiDetected]: aiDetectedTemplate,
   [EventTopic.DecisionPrescriptionIssued]: prescriptionTemplate,
   [EventTopic.DecisionPredictionAlert]: predictionAlertTemplate,
+  [EventTopic.TractorSafetyEvent]: tractorSafetyTemplate,
   [EventTopic.PlotCreated]: plotCreatedTemplate,
   [EventTopic.ControlCommandTimeout]: commandTimeoutTemplate,
   [EventTopic.ControlIrrigationFinished]: irrigationFinishedTemplate,

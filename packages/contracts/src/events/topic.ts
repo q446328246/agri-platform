@@ -12,6 +12,7 @@ export const EventTopic = {
   TelemetryAiDetected: "telemetry.ai.detected",
   DecisionPrescriptionIssued: "decision.prescription.issued",
   DecisionPredictionAlert: "decision.prediction.alert",
+  TractorSafetyEvent: "tractor.safety.event",
   OperationTaskCompleted: "operation.task.completed",
   ControlIrrigationFinished: "control.irrigation.finished",
   ControlFertilizationFinished: "control.fertilization.finished",
