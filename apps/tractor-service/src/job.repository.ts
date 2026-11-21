@@ -267,7 +267,9 @@ export class SqlTractorJobRepository implements TractorJobRepository {
       columns.push(column);
       const value = patch[key as keyof typeof patch];
       if (column === "parameters" && value !== undefined) values.push(JSON.stringify(value));
-      else if (value !== undefined) values.push(value instanceof Date ? value : new Date(value as string));
+      // 只有时间列转 Date；文本列原样下传，避免空串被 new Date("") 解析成无效时间
+      else if (key === "startedAt" || key === "finishedAt") values.push(value === undefined ? null : (value instanceof Date ? value : new Date(String(value))));
+      else values.push(value ?? null);
     }
     if (columns.length === 0) return this.findJob(id);
     columns.push("updated_at");
