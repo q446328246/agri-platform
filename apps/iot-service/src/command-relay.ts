@@ -29,10 +29,10 @@ export interface FieldCommand {
 export interface MqttCommandRelayOptions {
   devices: DeviceRepository;
   /** 控制服务地址，缺省 http://127.0.0.1:3008 */
-  controlUrl?: string;
+  controlUrl?: string | undefined;
   tenantId: string;
   /** 设备回调凭证，与 MqttBroker 转发同口径 */
-  deviceToken?: string;
+  deviceToken?: string | undefined;
   /** MQTT 指令发布器，由 MqttBroker 注入 */
   publishCommand: (deviceNo: string, command: unknown) => void;
   /** 轮询间隔（毫秒），缺省 2000 */
