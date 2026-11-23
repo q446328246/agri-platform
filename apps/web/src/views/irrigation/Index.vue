@@ -10,7 +10,18 @@
               <el-input-number v-model="form.flowM3h" :min="1" :max="500" :step="1" />
               <span class="hint">立方米/小时</span>
             </el-form-item>
-            <el-form-item label="执行设备"><el-input v-model="form.deviceId" placeholder="阀门或首部控制器标识" /></el-form-item>
+            <el-form-item label="执行设备">
+              <el-select
+                v-model="form.deviceId"
+                placeholder="选择水肥设备"
+                filterable
+                clearable
+                :loading="devicesLoading"
+                style="width: 100%"
+              >
+                <el-option v-for="device in deviceOptions" :key="device.id" :label="device.label" :value="device.id" />
+              </el-select>
+            </el-form-item>
           </el-form>
 
           <el-table :data="form.zones" border size="small" class="zone-table">
@@ -70,14 +81,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart, BarChart } from 'echarts/charts'
 import { TooltipComponent, LegendComponent, GridComponent } from 'echarts/components'
-import { controlApi } from '@/api'
+import { controlApi, iotApi } from '@/api'
 import type { IrrigationPlan } from '@/api'
 
 /**
@@ -92,7 +103,7 @@ use([CanvasRenderer, LineChart, BarChart, TooltipComponent, LegendComponent, Gri
 const form = reactive({
   plotCode: '',
   flowM3h: 20,
-  deviceId: 'device-valve-001',
+  deviceId: '',
   withRecipe: false,
   zones: [
     { zoneCode: 'A', areaMu: 10, targetMm: 10 },
@@ -105,6 +116,40 @@ const form = reactive({
 const plan = ref<IrrigationPlan | null>(null)
 const calculating = ref(false)
 const dispatching = ref(false)
+
+/**
+ * 执行设备选择：从设备台账按当前指令类型筛出可执行的水肥设备。
+ * 口径与控制侧自动指令的设备推断同源——灌溉取灌溉泵站/灌溉阀门，施肥取水肥阀；
+ * 填了地块编码就按地块过滤，避免选到别的地块的设备。
+ */
+const deviceOptions = ref<Array<{ id: string; label: string }>>([])
+const devicesLoading = ref(false)
+
+const eligibleDeviceTypes = computed(() =>
+  form.withRecipe ? ['FERTILIZER_VALVE'] : ['IRRIGATION_PUMP', 'IRRIGATION_VALVE']
+)
+
+async function loadDevices() {
+  devicesLoading.value = true
+  try {
+    const page = await iotApi.getDevices({
+      ...(form.plotCode.trim() ? { plotCode: form.plotCode.trim() } : {}),
+      size: 200,
+    })
+    const options = (page.items ?? [])
+      .filter((device) => eligibleDeviceTypes.value.includes(device.type))
+      .map((device) => ({ id: device.id, label: `${device.name || device.deviceNo}（${device.deviceNo}）` }))
+    deviceOptions.value = options
+    // 指令类型或地块变了，原先选中的设备可能已不在候选里，清掉避免拿旧设备下发
+    if (form.deviceId && !options.some((device) => device.id === form.deviceId)) form.deviceId = ''
+  } catch {
+    deviceOptions.value = []
+  } finally {
+    devicesLoading.value = false
+  }
+}
+
+watch([() => form.withRecipe, () => form.plotCode], loadDevices, { immediate: true })
 
 const chartOption = computed(() => ({
   tooltip: { trigger: 'axis' },
@@ -153,7 +198,7 @@ async function calculate() {
 async function dispatch() {
   if (!plan.value) return
   if (!form.deviceId.trim()) {
-    ElMessage.warning('请填写执行设备标识')
+    ElMessage.warning('请选择执行设备')
     return
   }
   dispatching.value = true
