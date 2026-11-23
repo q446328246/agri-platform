@@ -123,16 +123,43 @@ describe("作业执行器（B2）", () => {
       parameters: { areaMu: 10, durationMin: 20 }, operator: "user-1", reason: "测试",
     });
     for (const stage of buildJobStages("SEEDING", { areaMu: 10, durationMin: 20 })) {
-      await jobs.addStage(undefined, { jobId: job.id, stage: stage.stage, commandType: stage.commandType, timeoutMs: stage.timeoutMs });
+      await jobs.addStage(undefined, { jobId: job.id, stage: stage.stage, commandType: stage.commandType, parameters: stage.parameters, timeoutMs: stage.timeoutMs });
     }
     await executor.run(job);
 
     const finished = await jobs.findJob(job.id);
     expect(finished?.status).toBe("COMPLETED");
     expect(dispatched.map((input) => input.type)).toEqual(["TOOL_SWITCH", "SEEDING", "RETURN_HOME"]);
-    // 作业步参数带包络，联动步不带
+    // 每步下发带各自持久化的参数：换具带机具编码，作业带面积与时长，返航不带参数
     expect(dispatched[1]!.parameters).toMatchObject({ areaMu: 10, durationMin: 20 });
-    expect(dispatched[0]!.parameters).toEqual({});
+    expect(dispatched[0]!.parameters).toEqual({ toolCode: "SEEDER" });
+    expect(dispatched[2]!.parameters).toEqual({});
+  });
+
+  it("分步下发前作业被暂停时停止推进并在分步留痕，不再下发后续步骤", async () => {
+    const { jobs, executor, dispatched, waitCommand } = setup();
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 10, durationMin: 20 }, operator: "user-1", reason: "",
+    });
+    for (const stage of buildJobStages("SEEDING", { areaMu: 10, durationMin: 20 })) {
+      await jobs.addStage(undefined, { jobId: job.id, stage: stage.stage, commandType: stage.commandType, parameters: stage.parameters, timeoutMs: stage.timeoutMs });
+    }
+    // 第一步收口时把作业暂停，模拟安全监测或人工处置抢先改了状态
+    waitCommand.mockImplementationOnce(async () => {
+      await jobs.updateJob(undefined, job.id, { status: "PAUSED", reason: "人工暂停" });
+      return "DONE" as const;
+    });
+
+    await executor.run(job);
+
+    const finished = await jobs.findJob(job.id);
+    expect(finished?.status).toBe("PAUSED");
+    expect(dispatched.map((input) => input.type)).toEqual(["TOOL_SWITCH"]);
+    // 未下发的那一步仍为待下发，并在分步备注里留下停止原因
+    const stages = await jobs.listStages(job.id);
+    expect(stages[1]!.status).toBe("PENDING");
+    expect(stages[1]!.detail).toContain("作业状态为 PAUSED");
   });
 
   it("下发被拒即收口作业为失败，不继续下一步", async () => {
@@ -142,7 +169,7 @@ describe("作业执行器（B2）", () => {
       tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "TILLAGE",
       parameters: { areaMu: 10, durationMin: 20 }, operator: "user-1", reason: "",
     });
-    await jobs.addStage(undefined, { jobId: job.id, stage: "TOOL_SWITCH", commandType: "TOOL_SWITCH", timeoutMs: 1000 });
+    await jobs.addStage(undefined, { jobId: job.id, stage: "TOOL_SWITCH", commandType: "TOOL_SWITCH", parameters: { toolCode: "PLOW" }, timeoutMs: 1000 });
     await executor.run(job);
     const finished = await jobs.findJob(job.id);
     expect(finished?.status).toBe("FAILED");

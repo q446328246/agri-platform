@@ -72,7 +72,9 @@ function stageTimeoutMs(detail: string): number {
 
 /**
  * 作业执行器：把分步计划逐条下发给控制服务，等待每步收口再推进下一步。
- * 任一步下发被拒或收口失败即收口作业为 FAILED 并留痕，绝不带着半步状态继续。
+ * 每步下发前先复查作业状态——作业可能已被安全监测或人工处置改了状态，
+ * 非 RUNNING 就在本步留痕后退出；任一步下发被拒或收口失败即收口作业为 FAILED，
+ * 绝不带着半步状态继续。
  */
 export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
   const onError = deps.onError ?? ((error: Error, phase: string): void => { console.error("[tractor] 作业执行失败", { phase, message: error.message }); });
@@ -87,11 +89,19 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       for (let index = job.currentStage; index < stages.length; index += 1) {
         const stage = stages[index]!;
         if (stage.status === "DONE") { completed = index + 1; continue; }
+        // 每步下发前复查作业状态：非 RUNNING（被暂停/急停）就停，在本步留痕后退出，不再下发
+        const current = await deps.jobs.findJob(job.id);
+        if (!current || current.status !== "RUNNING") {
+          await deps.jobs.updateStage(undefined, stage.id, {
+            detail: `分步 ${stage.stage} 下发前作业状态为 ${current?.status ?? "作业已不存在"}，本步不再下发`,
+          });
+          return;
+        }
         const dispatched = await deps.dispatch({
           deviceId: job.deviceId,
           plotCode: job.plotCode,
           type: stage.commandType,
-          parameters: stage.stage === "OPERATION" ? { ...job.parameters } : {},
+          parameters: stage.parameters,
           operator: job.operator,
         });
         if (!dispatched) {

@@ -43,6 +43,8 @@ export interface TractorJobStage {
   commandType: string;
   commandId?: string;
   status: TractorStageStatus;
+  /** 该步的下发参数（换具带机具编码、作业带面积与时长），执行器据此下发 */
+  parameters: Record<string, unknown>;
   /** 执行备注：下发结果、等待超时等 */
   detail: string;
   createdAt: string;
@@ -63,6 +65,8 @@ export interface CreateTractorStageInput {
   jobId: string;
   stage: TractorStageKind;
   commandType: string;
+  /** 该步的下发参数，落库后执行器下发时原样带上 */
+  parameters: Record<string, unknown>;
   /** 执行超时（毫秒），执行器据此判定等待收口 */
   timeoutMs: number;
 }
@@ -111,6 +115,7 @@ function toStage(row: Record<string, unknown>): TractorJobStage {
     stage: String(row.stage) as TractorStageKind,
     commandType: String(row.command_type),
     status: String(row.status) as TractorStageStatus,
+    parameters: (row.parameters ?? {}) as Record<string, unknown>,
     detail: String(row.detail ?? ""),
     createdAt: toIsoTimestamp(row.created_at),
     updatedAt: toIsoTimestamp(row.updated_at),
@@ -146,6 +151,7 @@ export class InMemoryTractorJobRepository implements TractorJobRepository {
       stage: input.stage,
       commandType: input.commandType,
       status: "PENDING",
+      parameters: input.parameters,
       detail: JSON.stringify({ timeoutMs: input.timeoutMs }),
       createdAt: now,
       updatedAt: now,
@@ -210,10 +216,10 @@ export class SqlTractorJobRepository implements TractorJobRepository {
     const client = tx ?? this.client;
     const now = new Date();
     const rows = await client.$queryRawUnsafe(
-      `INSERT INTO tractor_job_stages (id, job_id, stage, command_type, status, detail, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, 'PENDING', $5::text, $6, $6)
+      `INSERT INTO tractor_job_stages (id, job_id, stage, command_type, parameters, status, detail, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, 'PENDING', $6::text, $7, $7)
        RETURNING *`,
-      ulid(), input.jobId, input.stage, input.commandType, JSON.stringify({ timeoutMs: input.timeoutMs }), now,
+      ulid(), input.jobId, input.stage, input.commandType, JSON.stringify(input.parameters), JSON.stringify({ timeoutMs: input.timeoutMs }), now,
     ) as Record<string, unknown>[];
     return toStage(rows[0]!);
   }
@@ -288,12 +294,13 @@ export class SqlTractorJobRepository implements TractorJobRepository {
     const values: unknown[] = [];
     const map: Array<[keyof TractorJobStage, string]> = [
       ["stage", "stage"], ["commandType", "command_type"], ["commandId", "command_id"],
-      ["status", "status"], ["detail", "detail"],
+      ["status", "status"], ["parameters", "parameters"], ["detail", "detail"],
     ];
     for (const [key, column] of map) {
       if (!(key in patch)) continue;
       columns.push(column);
-      values.push(patch[key as keyof typeof patch] ?? null);
+      if (column === "parameters") values.push(JSON.stringify(patch.parameters ?? {}));
+      else values.push(patch[key as keyof typeof patch] ?? null);
     }
     if (columns.length === 0) {
       const rows = await client.$queryRawUnsafe(`SELECT * FROM tractor_job_stages WHERE id = $1 LIMIT 1`, id) as Record<string, unknown>[];

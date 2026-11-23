@@ -11,7 +11,8 @@
 --    PAUSED 可复核后恢复，ESTOPPED 为终态须新开作业；
 -- 3. tractor_safety_events 记录作业前预检失败与作业期安全验证事件
 --    （围栏越界/RTK 质量劣化/通信失联/急停），与消息中心事件同口径留痕；
--- 4. 全部可重复执行（IF NOT EXISTS），时间列统一 TIMESTAMPTZ。
+-- 4. 建表全部可重复执行（IF NOT EXISTS）；演示种子按 056 遥测种子同口径裸插入，
+--    迁移经 schema_migrations 只执行一次，重复执行仅在全新库重建时发生。
 
 CREATE TABLE IF NOT EXISTS tractor_jobs (
   id            TEXT PRIMARY KEY,
@@ -44,6 +45,8 @@ CREATE TABLE IF NOT EXISTS tractor_job_stages (
   stage        TEXT NOT NULL CHECK (stage IN ('TOOL_SWITCH', 'OPERATION', 'RETURN_HOME')),
   /** 控制侧指令类型，与 stage 对应 */
   command_type TEXT NOT NULL,
+  /** 该步的下发参数（换具带机具编码、作业带面积与时长），执行器下发时原样带上 */
+  parameters   JSONB NOT NULL DEFAULT '{}'::jsonb,
   /** 控制服务指令标识，下发后回填 */
   command_id   TEXT,
   status       TEXT NOT NULL CHECK (status IN ('PENDING', 'SENT', 'DONE', 'FAILED', 'SKIPPED')),
@@ -83,30 +86,30 @@ UPDATE devices
  WHERE device_no = 'DZ-T-001' AND type = 'AUTO_TRACTOR';
 
 INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at)
-SELECT 'b2-rtk-001', 'device-tractor-001', '511723-000001-03-00010-0000-U', 'rtkLongitude',
+SELECT 'b2-rtk-001', 'device-tractor-001', '511723-000001-02-00010-0000-Z', 'rtkLongitude',
        (geom->'coordinates'->0->0->0)::numeric, 'deg', now() - INTERVAL '10 minutes'
-  FROM plot_records WHERE parcel_code = '511723-000001-03-00010-0000-U'
-ON CONFLICT (id) DO NOTHING;
+  FROM plot_records WHERE parcel_code = '511723-000001-02-00010-0000-Z'
+;
 
 INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at)
-SELECT 'b2-rtk-002', 'device-tractor-001', '511723-000001-03-00010-0000-U', 'rtkLatitude',
+SELECT 'b2-rtk-002', 'device-tractor-001', '511723-000001-02-00010-0000-Z', 'rtkLatitude',
        (geom->'coordinates'->0->0->1)::numeric, 'deg', now() - INTERVAL '10 minutes'
-  FROM plot_records WHERE parcel_code = '511723-000001-03-00010-0000-U'
-ON CONFLICT (id) DO NOTHING;
+  FROM plot_records WHERE parcel_code = '511723-000001-02-00010-0000-Z'
+;
 
 INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at)
-SELECT 'b2-rtk-003', 'device-tractor-001', '511723-000001-03-00010-0000-U', 'rtkLongitude',
+SELECT 'b2-rtk-003', 'device-tractor-001', '511723-000001-02-00010-0000-Z', 'rtkLongitude',
        (geom->'coordinates'->0->0->0)::numeric, 'deg', now() - INTERVAL '2 minutes'
-  FROM plot_records WHERE parcel_code = '511723-000001-03-00010-0000-U'
-ON CONFLICT (id) DO NOTHING;
+  FROM plot_records WHERE parcel_code = '511723-000001-02-00010-0000-Z'
+;
 
 INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at)
-SELECT 'b2-rtk-004', 'device-tractor-001', '511723-000001-03-00010-0000-U', 'rtkLatitude',
+SELECT 'b2-rtk-004', 'device-tractor-001', '511723-000001-02-00010-0000-Z', 'rtkLatitude',
        (geom->'coordinates'->0->0->1)::numeric, 'deg', now() - INTERVAL '2 minutes'
-  FROM plot_records WHERE parcel_code = '511723-000001-03-00010-0000-U'
-ON CONFLICT (id) DO NOTHING;
+  FROM plot_records WHERE parcel_code = '511723-000001-02-00010-0000-Z'
+;
 
 INSERT INTO telemetry_readings (id, device_id, plot_code, metric, value, unit, recorded_at)
-VALUES ('b2-rtk-005', 'device-tractor-001', '511723-000001-03-00010-0000-U', 'rtkHdop', 1.2, 'HDOP', now() - INTERVAL '2 minutes'),
-       ('b2-rtk-006', 'device-tractor-001', '511723-000001-03-00010-0000-U', 'rtkFix', 1, 'FIX', now() - INTERVAL '2 minutes')
-ON CONFLICT (id) DO NOTHING;
+VALUES ('b2-rtk-005', 'device-tractor-001', '511723-000001-02-00010-0000-Z', 'rtkHdop', 1.2, 'HDOP', now() - INTERVAL '2 minutes'),
+       ('b2-rtk-006', 'device-tractor-001', '511723-000001-02-00010-0000-Z', 'rtkFix', 1, 'FIX', now() - INTERVAL '2 minutes')
+;

@@ -124,7 +124,10 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
           reason: text(body.reason) || "人工下发作业",
         });
         for (const stage of stages) {
-          await jobs.addStage(undefined, { jobId: job.id, stage: stage.stage, commandType: stage.commandType, timeoutMs: stage.timeoutMs });
+          await jobs.addStage(undefined, {
+            jobId: job.id, stage: stage.stage, commandType: stage.commandType,
+            parameters: stage.parameters, timeoutMs: stage.timeoutMs,
+          });
         }
         // 执行在后台推进，接口立即返回排程结果
         if (executor) void executor.run(job);
