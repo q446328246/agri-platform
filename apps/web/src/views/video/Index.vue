@@ -435,7 +435,7 @@ import type { AiEventType, ArchiveSource, ArchiveStatus, Camera, PtzAction, PtzC
 
 /** 播放状态：加载中、播放中、加载失败、未开始 */
 type PlayState = 'loading' | 'playing' | 'error' | 'idle'
-type TabName = 'live' | 'recordings' | 'archives' | 'ai' | 'ptz'
+type TabName = 'live' | 'recordings' | 'archives' | 'ai' | 'ptz' | 'cameras'
 
 const PTZ_LABELS: Record<string, string> = { LEFT: '左转', RIGHT: '右转', UP: '上仰', DOWN: '下俯', ZOOM_IN: '放大', ZOOM_OUT: '缩小', STOP: '停止' }
 const PTZ_STATUS_LABELS: Record<string, string> = { QUEUED: '已排队', SENT: '已下发', FAILED: '失败' }
