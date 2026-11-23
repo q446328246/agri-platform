@@ -63,12 +63,15 @@ function isNonNegativeNumber(value: unknown): value is number {
  * @param event 领域事件
  * @param command 指令类型与缘由
  * @param parameters 设备执行参数
+ * @param deviceId 目标设备标识：自动指令必须落到台账里的真实设备，
+ * 平台侧不产生 auto-* 伪设备——伪设备没有领取方，指令会永远停在 QUEUED
  */
 function buildCommand(
   event: DomainEvent,
   type: ControlCommandType,
   reason: string,
   parameters: Record<string, unknown>,
+  deviceId: string,
 ): ControlCommand {
   const plotCode = requireParcelId((event.payload as { parcelId?: unknown }).parcelId);
   if (typeof event.eventId !== "string" || !event.eventId.trim()) throw new Error("自动控制事件 eventId 不能为空");
@@ -76,10 +79,11 @@ function buildCommand(
   // 否则现场网关取不到 plan，自动指令一律被判「不知道开多久」而拒执行
   const plan = executionPlanOf(type, parameters);
   return {
-    id: `CTL-${event.eventId}`,
+    // 同一事件多设备建单时按设备加后缀，保持指令标识唯一
+    id: `CTL-${event.eventId}-${deviceId}`,
     // 归属跟着事件信封走：自动指令由哪个租户的事件触发就记在哪个租户名下
     tenantId: event.tenantId,
-    deviceId: `auto-${plotCode}`,
+    deviceId,
     plotCode,
     operatorId: AUTO_OPERATOR,
     type,
@@ -92,6 +96,12 @@ function buildCommand(
     createdAt: event.occurredAt,
   };
 }
+
+/** 水肥指令类型 → 可执行该动作的设备类型（与 command-spec 的设备推断口径同源） */
+const DEVICES_BY_COMMAND: Record<string, readonly string[]> = {
+  IRRIGATION: ["IRRIGATION_PUMP", "IRRIGATION_VALVE"],
+  FERTILIZATION: ["FERTILIZER_VALVE"],
+};
 
 /**
  * 处方明细 → 现场执行分区。
@@ -138,7 +148,21 @@ export class ControlCommandConsumer {
   constructor(
     private readonly commands: ControlCommandRepository,
     private readonly supplementIrrigationMm: number = DEFAULT_SUPPLEMENT_IRRIGATION_MM,
+    /**
+     * 自动指令目标设备解析：按地块取可执行该动作的真实设备。
+     * 缺省回落 auto-* 伪设备（仅供未装配解析器的旧路径，平台部署必须注入，
+     * 否则自动指令没有领取方，永远停在 QUEUED 直到超时收口）。
+     */
+    private readonly resolveDevices?: (plotCode: string, commandType: ControlCommandType) => Promise<Array<{ id: string }>>,
+    /** 自动指令跳过建单的原因回调（如地块没有可执行设备），缺省静默 */
+    private readonly onSkip?: (reason: string) => void,
   ) {}
+
+  /** 解析目标设备；未注入解析器时维持 auto-* 伪设备旧口径 */
+  private async devicesFor(commandType: ControlCommandType, plotCode: string): Promise<Array<{ id: string }>> {
+    if (!this.resolveDevices) return [{ id: `auto-${plotCode}` }];
+    return this.resolveDevices(plotCode, commandType);
+  }
 
   /**
    * 遥测越限：土壤含水率低于下限自动补灌，高于上限自动停灌。
@@ -163,20 +187,28 @@ export class ControlCommandConsumer {
     const zones = areaMu === undefined
       ? undefined
       : [{ zoneCode: payload.gridCode?.trim() || payload.parcelId.trim(), areaMu, targetMm: quotaMm }];
-    await this.commands.create(
-      buildCommand(event, "IRRIGATION", `土壤含水率 ${payload.value} 低于阈值 ${payload.threshold}，自动补灌`, {
-        source: "threshold",
-        metric: payload.metric,
-        value: payload.value,
-        threshold: payload.threshold,
-        quotaMm,
-        gridCode: payload.gridCode ?? "",
-        ...(areaMu === undefined ? {} : { areaMu }),
-        ...(zones === undefined
-          ? { envelopeBlocked: "越限补灌未带出地块台账面积，无法现算计划水量与阀门开启时长，需人工确认后下发" }
-          : { zones }),
-      }),
-    );
+    const parameters: Record<string, unknown> = {
+      source: "threshold",
+      metric: payload.metric,
+      value: payload.value,
+      threshold: payload.threshold,
+      quotaMm,
+      gridCode: payload.gridCode ?? "",
+      ...(areaMu === undefined ? {} : { areaMu }),
+      ...(zones === undefined
+        ? { envelopeBlocked: "越限补灌未带出地块台账面积，无法现算计划水量与阀门开启时长，需人工确认后下发" }
+        : { zones }),
+    };
+    const reason = `土壤含水率 ${payload.value} 低于阈值 ${payload.threshold}，自动补灌`;
+    const devices = await this.devicesFor("IRRIGATION", payload.parcelId.trim());
+    if (devices.length === 0) {
+      this.onSkip?.(`地块 ${payload.parcelId} 没有可执行补灌的水肥设备，自动补灌指令不建单`);
+      return;
+    }
+    // 逐设备建单：每台水肥设备各领一条，包络参数一致，设备标识各不相同
+    for (const device of devices) {
+      await this.commands.create(buildCommand(event, "IRRIGATION", reason, parameters, device.id));
+    }
   }
 
   /**
@@ -229,21 +261,30 @@ export class ControlCommandConsumer {
     const type = COMMAND_BY_PLAN[payload.planType]!;
     const first = items[0]!;
     const execution = prescriptionExecution(payload, items, plotCode);
-    await this.commands.create(
-      buildCommand(event, type, `${PLAN_LABELS[payload.planType]}处方下发：共 ${items.length} 项明细`, {
-        source: "prescription",
-        ...(payload.prescriptionId ? { prescriptionId: payload.prescriptionId } : {}),
-        seasonId: payload.seasonId,
-        planType: payload.planType,
-        itemCount: items.length,
-        items,
-        ...(execution.areaMu === undefined ? {} : { areaMu: execution.areaMu }),
-        ...(execution.zones === undefined ? {} : { zones: execution.zones }),
-        ...(execution.envelopeBlocked === undefined ? {} : { envelopeBlocked: execution.envelopeBlocked }),
-        // 兼容旧的单项参数读取方式，多项必须使用完整 items。
-        ...(items.length === 1 ? { materialCode: first.materialCode, dosage: first.dosage } : {}),
-      }),
-    );
+    const devices = await this.devicesFor(type, plotCode);
+    if (devices.length === 0) {
+      this.onSkip?.(`地块 ${plotCode} 没有可执行${PLAN_LABELS[payload.planType]}的水肥设备，处方指令不建单`);
+      return;
+    }
+    const parameters: Record<string, unknown> = {
+      source: "prescription",
+      ...(payload.prescriptionId ? { prescriptionId: payload.prescriptionId } : {}),
+      seasonId: payload.seasonId,
+      planType: payload.planType,
+      itemCount: items.length,
+      items,
+      ...(execution.areaMu === undefined ? {} : { areaMu: execution.areaMu }),
+      ...(execution.zones === undefined ? {} : { zones: execution.zones }),
+      ...(execution.envelopeBlocked === undefined ? {} : { envelopeBlocked: execution.envelopeBlocked }),
+      // 兼容旧的单项参数读取方式，多项必须使用完整 items。
+      ...(items.length === 1 ? { materialCode: first.materialCode, dosage: first.dosage } : {}),
+    };
+    // 逐设备建单：同一处方在多台水肥设备上各执行一份
+    for (const device of devices) {
+      await this.commands.create(
+        buildCommand(event, type, `${PLAN_LABELS[payload.planType]}处方下发：共 ${items.length} 项明细`, parameters, device.id),
+      );
+    }
   }
 }
 
@@ -254,6 +295,13 @@ export interface ControlConsumerOptions {
   pollIntervalMs?: number;
   /** 越限补灌定额（毫米）：D3 口径一固定补灌量，缺省 DEFAULT_SUPPLEMENT_IRRIGATION_MM，按土壤质地与作物需水调整 */
   supplementIrrigationMm?: number;
+  /**
+   * 自动指令目标设备解析：按地块取可执行该动作的真实水肥设备。
+   * 平台部署必须注入；缺省回落 auto-* 伪设备（无领取方，仅保留旧路径兼容）。
+   */
+  resolveDevices?: (plotCode: string, commandType: ControlCommandType) => Promise<Array<{ id: string }>>;
+  /** 自动指令跳过建单的原因回调（如地块没有可执行设备），缺省静默 */
+  onSkip?: (reason: string) => void;
   /** 处理失败回调，缺省静默由下一轮重试 */
   onError?: (topic: string, eventId: string, error: Error, attempt: number) => void;
 }
@@ -277,6 +325,8 @@ export function createControlEventConsumer(
   const handler = new ControlCommandConsumer(
     commands,
     options.supplementIrrigationMm ?? DEFAULT_SUPPLEMENT_IRRIGATION_MM,
+    options.resolveDevices,
+    options.onSkip,
   );
   const registrations = buildHandlers(handler);
   for (const registration of registrations) {

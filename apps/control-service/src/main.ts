@@ -1,5 +1,6 @@
 import "reflect-metadata";
 
+import { ALL_PERMISSIONS } from "@agri/contracts";
 import { PgClientAdapter, resolveDatabaseUrl } from "@agri/db";
 import { EventLogPublisher, InMemoryEventLogStore, OutboxService, PgEventLogStore } from "@agri/mq";
 import type { EventLogStore } from "@agri/mq";
@@ -18,6 +19,39 @@ import { ControlReceiptSweeper } from "./receipt-sweeper.js";
 function parseEnvNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** 服务间后台调用身份：部署环境服务侧守卫强制鉴权，以控制服务自标识并持全权限 */
+const SERVICE_IDENTITY: Record<string, string> = { "x-user-id": "control-service", "x-permissions": ALL_PERMISSIONS };
+
+/** 水肥指令类型 → 可执行该动作的设备类型（与 command-spec 的设备推断口径同源） */
+const DEVICES_BY_COMMAND: Record<string, readonly string[]> = {
+  IRRIGATION: ["IRRIGATION_PUMP", "IRRIGATION_VALVE"],
+  FERTILIZATION: ["FERTILIZER_VALVE"],
+};
+
+/**
+ * 自动指令目标设备解析：按地块向 iot-service 设备台账取可执行的真实水肥设备。
+ * 自动指令必须落到台账设备——auto-* 伪设备没有领取方，指令会永远停在 QUEUED。
+ * 拉取失败返回空集，消费方按「无设备不建单」留痕，不猜一台设备。
+ */
+function createDeviceResolver(iotUrl: string): (plotCode: string, commandType: string) => Promise<Array<{ id: string }>> {
+  return async (plotCode, commandType) => {
+    const types = DEVICES_BY_COMMAND[commandType] ?? [];
+    try {
+      const response = await fetch(`${iotUrl}/api/v1/devices?plotCode=${encodeURIComponent(plotCode)}&size=200`, {
+        headers: SERVICE_IDENTITY,
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!response.ok) return [];
+      const payload = (await response.json()) as { items?: Array<{ id?: string; type?: string }> };
+      return (payload.items ?? [])
+        .filter((device) => types.includes(device.type ?? ""))
+        .map((device) => ({ id: String(device.id) }));
+    } catch {
+      return [];
+    }
+  };
 }
 
 /**
@@ -68,6 +102,9 @@ async function bootstrap(): Promise<void> {
     pollIntervalMs,
     // 越限补灌定额（D3 口径一）：缺省 15mm，在确认的 10–20 范围内，按土壤质地与作物需水调整
     supplementIrrigationMm: parseEnvNumber(process.env.AUTO_SUPPLEMENT_IRRIGATION_MM, 15),
+    // 自动指令解析真实水肥设备逐台建单，不再产生无领取方的 auto-* 伪设备指令
+    resolveDevices: createDeviceResolver(process.env.IOT_SERVICE_URL ?? "http://127.0.0.1:3003"),
+    onSkip: (reason) => console.warn(`[control-service] 自动指令未建单：${reason}`),
     onError: (topic, eventId, error, attempt) => {
       console.error(`[control-service] 事件处理失败 topic=${topic} eventId=${eventId} attempt=${attempt}`, error.message);
     },

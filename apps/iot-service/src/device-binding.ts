@@ -13,8 +13,9 @@ import { MODBUS_TCP_DEFAULT_PORT, MODBUS_TCP_DEFAULT_TIMEOUT_MS } from "./modbus
  * 网关按 key 取用。不同厂家的点位对不上时新增一个剖面 key，而不是在业务代码里散写地址常量。
  */
 
-/** 接入协议：HTTP 沿用既有「设备等录回调」，MODBUS_TCP 由 iot-service 现场网关主动轮询下发 */
-export const DEVICE_PROTOCOLS = ["HTTP", "MODBUS_TCP"] as const;
+/** 接入协议：HTTP 沿用既有「设备等录回调」，MODBUS_TCP 由 iot-service 现场网关主动轮询下发，
+ *  MQTT 由设备订阅平台主题直连（遥测上报与指令下发同链路，B2 拖拉机等设备走此协议） */
+export const DEVICE_PROTOCOLS = ["HTTP", "MODBUS_TCP", "MQTT"] as const;
 export type DeviceProtocol = (typeof DEVICE_PROTOCOLS)[number];
 
 /** 缺省协议：既有台账与存量行都是回调式接入，不因为本迁移改变行为 */
@@ -27,8 +28,9 @@ export const DEFAULT_DEVICE_PROTOCOL: DeviceProtocol = "HTTP";
  * 其余协议由平台侧网关主动连过去，必须给出地址与剖面。
  * 建档校验、错误文案与前端表单都问这一个函数，避免「后端要不要绑定」和「界面显示不显示绑定」各判一次。
  */
+/** 只有现场总线协议需要 Modbus 绑定；HTTP 回调与 MQTT 直连都不需要 */
 export function protocolRequiresBinding(protocol: DeviceProtocol): boolean {
-  return protocol !== DEFAULT_DEVICE_PROTOCOL;
+  return protocol === "MODBUS_TCP";
 }
 
 /** Modbus 单元标识缺省值：直连从站时手册常写 1，串口网关下挂多台时逐台不同 */
@@ -106,6 +108,7 @@ export const MODBUS_PROFILE_KEYS = Object.keys(MODBUS_PROFILES);
 export const DEVICE_PROTOCOL_LABELS: Record<DeviceProtocol, string> = {
   HTTP: "设备回调（设备自己上报）",
   MODBUS_TCP: "现场总线 Modbus TCP（平台主动轮询）",
+  MQTT: "MQTT 直连（设备订阅平台主题）",
 };
 
 /** 字序的可读名字：剖面里的计数拼法只有两种，但选错会把用量读成完全不相干的数 */

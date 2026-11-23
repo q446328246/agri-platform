@@ -4,6 +4,7 @@ import { PgClientAdapter, resolveDatabaseUrl } from '@agri/db';
 
 import { createIotHttpServer } from './http.js';
 import { createMqttBroker } from './mqtt-broker.js';
+import { createMqttCommandRelay } from './command-relay.js';
 import { FieldGateway } from './field-gateway.js';
 import { DEFAULT_TENANT, InMemoryDeviceRepository, SqlDeviceRepository, demoDevices } from './device.repository.js';
 import type { DeviceRepository } from './device.repository.js';
@@ -55,6 +56,24 @@ async function bootstrap(): Promise<void> {
     console.log(`iot-service MQTT 接入已启动 -> ${process.env.MQTT_URL ?? 'mqtt://127.0.0.1:1883'}，上报 ${process.env.TELEMETRY_SERVICE_URL ?? 'http://127.0.0.1:3004'}`);
   }
 
+  // MQTT 指令中继（B2）：MQTT 直连设备不经场网关，由本中继按设备轮询控制服务待领取指令并发布，
+  // 否则指令停在 QUEUED 无人领取（缺陷 1+2 的下发侧）。只处理 QUEUED：领取后即 SENT，不会重复发布。
+  const relayIntervalMs = Number(process.env.IOT_MQTT_RELAY_INTERVAL_MS) || 2000;
+  const relay = mqttBroker
+    ? createMqttCommandRelay({
+        devices,
+        controlUrl: process.env.CONTROL_SERVICE_URL,
+        tenantId: process.env.TENANT_ID?.trim() || DEFAULT_TENANT,
+        deviceToken: process.env.DEVICE_CALLBACK_TOKEN,
+        publishCommand: mqttBroker.publishCommand,
+        intervalMs: relayIntervalMs,
+      })
+    : undefined;
+  if (relay) {
+    relay.start();
+    console.log(`iot-service MQTT 指令中继已启动 -> ${process.env.CONTROL_SERVICE_URL ?? 'http://127.0.0.1:3008'}，轮询间隔 ${relayIntervalMs} 毫秒`);
+  }
+
   const gatewayEnabled = ['1', 'true'].includes((process.env.FIELD_GATEWAY_ENABLED ?? '').toLowerCase());
   const gateway = gatewayEnabled ? new FieldGateway({ devices, publishCommand: mqttBroker?.publishCommand }) : undefined;
   if (gateway) {
@@ -65,6 +84,7 @@ async function bootstrap(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     server.close();
     await gateway?.stop();
+    relay?.stop();
     await mqttBroker?.stop();
     await client?.$disconnect();
   };

@@ -210,7 +210,7 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
   async create(command: ControlCommand): Promise<ControlCommand | null> {
-    // 唯一索引冲突说明同一来源事件已生成指令，返回空表示无需重复写入
+    // 唯一索引冲突说明同一来源事件对该设备已生成指令，返回空表示无需重复写入
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `INSERT INTO control_commands (id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, scheduled_at, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)
@@ -371,7 +371,9 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
 
   async create(command: ControlCommand): Promise<ControlCommand | null> {
     if (this.rows.some((row) => row.id === command.id)) return null;
-    if (command.sourceEventId !== undefined && this.rows.some((row) => row.sourceEventId === command.sourceEventId)) {
+    // 去重粒度与 SQL 侧部分唯一索引一致：（来源事件, 设备）——同一事件的多设备建单各留一条，
+    // 重放同一事件对同一设备才被挡住
+    if (command.sourceEventId !== undefined && this.rows.some((row) => row.sourceEventId === command.sourceEventId && row.deviceId === command.deviceId)) {
       return null;
     }
     // 建档只写 SQL 侧 INSERT 的那几列：版本从 1 起算，在途时间戳与回执一律由跃迁写入。

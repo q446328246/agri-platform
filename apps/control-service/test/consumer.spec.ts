@@ -14,12 +14,17 @@ import { InMemoryControlCommandRepository } from "../src/control.repository.js";
 
 const TENANT = "tenant-demo";
 
-function setup() {
+function setup(resolveDevices?: (plotCode: string, commandType: string) => Promise<Array<{ id: string }>>) {
   const store = new InMemoryEventLogStore();
   const commands = new InMemoryControlCommandRepository();
   const publisher = new EventLogPublisher(store, { tenantId: TENANT, traceId: "telemetry", producer: "telemetry" });
-  const { dispatcher, consumer } = createControlEventConsumer(commands, store, { pollIntervalMs: 20 });
-  return { store, commands, publisher, dispatcher, consumer };
+  const skipped: string[] = [];
+  const { dispatcher, consumer } = createControlEventConsumer(commands, store, {
+    pollIntervalMs: 20,
+    ...(resolveDevices ? { resolveDevices } : {}),
+    onSkip: (reason) => skipped.push(reason),
+  });
+  return { store, commands, publisher, dispatcher, consumer, skipped };
 }
 
 const threshold: ThresholdBreachedPayload = {
@@ -39,24 +44,35 @@ const prescription: PrescriptionIssuedPayload = {
 };
 
 describe("控制指令事件消费", () => {
-  it("土壤含水率低于下限时生成自动补灌指令", async () => {
-    const { commands, publisher, consumer } = setup();
+  it("土壤含水率低于下限时按地块解析真实设备，逐台生成自动补灌指令", async () => {
+    const { commands, publisher, consumer } = setup(async () => [{ id: "device-valve-001" }, { id: "device-pump-002" }]);
     await publisher.publish(EventTopic.TelemetryThresholdBreached, threshold);
     await consumer.pollOnce();
 
-    expect(commands.all()).toHaveLength(1);
+    expect(commands.all()).toHaveLength(2);
     // 归属跟着事件信封走，不是进程默认租户写死的
-    expect(commands.all()[0]).toMatchObject({
+    const valveCommand = commands.all().find((command) => command.deviceId === "device-valve-001");
+    expect(valveCommand).toMatchObject({
       tenantId: TENANT,
       type: "IRRIGATION",
       origin: "EVENT",
       status: "QUEUED",
       operatorId: "system:event",
       plotCode: "P-1",
-      deviceId: "auto-P-1",
+      deviceId: "device-valve-001",
     });
-    expect(commands.all()[0]?.reason).toContain("低于阈值");
-    expect(commands.all()[0]?.sourceEventId).toBeTruthy();
+    expect(commands.all().map((command) => command.deviceId).sort()).toEqual(["device-pump-002", "device-valve-001"]);
+    expect(valveCommand?.reason).toContain("低于阈值");
+    expect(valveCommand?.sourceEventId).toBeTruthy();
+  });
+
+  it("地块没有可执行设备时不建单并留跳过原因，不产生无领取方的伪设备指令", async () => {
+    const { commands, publisher, consumer, skipped } = setup(async () => []);
+    await publisher.publish(EventTopic.TelemetryThresholdBreached, threshold);
+    await consumer.pollOnce();
+    expect(commands.all()).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toContain("没有可执行补灌的水肥设备");
   });
 
   it("非缺水越限不自动下令，避免误动作", async () => {
@@ -67,7 +83,9 @@ describe("控制指令事件消费", () => {
   });
 
   it("灌溉与施肥处方转成对应水肥指令，植保处方不自动下发", async () => {
-    const { commands, publisher, consumer } = setup();
+    const { commands, publisher, consumer } = setup(async (_plotCode, commandType) => [
+      { id: commandType === "FERTILIZATION" ? "device-fert-001" : "device-irri-001" },
+    ]);
     await publisher.publish(EventTopic.DecisionPrescriptionIssued, prescription);
     await publisher.publish(EventTopic.DecisionPrescriptionIssued, { ...prescription, planType: "fertilization" });
     await publisher.publish(EventTopic.DecisionPrescriptionIssued, { ...prescription, planType: "pesticide" });
@@ -76,6 +94,8 @@ describe("控制指令事件消费", () => {
     const types = commands.all().map((command) => command.type).sort();
     expect(types).toEqual(["FERTILIZATION", "IRRIGATION"]);
     expect(commands.all().every((command) => command.origin === "EVENT" && command.parameters.source === "prescription")).toBe(true);
+    // 每条指令落在解析出的真实设备上，不是伪设备
+    expect(commands.all().map((command) => command.deviceId).sort()).toEqual(["device-fert-001", "device-irri-001"]);
   });
 
   it("同一事件重复分发只生成一条指令", async () => {
