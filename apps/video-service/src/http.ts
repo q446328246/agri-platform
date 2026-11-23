@@ -11,16 +11,11 @@ import { InMemoryPtzRepository, PTZ_ACTIONS } from "./ptz.repository.js";
 import type { PtzAction, PtzCommand, PtzQuery, PtzRepository, PtzStatus } from "./ptz.repository.js";
 import { ARCHIVE_SOURCES, ARCHIVE_STATUSES, InMemoryRecordingArchiveRepository, archiveWindow } from "./recording-archive.repository.js";
 import type { ArchiveQuery, ArchiveSource, ArchiveStatus, RecordingArchiveRepository } from "./recording-archive.repository.js";
+import { CAMERA_STATUSES, InMemoryCameraRepository } from "./camera.repository.js";
+import type { CameraQuery, CameraRepository, CameraStatus, UpdateCameraInput } from "./camera.repository.js";
 import { UnconfiguredPtzChannel } from "./ptz-channel.js";
 import type { PtzChannel } from "./ptz-channel.js";
-interface Camera { id: string; name: string; plotCode?: string; status: "ONLINE" | "OFFLINE"; streamUrl: string }
 interface Recording { id: string; cameraId: string; startedAt: string; endedAt: string; playbackUrl: string }
-const cameras: Camera[] = [
-  { id: "camera-001", name: "东区一号田摄像头", plotCode: "511723-000001-01-00001-0000-5", status: "ONLINE", streamUrl: "https://example.invalid/live/camera-001.m3u8" },
-  { id: "camera-002", name: "西区一号田摄像头", plotCode: "511723-000001-02-00005-0000-C", status: "ONLINE", streamUrl: "https://example.invalid/live/camera-002.m3u8" },
-  { id: "camera-003", name: "联片一号田摄像头", plotCode: "511723-000001-03-00008-0000-P", status: "ONLINE", streamUrl: "https://example.invalid/live/camera-003.m3u8" },
-  { id: "camera-004", name: "场部入口枪机", status: "OFFLINE", streamUrl: "https://example.invalid/live/camera-004.m3u8" },
-];
 /** 演示录像索引：回放地址由对象存储签发，这里只给可定位的 key */
 const recordings: Recording[] = [
   { id: "rec-demo-001", cameraId: "camera-001", startedAt: new Date(Date.now() - 26 * 3600000).toISOString(), endedAt: new Date(Date.now() - 25 * 3600000).toISOString(), playbackUrl: "https://example.invalid/vod/rec-demo-001.m3u8" },
@@ -36,26 +31,27 @@ function param(query: URLSearchParams, name: string): string { return (query.get
 function endOfDay(value: string): string {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:59.999Z` : value;
 }
-/** 摄像头筛选：关键词命中名称，地块与状态精确匹配 */
-function filterCameras(query: URLSearchParams): Camera[] {
-  const keyword = param(query, "keyword").toLowerCase();
-  const plotCode = param(query, "plotCode");
+/** 摄像头查询条件：关键词命中名称，地块与状态精确匹配 */
+function cameraQuery(query: URLSearchParams): CameraQuery {
+  const result: CameraQuery = { page: integer(query.get("page"), 1, 1_000_000), size: integer(query.get("size"), 20, 200) };
+  if (param(query, "keyword") !== "") result.keyword = param(query, "keyword");
+  if (param(query, "plotCode") !== "") result.plotCode = param(query, "plotCode");
   const status = param(query, "status");
-  return cameras.filter((camera) => {
-    if (plotCode !== "" && camera.plotCode !== plotCode) return false;
-    if (status !== "" && camera.status !== status) return false;
-    return keyword.length === 0 || camera.name.toLowerCase().includes(keyword);
-  });
+  if (status !== "") {
+    if (!CAMERA_STATUSES.includes(status as CameraStatus)) throw new Error(`status 需为 ${CAMERA_STATUSES.join("/")}`);
+    result.status = status as CameraStatus;
+  }
+  return result;
 }
 /** 录像筛选：按摄像头、地块（经由摄像头归属）与开始时间区间过滤 */
-function filterRecordings(query: URLSearchParams): Recording[] {
+function filterRecordings(query: URLSearchParams, cameraPlotById: Map<string, string>): Recording[] {
   const cameraId = param(query, "cameraId");
   const plotCode = param(query, "plotCode");
   const from = param(query, "from");
   const to = param(query, "to");
   return recordings.filter((recording) => {
     if (cameraId !== "" && recording.cameraId !== cameraId) return false;
-    if (plotCode !== "" && cameras.find((camera) => camera.id === recording.cameraId)?.plotCode !== plotCode) return false;
+    if (plotCode !== "" && cameraPlotById.get(recording.cameraId) !== plotCode) return false;
     if (from !== "" && recording.startedAt < from) return false;
     if (to !== "" && recording.startedAt > endOfDay(to)) return false;
     return true;
@@ -116,6 +112,8 @@ export interface VideoHttpOptions {
   aiEvents?: AiEventRepository;
   ptz?: PtzRepository;
   archives?: RecordingArchiveRepository;
+  /** 摄像机台账；缺省空内存实现（仅接口可用，无持久化） */
+  cameras?: CameraRepository;
   channel?: PtzChannel;
   forward?: (detection: AiDetection, options: { baseUrl: string; timeoutMs?: number; deviceToken?: string | undefined }) => Promise<ForwardResult>;
 }
@@ -123,6 +121,7 @@ export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
   const aiEvents = options.aiEvents ?? new InMemoryAiEventRepository();
   const ptz = options.ptz ?? new InMemoryPtzRepository();
   const archives = options.archives ?? new InMemoryRecordingArchiveRepository();
+  const cameras = options.cameras ?? new InMemoryCameraRepository();
   const channel = options.channel ?? new UnconfiguredPtzChannel();
   const forward = options.forward ?? forwardAiDetection;
   /** 云台投递后按通道真实结果落状态：未接入硬件通道时留存 QUEUED，不假装下发成功 */
@@ -139,10 +138,29 @@ export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
   if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
   const tenantId = req.headers["x-tenant-id"]?.toString() || "tenant-demo";
   const forwardOptions = { baseUrl: process.env.TELEMETRY_BASE_URL ?? "http://127.0.0.1:3004", deviceToken: process.env.DEVICE_CALLBACK_TOKEN };
-  if (req.method === "GET" && url.pathname === "/api/v1/video/cameras") { send(res, 200, page(filterCameras(url.searchParams), url.searchParams), traceId); return; }
+  if (req.method === "GET" && url.pathname === "/api/v1/video/cameras") { send(res, 200, await cameras.list(tenantId, cameraQuery(url.searchParams)), traceId); return; }
+
+  // 建档：名称必填、状态取值受检，地块与流地址可空
+  if (req.method === "POST" && url.pathname === "/api/v1/video/cameras") {
+    const body = await json(req);
+    const name = String(body.name ?? "").trim();
+    if (!name) { send(res, 400, null, traceId, "摄像头名称不能为空"); return; }
+    const status = String(body.status ?? "").trim().toUpperCase();
+    if (!CAMERA_STATUSES.includes(status as CameraStatus)) { send(res, 400, null, traceId, `status 需为 ${CAMERA_STATUSES.join("/")}`); return; }
+    const created = await cameras.create(undefined, {
+      tenantId,
+      name,
+      plotCode: String(body.plotCode ?? "").trim(),
+      status: status as CameraStatus,
+      streamUrl: String(body.streamUrl ?? "").trim(),
+    });
+    send(res, 201, created, traceId);
+    return;
+  }
+
   const cameraMatch = url.pathname.match(/^\/api\/v1\/video\/cameras\/([^/]+)(\/ptz)?$/); const cameraId = cameraMatch?.[1];
   if (cameraId && cameraMatch?.[2] === "/ptz" && req.method === "POST") {
-    if (!cameras.some((camera) => camera.id === cameraId)) { send(res, 404, null, traceId, "摄像头不存在"); return; }
+    if (!(await cameras.find(tenantId, cameraId))) { send(res, 404, null, traceId, "摄像头不存在"); return; }
     const body = await json(req);
     const action = String(body.action ?? "").trim().toUpperCase();
     if (!PTZ_ACTIONS.includes(action as PtzAction)) throw new Error("云台动作需为 LEFT/RIGHT/UP/DOWN/ZOOM_IN/ZOOM_OUT/STOP");
@@ -156,14 +174,50 @@ export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
     const delivered = await deliverPtz(tenantId, command);
     send(res, 202, delivered.command, traceId, delivered.message); return;
   }
-  if (cameraId && !cameraMatch?.[2] && req.method === "GET") { send(res, 200, cameras.find((camera) => camera.id === cameraId) ?? null, traceId); return; }
-  if (req.method === "GET" && url.pathname === "/api/v1/video/recordings") { send(res, 200, page(filterRecordings(url.searchParams), url.searchParams), traceId); return; }
+  if (cameraId && !cameraMatch?.[2] && req.method === "GET") { send(res, 200, await cameras.find(tenantId, cameraId), traceId); return; }
+
+  // 修改配置：名称、地块、状态、流地址按需更新
+  if (cameraId && !cameraMatch?.[2] && req.method === "PUT") {
+    const body = await json(req);
+    const target = await cameras.find(tenantId, cameraId);
+    if (!target) { send(res, 404, null, traceId, "摄像头不存在"); return; }
+    const patch: UpdateCameraInput = {};
+    if (body.name !== undefined) {
+      const name = String(body.name).trim();
+      if (!name) { send(res, 400, null, traceId, "摄像头名称不能为空"); return; }
+      patch.name = name;
+    }
+    if (body.status !== undefined) {
+      const status = String(body.status).trim().toUpperCase();
+      if (!CAMERA_STATUSES.includes(status as CameraStatus)) { send(res, 400, null, traceId, `status 需为 ${CAMERA_STATUSES.join("/")}`); return; }
+      patch.status = status as CameraStatus;
+    }
+    if (body.plotCode !== undefined) patch.plotCode = String(body.plotCode).trim();
+    if (body.streamUrl !== undefined) patch.streamUrl = String(body.streamUrl).trim();
+    const updated = await cameras.update(undefined, tenantId, target.id, patch);
+    if (!updated) { send(res, 404, null, traceId, "摄像头不存在"); return; }
+    send(res, 200, updated, traceId);
+    return;
+  }
+
+  // 删除台账：云台指令、识别事件与留档记录按 cameraId 关联保留，不级联清历史
+  if (cameraId && !cameraMatch?.[2] && req.method === "DELETE") {
+    const removed = await cameras.remove(undefined, tenantId, cameraId);
+    if (!removed) { send(res, 404, null, traceId, "摄像头不存在"); return; }
+    send(res, 200, { id: cameraId }, traceId);
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/v1/video/recordings") {
+    const cameraPlotById = new Map((await cameras.list(tenantId, { page: 1, size: 200 })).items.map((camera) => [camera.id, camera.plotCode]));
+    send(res, 200, page(filterRecordings(url.searchParams, cameraPlotById), url.searchParams), traceId);
+    return;
+  }
   // 录像留档（A13）：告警时刻前后窗口的片段档案；切片本体依赖 B 类流媒体，未接入时保持 PENDING
   if (req.method === "GET" && url.pathname === "/api/v1/video/recording-archives") { send(res, 200, await archives.page(tenantId, archiveQuery(url.searchParams)), traceId); return; }
   if (req.method === "POST" && url.pathname === "/api/v1/video/recording-archives") {
     const body = await json(req);
     const cameraId = String(body.cameraId ?? "").trim();
-    const camera = cameras.find((item) => item.id === cameraId);
+    const camera = await cameras.find(tenantId, cameraId);
     if (!camera) { send(res, 404, null, traceId, "摄像头不存在"); return; }
     const eventAt = String(body.eventAt ?? "").trim();
     if (!eventAt || Number.isNaN(Date.parse(eventAt))) throw new Error("事件时刻 eventAt 需为可解析的时间字符串");

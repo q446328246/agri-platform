@@ -259,6 +259,46 @@
         </el-table>
         <el-pagination class="pager" background layout="total, prev, pager, next" :total="ptzTotal" :page-size="ptzSize" v-model:current-page="ptzPage" @current-change="loadPtzCommands" />
       </el-tab-pane>
+
+      <el-tab-pane label="摄像头管理" name="cameras">
+        <div class="search-bar">
+          <el-form :inline="true" @submit.prevent="cameraPage = 1; loadCameras()">
+            <el-form-item label="关键词"><el-input v-model="cameraQuery.keyword" placeholder="摄像机名称" clearable style="width: 180px" /></el-form-item>
+            <el-form-item label="地块编码"><el-input v-model="cameraQuery.plotCode" placeholder="可选" clearable style="width: 170px" /></el-form-item>
+            <el-form-item label="状态">
+              <el-select v-model="cameraQuery.status" placeholder="全部" clearable style="width: 110px">
+                <el-option label="在线" value="ONLINE" />
+                <el-option label="离线" value="OFFLINE" />
+              </el-select>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" @click="cameraPage = 1; loadCameras()">查询</el-button>
+              <el-button @click="resetCameraQuery">重置</el-button>
+              <el-button type="success" plain @click="openCameraDialog()">添加摄像头</el-button>
+            </el-form-item>
+          </el-form>
+        </div>
+        <el-table v-loading="cameraLoading" :data="cameraList" stripe>
+          <el-table-column prop="name" label="名称" min-width="180" />
+          <el-table-column label="地块" min-width="180">
+            <template #default="{ row }">{{ row.plotCode || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag :type="row.status === 'ONLINE' ? 'success' : 'info'" size="small">{{ row.status === 'ONLINE' ? '在线' : '离线' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="streamUrl" label="流地址" min-width="260" show-overflow-tooltip />
+          <el-table-column label="操作" width="140" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" type="primary" link @click="openCameraDialog(row)">编辑</el-button>
+              <el-button size="small" type="danger" link @click="removeCamera(row)">删除</el-button>
+            </template>
+          </el-table-column>
+          <template #empty><el-empty description="暂无摄像机" /></template>
+        </el-table>
+        <el-pagination class="pager" background layout="total, prev, pager, next" :total="cameraTotal" :page-size="cameraSize" v-model:current-page="cameraPage" @current-change="loadCameras" />
+      </el-tab-pane>
     </el-tabs>
 
     <el-dialog v-model="ptzDialogVisible" :title="`云台控制 · ${ptzCamera?.name ?? ''}`" width="600px">
@@ -299,6 +339,33 @@
         </el-table-column>
         <template #empty><el-empty description="暂无指令" :image-size="60" /></template>
       </el-table>
+    </el-dialog>
+
+    <el-dialog v-model="cameraDialogVisible" :title="cameraForm.id ? '编辑摄像头' : '添加摄像头'" width="560px">
+      <el-form label-width="90px">
+        <el-form-item label="名称" required>
+          <el-input v-model="cameraForm.name" placeholder="如 东区一号田摄像头" maxlength="40" />
+        </el-form-item>
+        <el-form-item label="所属地块">
+          <el-select v-model="cameraForm.plotCode" placeholder="未绑定地块" clearable filterable style="width: 100%">
+            <el-option v-for="plot in plotOptions" :key="plot.parcelCode" :label="`${plot.parcelName}（${plot.parcelCode}）`" :value="plot.parcelCode" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="状态" required>
+          <el-radio-group v-model="cameraForm.status">
+            <el-radio value="ONLINE">在线</el-radio>
+            <el-radio value="OFFLINE">离线</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="流地址">
+          <el-input v-model="cameraForm.streamUrl" placeholder="HLS m3u8 或 mp4 地址" />
+          <span class="nav-unit">平台只存地址、不保证能拉到流；不可用时监看页如实提示，不伪造画面</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="cameraDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="cameraSaving" @click="submitCamera">保存</el-button>
+      </template>
     </el-dialog>
 
     <el-dialog v-model="arcDialogVisible" title="人工补登录像留档" width="520px">
@@ -361,8 +428,8 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { videoApi } from '@/api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { plotApi, videoApi } from '@/api'
 import { formatDateTime } from '@/utils'
 import type { AiEventType, ArchiveSource, ArchiveStatus, Camera, PtzAction, PtzCommand, Recording, RecordingArchive, VideoAiEvent } from '@/types'
 
@@ -844,11 +911,122 @@ async function loadPtzCommands() {
   }
 }
 
+// —— 摄像机台账管理 ——
+const cameraQuery = reactive<{ keyword: string; plotCode: string; status: string }>({ keyword: '', plotCode: '', status: '' })
+const cameraList = ref<Camera[]>([])
+const cameraTotal = ref(0)
+const cameraLoading = ref(false)
+const cameraPage = ref(1)
+const cameraSize = 10
+
+async function loadCameras() {
+  cameraLoading.value = true
+  try {
+    const res = await videoApi.getCameras({
+      page: cameraPage.value,
+      size: cameraSize,
+      ...(cameraQuery.keyword ? { keyword: cameraQuery.keyword } : {}),
+      ...(cameraQuery.plotCode ? { plotCode: cameraQuery.plotCode } : {}),
+      ...(cameraQuery.status ? { status: cameraQuery.status } : {}),
+    })
+    cameraList.value = res.items ?? []
+    cameraTotal.value = res.total
+  } catch {
+    cameraList.value = []
+    cameraTotal.value = 0
+  } finally {
+    cameraLoading.value = false
+  }
+}
+
+function resetCameraQuery() {
+  cameraQuery.keyword = ''
+  cameraQuery.plotCode = ''
+  cameraQuery.status = ''
+  cameraPage.value = 1
+  void loadCameras()
+}
+
+const cameraDialogVisible = ref(false)
+const cameraSaving = ref(false)
+const cameraForm = reactive<{ id: string; name: string; plotCode: string; status: 'ONLINE' | 'OFFLINE'; streamUrl: string }>({
+  id: '', name: '', plotCode: '', status: 'ONLINE', streamUrl: '',
+})
+
+/** 地块下拉与设备页同源：第一次打开时按全量边界取一次 */
+const plotOptions = ref<Array<{ parcelCode: string; parcelName: string }>>([])
+async function ensurePlotOptions() {
+  if (plotOptions.value.length) return
+  try {
+    plotOptions.value = await plotApi.getBounds()
+  } catch {
+    plotOptions.value = []
+  }
+}
+
+function openCameraDialog(camera?: Camera) {
+  cameraForm.id = camera?.id ?? ''
+  cameraForm.name = camera?.name ?? ''
+  cameraForm.plotCode = camera?.plotCode ?? ''
+  cameraForm.status = camera?.status ?? 'ONLINE'
+  cameraForm.streamUrl = camera?.streamUrl ?? ''
+  cameraDialogVisible.value = true
+  void ensurePlotOptions()
+}
+
+async function submitCamera() {
+  if (!cameraForm.name.trim()) {
+    ElMessage.warning('请填写摄像头名称')
+    return
+  }
+  cameraSaving.value = true
+  try {
+    const payload = {
+      name: cameraForm.name.trim(),
+      plotCode: cameraForm.plotCode,
+      status: cameraForm.status,
+      streamUrl: cameraForm.streamUrl.trim(),
+    }
+    if (cameraForm.id) await videoApi.updateCamera(cameraForm.id, payload)
+    else await videoApi.createCamera(payload)
+    ElMessage.success(cameraForm.id ? '摄像头配置已更新' : '摄像头已登记')
+    cameraDialogVisible.value = false
+    await loadCameras()
+    // 台账变了，监看页的可用摄像机也要跟着刷新
+    void load()
+  } catch {
+    // 错误提示由请求层统一弹出
+  } finally {
+    cameraSaving.value = false
+  }
+}
+
+async function removeCamera(camera: Camera) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除摄像机「${camera.name}」？其云台指令、识别事件与留档记录按摄像机标识关联保留，不随删除清除。`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await videoApi.deleteCamera(camera.id)
+    ElMessage.success('摄像机已删除')
+    await loadCameras()
+    void load()
+  } catch {
+    // 错误提示由请求层统一弹出
+  }
+}
+
 function onTabChange(name: string | number) {
   if (name === 'recordings') void loadRecordings()
   else if (name === 'archives') void loadArchives()
   else if (name === 'ai') void loadAiEvents()
   else if (name === 'ptz') void loadPtzCommands()
+  else if (name === 'cameras') void loadCameras()
 }
 
 function refreshActive() {
@@ -856,6 +1034,7 @@ function refreshActive() {
   else if (activeTab.value === 'recordings') void loadRecordings()
   else if (activeTab.value === 'archives') void loadArchives()
   else if (activeTab.value === 'ai') void loadAiEvents()
+  else if (activeTab.value === 'cameras') void loadCameras()
   else void loadPtzCommands()
 }
 

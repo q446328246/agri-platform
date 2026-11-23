@@ -1268,6 +1268,18 @@ export const videoApi = {
   getCamera(cameraId: string): Promise<Camera | null> {
     return get<Camera | null>(`/video/cameras/${encodeURIComponent(cameraId)}`)
   },
+  /** 建档：名称必填，状态取 ONLINE/OFFLINE，地块与流地址可空 */
+  createCamera(data: { name: string; plotCode?: string; status: 'ONLINE' | 'OFFLINE'; streamUrl: string }): Promise<Camera> {
+    return post<Camera>('/video/cameras', data)
+  },
+  /** 改配置：按需更新名称、地块、状态、流地址 */
+  updateCamera(cameraId: string, data: { name?: string; plotCode?: string; status?: 'ONLINE' | 'OFFLINE'; streamUrl?: string }): Promise<Camera> {
+    return put<Camera>(`/video/cameras/${encodeURIComponent(cameraId)}`, data)
+  },
+  /** 删除台账：其云台指令、识别事件与留档记录按摄像机标识关联保留，不级联清历史 */
+  deleteCamera(cameraId: string): Promise<void> {
+    return del<void>(`/video/cameras/${encodeURIComponent(cameraId)}`)
+  },
   sendPtz(cameraId: string, command: { action: PtzAction; speed?: number }): Promise<PtzCommand> {
     return post<PtzCommand>(`/video/cameras/${encodeURIComponent(cameraId)}/ptz`, command)
   },

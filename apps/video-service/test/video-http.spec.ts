@@ -3,8 +3,15 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { createVideoHttpServer } from "../src/http.js";
+import type { VideoHttpOptions } from "../src/http.js";
+import { InMemoryCameraRepository, demoCameras } from "../src/camera.repository.js";
 import type { PtzChannel } from "../src/ptz-channel.js";
 import type { ForwardResult } from "../src/ai-event.js";
+
+/** 摄像头台账改用仓储后，测试显式注入演示摄像机，与线上 SQL 模式的种子同口径 */
+function serverWithCameras(options: VideoHttpOptions = {}) {
+  return createVideoHttpServer({ ...options, cameras: new InMemoryCameraRepository(demoCameras()) });
+}
 
 const servers: Server[] = [];
 
@@ -40,7 +47,7 @@ describe("视频 AI 事件接口", () => {
       attempts += 1;
       return attempts === 1 ? { forwarded: false, status: 0, message: "遥测服务不可达" } : { forwarded: true, status: 201, message: "已生成虫情告警" };
     };
-    const video = await start(createVideoHttpServer({ forward }));
+    const video = await start(serverWithCameras({ forward }));
 
     const failed = await post(video, "/api/v1/video/ai-events", detection);
     expect(failed.status).toBe(202);
@@ -67,7 +74,7 @@ describe("视频 AI 事件接口", () => {
 
   it("非法分页与 forwarded 筛选返回 400，租户头隔离记录", async () => {
     const forward = async (): Promise<ForwardResult> => ({ forwarded: true, status: 201, message: "已生成虫情告警" });
-    const video = await start(createVideoHttpServer({ forward }));
+    const video = await start(serverWithCameras({ forward }));
     expect((await request(video, "/api/v1/video/ai-events?page=0")).status).toBe(400);
     expect((await request(video, "/api/v1/video/ai-events?size=999")).status).toBe(400);
     expect((await request(video, "/api/v1/video/ai-events?forwarded=maybe")).status).toBe(400);
@@ -80,7 +87,7 @@ describe("视频 AI 事件接口", () => {
 
 describe("云台指令接口", () => {
   it("未配置通道时留存 QUEUED 并明示原因，历史可查", async () => {
-    const video = await start(createVideoHttpServer());
+    const video = await start(serverWithCameras());
     const queued = await post(video, "/api/v1/video/cameras/camera-001/ptz", { action: "LEFT", speed: 5 });
     expect(queued.status).toBe(202);
     expect(queued.body.data.status).toBe("QUEUED");
@@ -101,7 +108,7 @@ describe("云台指令接口", () => {
   it("配置通道后按真实响应落 SENT/FAILED，失败可重试、成功不可重复", async () => {
     let ok = false;
     const channel: PtzChannel = { configured: true, deliver: async () => ({ ok, message: ok ? "摄像机网关已接收（200）" : "摄像机网关返回 503" }) };
-    const video = await start(createVideoHttpServer({ channel }));
+    const video = await start(serverWithCameras({ channel }));
 
     const failed = await post(video, "/api/v1/video/cameras/camera-001/ptz", { action: "ZOOM_IN" });
     expect(failed.status).toBe(202);
@@ -120,7 +127,7 @@ describe("云台指令接口", () => {
   });
 
   it("非法动作、速度与未知摄像头返回 400/404", async () => {
-    const video = await start(createVideoHttpServer({ channel: stubChannel(true, true) }));
+    const video = await start(serverWithCameras({ channel: stubChannel(true, true) }));
     expect((await post(video, "/api/v1/video/cameras/camera-001/ptz", { action: "FLY" })).status).toBe(400);
     expect((await post(video, "/api/v1/video/cameras/camera-001/ptz", {})).status).toBe(400);
     expect((await post(video, "/api/v1/video/cameras/camera-001/ptz", { action: "UP", speed: 0 })).status).toBe(400);
@@ -135,7 +142,7 @@ describe("云台指令接口", () => {
 
 describe("摄像头与录像查询保持兼容", () => {
   it("摄像头状态筛选与录像按摄像头/时间窗口过滤", async () => {
-    const video = await start(createVideoHttpServer());
+    const video = await start(serverWithCameras());
     const online = await request(video, "/api/v1/video/cameras?status=ONLINE");
     expect(online.body.data.total).toBe(3);
     const byPlot = await request(video, "/api/v1/video/cameras?plotCode=511723-000001-01-00001-0000-5");
@@ -145,5 +152,39 @@ describe("摄像头与录像查询保持兼容", () => {
     expect(recordings.body.data.items[0].id).toBe("rec-demo-001");
     const none = await request(video, "/api/v1/video/recordings?from=2099-01-01");
     expect(none.body.data.total).toBe(0);
+  });
+});
+
+describe("摄像机台账增删改", () => {
+  it("建档后可在列表查到，缺名称或非法状态返回 400", async () => {
+    const video = await start(serverWithCameras());
+    const created = await post(video, "/api/v1/video/cameras", {
+      name: "南区二号田摄像头", plotCode: "P-NEW", status: "ONLINE", streamUrl: "https://example.invalid/live/new.m3u8",
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.data).toMatchObject({ name: "南区二号田摄像头", plotCode: "P-NEW", status: "ONLINE", streamUrl: "https://example.invalid/live/new.m3u8" });
+    expect((await request(video, "/api/v1/video/cameras?keyword=南区")).body.data.total).toBe(1);
+
+    expect((await post(video, "/api/v1/video/cameras", { status: "ONLINE", streamUrl: "" })).status).toBe(400);
+    expect((await post(video, "/api/v1/video/cameras", { name: "x", status: "BROKEN", streamUrl: "" })).status).toBe(400);
+  });
+
+  it("修改流地址与地块生效，删除后列表不再返回，重复删除 404", async () => {
+    const video = await start(serverWithCameras());
+    const created = await post(video, "/api/v1/video/cameras", { name: "待改摄像头", status: "OFFLINE", streamUrl: "https://old.invalid/live.m3u8" });
+    const id = created.body.data.id as string;
+
+    const updated = await request(video, `/api/v1/video/cameras/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ plotCode: "P-EDIT", status: "ONLINE", streamUrl: "https://new.invalid/live.m3u8" }),
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body.data).toMatchObject({ plotCode: "P-EDIT", status: "ONLINE", streamUrl: "https://new.invalid/live.m3u8" });
+
+    const removed = await request(video, `/api/v1/video/cameras/${id}`, { method: "DELETE" });
+    expect(removed.status).toBe(200);
+    expect((await request(video, `/api/v1/video/cameras/${id}`)).body.data).toBeNull();
+    expect((await request(video, `/api/v1/video/cameras/${id}`, { method: "DELETE" })).status).toBe(404);
+    expect((await request(video, "/api/v1/video/cameras/camera-999", { method: "DELETE" })).status).toBe(404);
   });
 });
