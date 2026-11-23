@@ -156,12 +156,12 @@ export interface PredictionAlertPayload {
   basis: string;
 }
 
-/** tractor.safety.event —— 拖拉机作业安全验证事件（围栏越界/RTK 质量/失联/急停等） */
+/** tractor.safety.event —— 拖拉机作业安全验证事件（围栏越界/RTK 质量/失联/急停/轨迹偏离等） */
 export interface TractorSafetyEventPayload {
   parcelId: string;
   deviceId: string;
-  /** 安全事件类型：作业前预检失败、作业中围栏越界、RTK 质量劣化、通信失联、急停 */
-  kind: "PRECHECK_FAIL" | "GEOFENCE_BREACH" | "RTK_QUALITY" | "COMM_LOSS" | "ESTOP";
+  /** 安全事件类型：作业前预检失败、作业中围栏越界、RTK 质量劣化、通信失联、急停、轨迹跟随偏离 */
+  kind: "PRECHECK_FAIL" | "GEOFENCE_BREACH" | "RTK_QUALITY" | "COMM_LOSS" | "ESTOP" | "TRAJECTORY_DEVIATION";
   /** 事件级别：CRITICAL 需立即处置，WARNING 需关注 */
   level: "WARNING" | "CRITICAL";
   message: string;

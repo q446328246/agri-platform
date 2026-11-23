@@ -212,7 +212,7 @@ export interface MapShapeSaved {
 // 设备信息
 export interface Device {
   id: string;
-  deviceCode: string;
+  deviceNo: string;
   name: string;
   type: string;
   model: string;
@@ -271,7 +271,7 @@ export interface DeviceFieldAccess {
 }
 export interface DeviceRealtimeData {
   deviceId: string;
-  deviceCode: string;
+  deviceNo: string;
   deviceName: string;
   timestamp: string;
   metrics: {
@@ -714,7 +714,7 @@ export interface TractorJobStage {
   updatedAt: string
 }
 
-export type TractorSafetyKind = 'PRECHECK_FAIL' | 'GEOFENCE_BREACH' | 'RTK_QUALITY' | 'COMM_LOSS' | 'ESTOP'
+export type TractorSafetyKind = 'PRECHECK_FAIL' | 'GEOFENCE_BREACH' | 'RTK_QUALITY' | 'COMM_LOSS' | 'ESTOP' | 'TRAJECTORY_DEVIATION'
 
 export interface TractorSafetyEvent {
   id: string
@@ -728,6 +728,38 @@ export interface TractorSafetyEvent {
   lng?: number
   lat?: number
   createdAt: string
+}
+
+// 拖拉机作业轨迹（A 类）：一次作业一条轨迹，随作业级联删除
+export type TrajectorySource = 'AUTO' | 'MANUAL'
+
+export interface TrajectoryLane {
+  index: number
+  pass: number
+  coordinates: [number, number][]
+  lengthM: number
+}
+
+export interface Trajectory {
+  id: string
+  jobId: string
+  plotCode: string
+  source: TrajectorySource
+  path: [number, number][]
+  lanes?: TrajectoryLane[]
+  headingDeg?: number
+  implementWidthM?: number
+  totalDistanceM: number
+  durationMin: number
+  warnings: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TractorJobDetail {
+  job: TractorJob
+  stages: TractorJobStage[]
+  trajectory: Trajectory | null
 }
 
 // 权限目录分组

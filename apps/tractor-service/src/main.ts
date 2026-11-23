@@ -14,6 +14,10 @@ import { InMemoryTractorJobRepository, SqlTractorJobRepository } from "./job.rep
 import type { TractorJobRepository } from "./job.repository.js";
 import { InMemoryTractorSafetyEventRepository, SqlTractorSafetyEventRepository } from "./safety-event.repository.js";
 import type { TractorSafetyEventRepository } from "./safety-event.repository.js";
+import { InMemoryTrajectoryRepository, SqlTrajectoryRepository } from "./trajectory.repository.js";
+import type { TrajectoryRepository, TrajectoryPoint } from "./trajectory.repository.js";
+import { trajectoryFromCoverage, trajectoryFromPoints } from "./trajectory.js";
+import type { CoveragePlanView, TrajectoryDraft } from "./trajectory.js";
 import { createJobExecutor } from "./executor.js";
 import type { ControlDispatchInput } from "./executor.js";
 import { createTractorMonitor } from "./monitor.js";
@@ -144,6 +148,27 @@ function createCatalogClient(plotUrl: string, iotUrl: string) {
   };
 }
 
+/** operation-service 客户端：覆盖规划（按地块边界 + 幅宽算牛耕式作业轨迹） */
+function createOperationClient(baseUrl: string) {
+  return {
+    async coveragePlan(input: { plotCode: string; boundary: GeoPolygon; implementWidthM: number }): Promise<CoveragePlanView | null> {
+      try {
+        const response = await fetch(`${baseUrl}/api/v1/operations/coverage-plan`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...SERVICE_IDENTITY },
+          body: JSON.stringify(input),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!response.ok) return null;
+        const payload = (await response.json()) as { data?: CoveragePlanView };
+        return payload.data ?? null;
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
 async function bootstrap(): Promise<void> {
   if (process.env.SERVICE_MODE !== "http") {
     console.log("tractor-service service started (demo mode)");
@@ -163,6 +188,7 @@ async function bootstrap(): Promise<void> {
   const control = createControlClient(controlUrl, tenantId);
   const telemetry = createTelemetryClient(telemetryUrl);
   const catalog = createCatalogClient(plotUrl, iotUrl);
+  const operation = createOperationClient(process.env.OPERATION_SERVICE_URL ?? "http://127.0.0.1:3007");
 
   const hdopMax = envNumber("TRACTOR_RTK_HDOP_MAX", 2);
   const bufferM = envNumber("TRACTOR_GEOFENCE_BUFFER_M", 2);
@@ -198,21 +224,36 @@ async function bootstrap(): Promise<void> {
     return { ...result, tenantId };
   };
 
+  // 轨迹规划：直接传点走 MANUAL；传幅宽则取地块边界调覆盖规划走 AUTO。
+  // 要了幅宽却算不出来就明确报错，不悄悄建一条没有轨迹的作业。
+  const trajectoryPlanner = async (input: { plotCode: string; implementWidthM?: number; explicitPath?: TrajectoryPoint[] }): Promise<TrajectoryDraft | null> => {
+    if (input.explicitPath) return trajectoryFromPoints(input.explicitPath);
+    if (input.implementWidthM === undefined) return null;
+    const plot = await catalog.getPlot(input.plotCode).catch(() => null);
+    if (!plot?.geom) throw new Error(`地块 ${input.plotCode} 没有可用边界，无法自动算作业轨迹`);
+    const plan = await operation.coveragePlan({ plotCode: input.plotCode, boundary: plot.geom, implementWidthM: input.implementWidthM });
+    if (!plan) throw new Error("覆盖规划服务不可达，无法自动算作业轨迹");
+    return trajectoryFromCoverage(plan);
+  };
+
   let client: PrismaClientLike | undefined;
   let jobs: TractorJobRepository;
   let safetyEvents: TractorSafetyEventRepository;
+  let trajectories: TrajectoryRepository;
   let publish: ((topic: EventTopicValue, payload: unknown) => Promise<void>) | undefined;
   if (mode === "sql") {
     client = PgClientAdapter.fromUrl(resolveDatabaseUrl(process.env.DB_URL));
     await client.$connect();
     jobs = new SqlTractorJobRepository(client);
     safetyEvents = new SqlTractorSafetyEventRepository(client);
+    trajectories = new SqlTrajectoryRepository(client);
     const store: EventLogStore = new PgEventLogStore(client);
     const publisher = new EventLogPublisher(store, { tenantId, traceId: "tractor", producer: "tractor" });
     publish = async (topic, payload): Promise<void> => { await publisher.publish(topic, payload); };
   } else {
     jobs = new InMemoryTractorJobRepository();
     safetyEvents = new InMemoryTractorSafetyEventRepository();
+    trajectories = new InMemoryTrajectoryRepository();
   }
 
   const waitCommand = async (deviceId: string, commandId: string, timeoutMs: number): Promise<"DONE" | "FAILED" | "TIMEOUT"> => {
@@ -246,6 +287,8 @@ async function bootstrap(): Promise<void> {
     intervalMs: envNumber("TRACTOR_MONITOR_INTERVAL_MS", 5000),
     commLossSeconds: envNumber("TRACTOR_COMM_LOSS_SECONDS", 30),
     rtkHdopMax: hdopMax,
+    trajectories,
+    trajectoryDeviationMaxM: envNumber("TRACTOR_TRAJECTORY_DEVIATION_MAX_M", 5),
     onError: (error, phase) => logger.warn("tractor-service 安全监测失败", { phase, message: error.message }),
   });
   if (mode === "sql" && process.env.TRACTOR_MONITOR_ENABLED !== "false") monitor.start();
@@ -255,6 +298,8 @@ async function bootstrap(): Promise<void> {
   const server = createTractorHttpServer({
     jobs,
     safetyEvents,
+    trajectories,
+    trajectoryPlanner,
     executor,
     precheck,
     planOptions,

@@ -17,7 +17,7 @@ import type {
   BackupRecord, BackupRunResult,
   MonitorServiceStatus, MonitorRule, MonitorAlert,
   PredictionRecord, PredictionMetric, PredictionLevel,
-  TractorJob, TractorJobStage, TractorSafetyEvent, TractorOperationType, TractorJobStatus, TractorSafetyKind,
+  TractorJob, TractorSafetyEvent, TractorOperationType, TractorJobStatus, TractorSafetyKind, TractorJobDetail,
 } from '@/types'
 
 /** 剥掉查询参数里的 undefined/null/空串，避免发 ?keyword=&type= 这种无意义空条件 */
@@ -1141,12 +1141,12 @@ export const tractorApi = {
   getJobs(params?: { plotCode?: string; deviceId?: string; status?: TractorJobStatus; page?: number; size?: number }): Promise<PageResult<TractorJob>> {
     return get<PageResult<TractorJob>>('/tractor/jobs', cleanParams(params))
   },
-  /** 作业详情：作业 + 分步指令序列 */
-  getJobDetail(id: string): Promise<{ job: TractorJob; stages: TractorJobStage[] }> {
-    return get<{ job: TractorJob; stages: TractorJobStage[] }>(`/tractor/jobs/${encodeURIComponent(id)}`)
+  /** 作业详情：作业 + 分步指令序列 + 作业轨迹 */
+  getJobDetail(id: string): Promise<TractorJobDetail> {
+    return get<TractorJobDetail>(`/tractor/jobs/${encodeURIComponent(id)}`)
   },
-  /** 下发作业：服务端做安全预检，通过后排程并启动执行 */
-  createJob(data: { plotCode: string; deviceId: string; operationType: TractorOperationType; parameters: { areaMu: number; durationMin: number }; reason?: string }): Promise<TractorJob> {
+  /** 下发作业：服务端做安全预检，通过后排程并启动执行；传 implementWidthM 走 AUTO 算轨迹，传 trajectory 走 MANUAL */
+  createJob(data: { plotCode: string; deviceId: string; operationType: TractorOperationType; parameters: { areaMu: number; durationMin: number }; reason?: string; implementWidthM?: number; trajectory?: { path: [number, number][] } }): Promise<TractorJob> {
     return post<TractorJob>('/tractor/jobs', data)
   },
   /** 人工处置：暂停或急停 */

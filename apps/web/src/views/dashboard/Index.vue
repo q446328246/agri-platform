@@ -1024,7 +1024,7 @@ async function loadDevices() {
       const g = byParcel.get(code) ?? { total: 0, online: 0, name: d.parcelName ?? code, devices: [] as { name: string; status: string }[] }
       g.total += 1
       if (d.status === 'ONLINE') g.online += 1
-      g.devices.push({ name: String(d.name ?? d.deviceCode ?? '设备'), status: String(d.status ?? '') })
+      g.devices.push({ name: String(d.name ?? d.deviceNo ?? '设备'), status: String(d.status ?? '') })
       byParcel.set(code, g)
     }
     const markers = [...byParcel.entries()].map(([code, g]) => {

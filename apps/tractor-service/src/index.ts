@@ -5,6 +5,10 @@ export { InMemoryTractorJobRepository, SqlTractorJobRepository, TRACTOR_OPERATIO
 export type { TractorJob, TractorJobStage, TractorJobRepository, TractorOperationType, TractorJobStatus, TractorStageKind, TractorStageStatus } from "./job.repository.js";
 export { InMemoryTractorSafetyEventRepository, SqlTractorSafetyEventRepository, TRACTOR_SAFETY_KINDS } from "./safety-event.repository.js";
 export type { TractorSafetyEvent, TractorSafetyEventRepository, TractorSafetyKind } from "./safety-event.repository.js";
+export { InMemoryTrajectoryRepository, SqlTrajectoryRepository, TRAJECTORY_SOURCES } from "./trajectory.repository.js";
+export type { Trajectory, TrajectoryLane, TrajectoryPoint, TrajectoryRepository, TrajectorySource, CreateTrajectoryInput } from "./trajectory.repository.js";
+export { trajectoryDistanceM, trajectoryFromCoverage, trajectoryFromPoints } from "./trajectory.js";
+export type { TrajectoryDraft, CoveragePlanView } from "./trajectory.js";
 export { evaluatePrecheck, pointInRing, pointInsideWithBuffer, ringOf } from "./safety.js";
 export type { SafetyGateResult, SafetyPrecheckInput, SafetyOptions } from "./safety.js";
 export { buildJobStages } from "./plan.js";

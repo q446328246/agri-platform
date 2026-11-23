@@ -1,10 +1,10 @@
 import type { PrismaClientLike, Tx } from "@agri/db";
 import { toIsoTimestamp, ulid } from "@agri/shared";
 
-/** 安全事件类型：作业前预检失败 / 围栏越界 / RTK 质量劣化 / 通信失联 / 急停 */
-export type TractorSafetyKind = "PRECHECK_FAIL" | "GEOFENCE_BREACH" | "RTK_QUALITY" | "COMM_LOSS" | "ESTOP";
+/** 安全事件类型：作业前预检失败 / 围栏越界 / RTK 质量劣化 / 通信失联 / 急停 / 轨迹跟随偏离 */
+export type TractorSafetyKind = "PRECHECK_FAIL" | "GEOFENCE_BREACH" | "RTK_QUALITY" | "COMM_LOSS" | "ESTOP" | "TRAJECTORY_DEVIATION";
 
-export const TRACTOR_SAFETY_KINDS: TractorSafetyKind[] = ["PRECHECK_FAIL", "GEOFENCE_BREACH", "RTK_QUALITY", "COMM_LOSS", "ESTOP"];
+export const TRACTOR_SAFETY_KINDS: TractorSafetyKind[] = ["PRECHECK_FAIL", "GEOFENCE_BREACH", "RTK_QUALITY", "COMM_LOSS", "ESTOP", "TRAJECTORY_DEVIATION"];
 
 export interface TractorSafetyEvent {
   id: string;

@@ -189,6 +189,7 @@ const TRACTOR_SAFETY_LABELS: Record<TractorSafetyEventPayload["kind"], string> =
   RTK_QUALITY: "RTK 定位质量劣化",
   COMM_LOSS: "通信失联",
   ESTOP: "急停触发",
+  TRAJECTORY_DEVIATION: "轨迹跟随偏离",
 };
 
 const tractorSafetyTemplate: MessageTemplate<TractorSafetyEventPayload> = {

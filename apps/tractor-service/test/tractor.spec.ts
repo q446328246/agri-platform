@@ -12,6 +12,9 @@ import { createTractorMonitor } from "../src/monitor.js";
 import type { RtkSample } from "../src/monitor.js";
 import { evaluatePrecheck, pointInRing, pointInsideWithBuffer } from "../src/safety.js";
 import { buildJobStages } from "../src/plan.js";
+import { InMemoryTrajectoryRepository } from "../src/trajectory.repository.js";
+import type { TrajectoryPoint } from "../src/trajectory.repository.js";
+import { distanceToPolylineM, trajectoryFromCoverage, trajectoryFromPoints } from "../src/trajectory.js";
 
 const servers: Server[] = [];
 
@@ -272,6 +275,49 @@ describe("作业期安全监测（B2）", () => {
     expect((await jobs.findJob(jobId))?.status).toBe("PAUSED");
     expect((await safetyEvents.list({ jobId }))[0]).toMatchObject({ kind: "RTK_QUALITY" });
   });
+
+  it("同时在越界与偏离观察集的作业去重处理，急停不被覆盖回暂停", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const trajectories = new InMemoryTrajectoryRepository();
+    const dispatched: ControlDispatchInput[] = [];
+    const dispatch = vi.fn(async (input: ControlDispatchInput) => {
+      dispatched.push(input);
+      return { commandId: `cmd-${dispatched.length}` };
+    });
+    let inside = true;
+    const monitor = createTractorMonitor({
+      jobs, safetyEvents, trajectories,
+      fetchRtk: async () => ({ lng: 107.5, lat: 30.9, recordedAt: "2026-11-20T00:00:00.000Z" }),
+      insideGeofence: async () => inside,
+      dispatch,
+      intervalMs: 10_000,
+      trajectoryDeviationMaxM: 5,
+      now: () => new Date("2026-11-20T00:00:00.000Z"),
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 10, durationMin: 20 }, operator: "user-1", reason: "",
+    });
+    await jobs.updateJob(undefined, job.id, { status: "RUNNING" });
+    await trajectories.create(undefined, {
+      jobId: job.id, tenantId: "tenant-demo", plotCode: "P-1", source: "MANUAL",
+      path: [[107.0, 30.0], [107.1, 30.0]], totalDistanceM: 0, durationMin: 0, warnings: [],
+    });
+
+    // tick 1：界内、偏离轨迹 → 暂停，入偏离观察集
+    await monitor.tick();
+    expect((await jobs.findJob(job.id))?.status).toBe("PAUSED");
+
+    // tick 2：出界 → 越界暂停，入越界观察集（作业此时同时在两个观察集）
+    inside = false;
+    await monitor.tick();
+    expect((await jobs.findJob(job.id))?.status).toBe("PAUSED");
+
+    // tick 3：仍出界 → 升级急停；若未去重会被重复处理，急停又被覆盖回暂停
+    await monitor.tick();
+    expect((await jobs.findJob(job.id))?.status).toBe("ESTOPPED");
+  });
 });
 
 describe("拖拉机作业 HTTP 接口（B2）", () => {
@@ -317,6 +363,27 @@ describe("拖拉机作业 HTTP 接口（B2）", () => {
     expect(stages.map((stage) => stage.stage)).toEqual(["TOOL_SWITCH", "OPERATION", "RETURN_HOME"]);
   });
 
+  it("轨迹规划失败不留孤儿作业", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const trajectories = new InMemoryTrajectoryRepository();
+    const trajectoryPlanner = vi.fn(async () => {
+      throw new Error("地块没有可用边界，无法自动算作业轨迹");
+    });
+    const base = await start(createTractorHttpServer({ jobs, safetyEvents, trajectories, trajectoryPlanner }));
+    const headers = { "x-user-id": "user-1", "x-permissions": "tractor:write" };
+
+    const res = await post(base, "/api/v1/tractor/jobs", {
+      plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 10, durationMin: 20 },
+      implementWidthM: 6,
+    }, headers);
+    expect(res.status).toBe(400);
+    expect((await res.json() as { message: string }).message).toContain("无法自动算作业轨迹");
+    // 轨迹规划失败时作业不应落库，避免无分步的孤儿作业
+    expect(await jobs.listJobs({})).toHaveLength(0);
+  });
+
   it("非法作业类型返回 400，缺参返回 400，权限按 tractor:read/write 放行", async () => {
     const base = await start(createTractorHttpServer());
     const writeHeaders = { "x-user-id": "user-1", "x-permissions": "tractor:write" };
@@ -360,5 +427,234 @@ describe("拖拉机安全事件消息模板（B2）", () => {
     }, { eventId: "evt-1", occurredAt: "2026-11-20T08:00:00.000Z" });
     expect(draft).toMatchObject({ type: "ALERT", level: "CRITICAL", plotCode: "P-1" });
     expect(draft?.title).toBe("拖拉机安全告警：P-1 电子围栏越界");
+  });
+});
+
+describe("轨迹几何算法", () => {
+  it("点到折线距离：在线段上为 0，垂直偏移按纬度换算", () => {
+    const path: TrajectoryPoint[] = [[107.0, 30.0], [107.1, 30.0]];
+    expect(distanceToPolylineM({ lng: 107.05, lat: 30.0 }, path)).toBe(0);
+    // 纬度偏 0.0001 度 ≈ 11 米，远超 5 米门限
+    expect(distanceToPolylineM({ lng: 107.05, lat: 30.0001 }, path)).toBeGreaterThan(5);
+    // 折线端点之外，距离取到最近端点
+    expect(distanceToPolylineM({ lng: 106.9, lat: 30.0 }, path)).toBeGreaterThan(5);
+  });
+
+  it("MANUAL 轨迹只现算里程，时长留空", () => {
+    const draft = trajectoryFromPoints([[107.0, 30.0], [107.1, 30.0]]);
+    expect(draft.source).toBe("MANUAL");
+    expect(draft.durationMin).toBe(0);
+    expect(draft.totalDistanceM).toBeGreaterThan(0);
+  });
+
+  it("AUTO 轨迹从覆盖规划结果转换，带作业带与方向", () => {
+    const draft = trajectoryFromCoverage({
+      headingDeg: 90, implementWidthM: 6, totalDistanceM: 1200, durationMin: 15,
+      warnings: ["覆盖倍数 1.0"],
+      path: { coordinates: [[107.0, 30.0], [107.1, 30.0]] },
+      lanes: [{ index: 1, pass: 1, coordinates: [[107.0, 30.0], [107.1, 30.0]], lengthM: 1000 }],
+    });
+    expect(draft.source).toBe("AUTO");
+    expect(draft.headingDeg).toBe(90);
+    expect(draft.implementWidthM).toBe(6);
+    expect(draft.lanes).toHaveLength(1);
+  });
+});
+
+describe("轨迹跟随偏离监测", () => {
+  const PATH: TrajectoryPoint[] = [[107.0, 30.0], [107.1, 30.0]];
+
+  function setup(rtkSample: RtkSample | null) {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const trajectories = new InMemoryTrajectoryRepository();
+    const dispatched: ControlDispatchInput[] = [];
+    const dispatch = vi.fn(async (input: ControlDispatchInput) => {
+      dispatched.push(input);
+      return { commandId: `cmd-${dispatched.length}` };
+    });
+    const monitor = createTractorMonitor({
+      jobs, safetyEvents, trajectories,
+      fetchRtk: async () => rtkSample,
+      insideGeofence: async () => true,
+      dispatch,
+      intervalMs: 10_000,
+      trajectoryDeviationMaxM: 5,
+      now: () => new Date("2026-11-20T00:00:00.000Z"),
+    });
+    return { jobs, safetyEvents, trajectories, dispatched, monitor };
+  }
+
+  async function runningJobWithTrajectory(jobs: InMemoryTractorJobRepository, trajectories: InMemoryTrajectoryRepository): Promise<string> {
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 10, durationMin: 20 }, operator: "user-1", reason: "",
+    });
+    await jobs.updateJob(undefined, job.id, { status: "RUNNING" });
+    await trajectories.create(undefined, {
+      jobId: job.id, tenantId: "tenant-demo", plotCode: "P-1", source: "MANUAL",
+      path: PATH, totalDistanceM: 0, durationMin: 0, warnings: [],
+    });
+    return job.id;
+  }
+
+  it("首次偏离暂停、持续偏离升级急停", async () => {
+    const { jobs, safetyEvents, trajectories, dispatched, monitor } = setup({ lng: 107.05, lat: 30.001, recordedAt: "2026-11-20T00:00:00.000Z" });
+    const jobId = await runningJobWithTrajectory(jobs, trajectories);
+
+    await monitor.tick();
+    expect(dispatched[0]!.type).toBe("PAUSE");
+    expect((await jobs.findJob(jobId))?.status).toBe("PAUSED");
+    expect((await safetyEvents.list({ jobId }))[0]).toMatchObject({ kind: "TRAJECTORY_DEVIATION", level: "WARNING" });
+
+    await monitor.tick();
+    expect(dispatched[1]!.type).toBe("ESTOP");
+    expect((await jobs.findJob(jobId))?.status).toBe("ESTOPPED");
+    const events = await safetyEvents.list({ jobId });
+    expect(events.find((e) => e.kind === "TRAJECTORY_DEVIATION" && e.level === "CRITICAL")).toBeTruthy();
+  });
+
+  it("回轨迹上清零偏离计数，不再触发处置", async () => {
+    let rtk = { lng: 107.05, lat: 30.001, recordedAt: "2026-11-20T00:00:00.000Z" };
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const trajectories = new InMemoryTrajectoryRepository();
+    const dispatched: ControlDispatchInput[] = [];
+    const dispatch = vi.fn(async (input: ControlDispatchInput) => {
+      dispatched.push(input);
+      return { commandId: `cmd-${dispatched.length}` };
+    });
+    const monitor = createTractorMonitor({
+      jobs, safetyEvents, trajectories,
+      fetchRtk: async () => rtk,
+      insideGeofence: async () => true,
+      dispatch,
+      intervalMs: 10_000,
+      trajectoryDeviationMaxM: 5,
+      now: () => new Date("2026-11-20T00:00:00.000Z"),
+    });
+    const jobId = await runningJobWithTrajectory(jobs, trajectories);
+
+    await monitor.tick();
+    expect(dispatched).toHaveLength(1);
+
+    // RTK 回到轨迹上
+    rtk = { lng: 107.05, lat: 30.0, recordedAt: "2026-11-20T00:00:00.000Z" };
+    await monitor.tick();
+    // 无新增下发，偏离计数已清零
+    expect(dispatched).toHaveLength(1);
+    const events = await safetyEvents.list({ jobId, kind: "TRAJECTORY_DEVIATION" });
+    expect(events).toHaveLength(1);
+  });
+
+  it("无轨迹的作业不做偏离判定", async () => {
+    const { jobs, safetyEvents, dispatched, monitor } = setup({ lng: 107.05, lat: 30.001, recordedAt: "2026-11-20T00:00:00.000Z" });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 10, durationMin: 20 }, operator: "user-1", reason: "",
+    });
+    await jobs.updateJob(undefined, job.id, { status: "RUNNING" });
+
+    await monitor.tick();
+    expect(dispatched).toHaveLength(0);
+    expect(await safetyEvents.list({ jobId: job.id })).toHaveLength(0);
+  });
+});
+
+describe("作业轨迹 HTTP 接口", () => {
+  const savedAuthGuard: string | undefined = process.env.AUTH_GUARD_MODE;
+
+  beforeEach(() => {
+    process.env.AUTH_GUARD_MODE = "enforce";
+  });
+
+  afterEach(() => {
+    if (savedAuthGuard === undefined) delete process.env.AUTH_GUARD_MODE;
+    else process.env.AUTH_GUARD_MODE = savedAuthGuard;
+  });
+
+  it("直接传轨迹点建 MANUAL 轨迹，路径点挂到作业步并随详情返回", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const trajectories = new InMemoryTrajectoryRepository();
+    const trajectoryPlanner = vi.fn(async (input: { explicitPath?: TrajectoryPoint[] }) =>
+      input.explicitPath ? trajectoryFromPoints(input.explicitPath) : null,
+    );
+    const base = await start(createTractorHttpServer({ jobs, safetyEvents, trajectories, trajectoryPlanner }));
+    const headers = { "x-user-id": "user-1", "x-permissions": "tractor:write" };
+
+    const path: TrajectoryPoint[] = [[107.0, 30.0], [107.1, 30.0], [107.2, 30.0]];
+    const res = await post(base, "/api/v1/tractor/jobs", {
+      plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 10, durationMin: 20 },
+      trajectory: { path },
+    }, headers);
+    expect(res.status).toBe(201);
+
+    const jobId = (await res.json() as { data: { id: string } }).data.id;
+    const trajectory = await trajectories.findByJob(jobId);
+    expect(trajectory).not.toBeNull();
+    expect(trajectory!.source).toBe("MANUAL");
+    expect(trajectory!.path).toEqual(path);
+
+    // 路径点挂到 OPERATION 步参数，MQTT 指令载荷带的是路径点
+    const stages = await jobs.listStages(jobId);
+    const opStage = stages.find((s) => s.stage === "OPERATION")!;
+    expect(opStage.parameters.path).toEqual(path);
+
+    // 作业详情返回轨迹
+    const detail = await fetch(`${base}/api/v1/tractor/jobs/${jobId}`, { headers: { "x-user-id": "user-1", "x-permissions": "tractor:read" } });
+    const body = (await detail.json() as { data: { trajectory?: { source: string; path: TrajectoryPoint[] } } }).data;
+    expect(body.trajectory?.source).toBe("MANUAL");
+    expect(body.trajectory?.path).toEqual(path);
+  });
+
+  it("传幅宽走 AUTO，trajectoryPlanner 算轨迹落库", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const trajectories = new InMemoryTrajectoryRepository();
+    const trajectoryPlanner = vi.fn(async (input: { implementWidthM?: number }) =>
+      trajectoryFromCoverage({
+        headingDeg: 0, implementWidthM: input.implementWidthM ?? 0,
+        totalDistanceM: 1200, durationMin: 15, warnings: [],
+        path: { coordinates: [[107.0, 30.0], [107.1, 30.0]] },
+        lanes: [{ index: 1, pass: 1, coordinates: [[107.0, 30.0], [107.1, 30.0]], lengthM: 1000 }],
+      }),
+    );
+    const base = await start(createTractorHttpServer({ jobs, safetyEvents, trajectories, trajectoryPlanner }));
+    const headers = { "x-user-id": "user-1", "x-permissions": "tractor:write" };
+
+    const res = await post(base, "/api/v1/tractor/jobs", {
+      plotCode: "P-1", deviceId: "tractor-001", operationType: "TILLAGE",
+      parameters: { areaMu: 10, durationMin: 20 },
+      implementWidthM: 6,
+    }, headers);
+    expect(res.status).toBe(201);
+
+    const jobId = (await res.json() as { data: { id: string } }).data.id;
+    const trajectory = await trajectories.findByJob(jobId);
+    expect(trajectory).not.toBeNull();
+    expect(trajectory!.source).toBe("AUTO");
+    expect(trajectory!.headingDeg).toBe(0);
+    expect(trajectory!.implementWidthM).toBe(6);
+    expect(trajectory!.lanes).toHaveLength(1);
+  });
+
+  it("不传轨迹也不传幅宽，不建轨迹", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const trajectories = new InMemoryTrajectoryRepository();
+    const base = await start(createTractorHttpServer({ jobs, safetyEvents, trajectories }));
+    const headers = { "x-user-id": "user-1", "x-permissions": "tractor:write" };
+
+    const res = await post(base, "/api/v1/tractor/jobs", {
+      plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 10, durationMin: 20 },
+    }, headers);
+    expect(res.status).toBe(201);
+
+    const jobId = (await res.json() as { data: { id: string } }).data.id;
+    const trajectory = await trajectories.findByJob(jobId);
+    expect(trajectory).toBeNull();
   });
 });

@@ -5,7 +5,7 @@
         <el-option v-for="item in plots" :key="item.parcelCode" :label="item.name" :value="item.parcelCode" />
       </el-select>
       <el-select v-model="queryForm.deviceId" placeholder="全部拖拉机" clearable filterable style="width: 220px">
-        <el-option v-for="item in tractors" :key="item.id" :label="`${item.name}（${item.deviceCode}）`" :value="item.id" />
+        <el-option v-for="item in tractors" :key="item.id" :label="`${item.name}（${item.deviceNo}）`" :value="item.id" />
       </el-select>
       <el-select v-model="queryForm.status" placeholder="全部状态" clearable style="width: 140px">
         <el-option v-for="item in statusOptions" :key="item.value" :label="item.label" :value="item.value" />
@@ -81,7 +81,7 @@
         </el-form-item>
         <el-form-item label="拖拉机" required>
           <el-select v-model="dispatchForm.deviceId" placeholder="选择拖拉机" filterable style="width: 100%">
-            <el-option v-for="item in tractors" :key="item.id" :label="`${item.name}（${item.deviceCode}）`" :value="item.id" />
+            <el-option v-for="item in tractors" :key="item.id" :label="`${item.name}（${item.deviceNo}）`" :value="item.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="作业类型" required>
@@ -99,6 +99,21 @@
         <el-form-item label="作业说明">
           <el-input v-model="dispatchForm.reason" placeholder="选填" />
         </el-form-item>
+        <el-form-item label="作业轨迹">
+          <el-radio-group v-model="dispatchForm.trajectoryMode">
+            <el-radio value="auto">按幅宽自动算</el-radio>
+            <el-radio value="manual">手动传轨迹点</el-radio>
+            <el-radio value="none">不建轨迹</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="dispatchForm.trajectoryMode === 'auto'" label="农具幅宽">
+          <el-input-number v-model="dispatchForm.implementWidthM" :min="0.5" :max="50" :precision="2" :step="0.5" style="width: 100%" />
+          <span class="form-hint">米，服务端按地块边界自动铺牛耕式作业轨迹</span>
+        </el-form-item>
+        <el-form-item v-if="dispatchForm.trajectoryMode === 'manual'" label="轨迹点">
+          <el-input v-model="dispatchForm.trajectoryText" type="textarea" :rows="3" placeholder='JSON 数组，每点 [经度, 纬度]，如 [[107.0,30.0],[107.1,30.0]]' />
+          <span class="form-hint">至少 2 个点，格式 [经度, 纬度]</span>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dispatchVisible = false">取消</el-button>
@@ -106,7 +121,17 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="detailVisible" title="作业分步指令" width="560px">
+    <el-dialog v-model="detailVisible" title="作业分步指令" width="720px">
+      <div v-if="detailTrajectory" class="trajectory-section">
+        <PlotBoundaryMap :trajectory="detailTrajectory" />
+        <div class="trajectory-meta">
+          <el-tag size="small" :type="detailTrajectory.source === 'AUTO' ? 'success' : 'info'" effect="plain">
+            {{ detailTrajectory.source === 'AUTO' ? '自动算' : '手动传' }}
+          </el-tag>
+          <span>{{ detailTrajectory.totalDistanceM }} 米 · {{ detailTrajectory.durationMin }} 分钟</span>
+          <span v-if="detailTrajectory.warnings.length" class="trajectory-warning">{{ detailTrajectory.warnings.join('；') }}</span>
+        </div>
+      </div>
       <el-table :data="detailStages" border size="small">
         <el-table-column label="分步" width="100" align="center">
           <template #default="{ row }">{{ stageLabel(row.stage) }}</template>
@@ -131,7 +156,8 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Promotion } from '@element-plus/icons-vue'
 import { deviceApi, plotApi, tractorApi } from '@/api'
-import type { Device, Plot, TractorJob, TractorJobStage, TractorOperationType, TractorSafetyEvent } from '@/types'
+import type { Device, Plot, TractorJob, TractorJobStage, TractorOperationType, TractorSafetyEvent, Trajectory } from '@/types'
+import PlotBoundaryMap from '@/components/PlotBoundaryMap.vue'
 import { formatDateTime } from '@/utils'
 import { useUserStore } from '@/stores'
 import { checkPermission } from '@/utils/permission'
@@ -153,7 +179,7 @@ const statusOptions: Array<{ value: string; label: string }> = [
 const operationLabel = (type: TractorOperationType): string => operationOptions.find((item) => item.value === type)?.label ?? type
 const statusLabel = (status: string): string => statusOptions.find((item) => item.value === status)?.label ?? status
 const stageLabel = (value: string): string => ({ TOOL_SWITCH: '换具', OPERATION: '作业', RETURN_HOME: '返航', PENDING: '待下发', SENT: '已下发', DONE: '已完成', FAILED: '失败', SKIPPED: '跳过' }[value] ?? value)
-const kindLabel = (kind: string): string => ({ PRECHECK_FAIL: '预检失败', GEOFENCE_BREACH: '围栏越界', RTK_QUALITY: 'RTK 质量', COMM_LOSS: '通信失联', ESTOP: '急停' }[kind] ?? kind)
+const kindLabel = (kind: string): string => ({ PRECHECK_FAIL: '预检失败', GEOFENCE_BREACH: '围栏越界', RTK_QUALITY: 'RTK 质量', COMM_LOSS: '通信失联', ESTOP: '急停', TRAJECTORY_DEVIATION: '轨迹偏离' }[kind] ?? kind)
 const statusTagType = (status: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' =>
   status === 'RUNNING' ? 'primary' : status === 'PAUSED' ? 'warning' : status === 'COMPLETED' ? 'success' : status === 'FAILED' || status === 'ESTOPPED' ? 'danger' : 'info'
 const stageTagType = (status: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' =>
@@ -174,10 +200,11 @@ const stageCounts = reactive<Record<string, number>>({})
 
 const dispatchVisible = ref(false)
 const dispatching = ref(false)
-const dispatchForm = reactive({ plotCode: '', deviceId: '', operationType: 'SEEDING' as TractorOperationType, areaMu: 10, durationMin: 30, reason: '' })
+const dispatchForm = reactive({ plotCode: '', deviceId: '', operationType: 'SEEDING' as TractorOperationType, areaMu: 10, durationMin: 30, reason: '', trajectoryMode: 'auto' as 'auto' | 'manual' | 'none', implementWidthM: 6, trajectoryText: '' })
 
 const detailVisible = ref(false)
 const detailStages = ref<TractorJobStage[]>([])
+const detailTrajectory = ref<Trajectory | null>(null)
 
 const stageCount = (jobId: string): number => stageCounts[jobId] ?? 3
 
@@ -257,6 +284,26 @@ async function submitDispatch(): Promise<void> {
     ElMessage.warning('请选择地块与拖拉机')
     return
   }
+  // 手动传点：解析 JSON 并校验每点为 [经度, 纬度]
+  let manualPath: [number, number][] | undefined
+  if (dispatchForm.trajectoryMode === 'manual') {
+    try {
+      const parsed = JSON.parse(dispatchForm.trajectoryText) as unknown
+      if (!Array.isArray(parsed) || parsed.length < 2) {
+        ElMessage.warning('轨迹点需为至少 2 个点的 JSON 数组')
+        return
+      }
+      manualPath = (parsed as Array<[number, number]>).map((point) => {
+        const lng = Number(point[0])
+        const lat = Number(point[1])
+        if (!Number.isFinite(lng) || !Number.isFinite(lat)) throw new Error('坐标非法')
+        return [lng, lat]
+      })
+    } catch {
+      ElMessage.warning('轨迹点格式错误，需为 [[经度,纬度],...] 数组')
+      return
+    }
+  }
   dispatching.value = true
   try {
     const job = await tractorApi.createJob({
@@ -265,6 +312,8 @@ async function submitDispatch(): Promise<void> {
       operationType: dispatchForm.operationType,
       parameters: { areaMu: dispatchForm.areaMu, durationMin: dispatchForm.durationMin },
       ...(dispatchForm.reason ? { reason: dispatchForm.reason } : {}),
+      ...(dispatchForm.trajectoryMode === 'auto' ? { implementWidthM: dispatchForm.implementWidthM } : {}),
+      ...(manualPath ? { trajectory: { path: manualPath } } : {}),
     })
     ElMessage.success(`作业已排程（${statusLabel(job.status)}），安全预检通过`)
     dispatchVisible.value = false
@@ -307,6 +356,7 @@ async function openDetail(job: TractorJob): Promise<void> {
   try {
     const detail = await tractorApi.getJobDetail(job.id)
     detailStages.value = detail.stages
+    detailTrajectory.value = detail.trajectory
     stageCounts[job.id] = detail.stages.length
     detailVisible.value = true
   } catch (error) {
@@ -348,5 +398,22 @@ onUnmounted(() => {
   margin-left: 8px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+.trajectory-section {
+  margin-bottom: 12px;
+}
+
+.trajectory-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.trajectory-warning {
+  color: var(--el-color-warning);
 }
 </style>

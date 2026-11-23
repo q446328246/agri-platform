@@ -8,6 +8,9 @@ import { InMemoryTractorJobRepository, TRACTOR_OPERATION_TYPES, TRACTOR_JOB_STAT
 import type { TractorJob, TractorJobRepository, TractorJobStage, TractorOperationType } from "./job.repository.js";
 import { InMemoryTractorSafetyEventRepository, TRACTOR_SAFETY_KINDS } from "./safety-event.repository.js";
 import type { TractorSafetyEvent, TractorSafetyEventRepository } from "./safety-event.repository.js";
+import { InMemoryTrajectoryRepository } from "./trajectory.repository.js";
+import type { Trajectory, TrajectoryPoint, TrajectoryRepository } from "./trajectory.repository.js";
+import type { TrajectoryDraft } from "./trajectory.js";
 import type { JobExecutor } from "./executor.js";
 import { buildJobStages } from "./plan.js";
 import type { PlanOptions } from "./plan.js";
@@ -30,6 +33,10 @@ export interface TractorHttpDependencies {
   precheck?: (input: { plotCode: string; deviceId: string; operator: string }) => Promise<TractorPrecheckResult>;
   /** 作业计划参数（机具编码、超时等） */
   planOptions?: PlanOptions;
+  /** 轨迹台账；缺省空内存实现 */
+  trajectories?: TrajectoryRepository;
+  /** 轨迹规划：直接传点走 MANUAL、传幅宽走 AUTO；缺省不建轨迹 */
+  trajectoryPlanner?: (input: { plotCode: string; implementWidthM?: number; explicitPath?: TrajectoryPoint[] }) => Promise<TrajectoryDraft | null>;
   tenantId?: string;
 }
 
@@ -63,6 +70,34 @@ function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+/**
+ * 解析直接传入的轨迹点：接受 `trajectory.path`（[经度, 纬度] 序列）或直接是坐标数组。
+ * 少于 2 个点不成一条路径，返回 undefined 表示未传（交由幅宽走自动算）。
+ */
+function parseTrajectoryPath(raw: unknown): TrajectoryPoint[] | undefined {
+  const coordinates = Array.isArray(raw) ? raw : (raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).path) ? (raw as Record<string, unknown>).path : undefined);
+  if (!Array.isArray(coordinates)) return undefined;
+  const points: TrajectoryPoint[] = [];
+  for (const item of coordinates) {
+    if (!Array.isArray(item) || item.length < 2) return undefined;
+    const lng = Number(item[0]);
+    const lat = Number(item[1]);
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return undefined;
+    points.push([lng, lat]);
+  }
+  return points.length >= 2 ? points : undefined;
+}
+
+/** 农具幅宽（米）：自动算轨迹时必填，越界直接拒绝，不猜一个幅宽去铺作业带 */
+function readImplementWidth(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 50) {
+    throw new Error("implementWidthM（农具幅宽，米）需在 0~50 之间");
+  }
+  return parsed;
+}
+
 const TRACTOR_POLICY = { read: "tractor:read", write: "tractor:write" };
 
 export function createTractorHttpServer(dependencies?: Partial<TractorHttpDependencies>): Server {
@@ -71,6 +106,8 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
   const executor = dependencies?.executor;
   const precheck = dependencies?.precheck;
   const planOptions = dependencies?.planOptions;
+  const trajectories = dependencies?.trajectories ?? new InMemoryTrajectoryRepository();
+  const trajectoryPlanner = dependencies?.trajectoryPlanner;
   const tenantId = dependencies?.tenantId ?? "tenant-demo";
 
   return createServer(async (req, res) => {
@@ -111,6 +148,10 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
           }
         }
 
+        // 轨迹入参：直接传点走 MANUAL，传幅宽走 AUTO；两者都无则不建轨迹
+        const explicitPath = parseTrajectoryPath(body.trajectory);
+        const implementWidthM = readImplementWidth(body.implementWidthM);
+
         // 计划算法：分步指令序列，参数不满足包络口径直接拒绝
         let stages;
         try {
@@ -119,10 +160,32 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
           send(res, 400, null, traceId, error instanceof Error ? error.message : "作业参数非法");
           return;
         }
+        // 轨迹规划先于作业落库：AUTO 模式地块无边界或覆盖规划不可达时抛错，
+        // 此时尚未建作业，不会留下无分步的孤儿作业
+        let trajectoryDraft: TrajectoryDraft | null = null;
+        if (trajectoryPlanner) {
+          try {
+            trajectoryDraft = await trajectoryPlanner({
+              plotCode,
+              ...(implementWidthM !== undefined ? { implementWidthM } : {}),
+              ...(explicitPath !== undefined ? { explicitPath } : {}),
+            });
+          } catch (error) {
+            send(res, 400, null, traceId, error instanceof Error ? error.message : "作业轨迹规划失败");
+            return;
+          }
+        }
         const job = await jobs.createJob(undefined, {
           tenantId, plotCode, deviceId, operationType, parameters, operator,
           reason: text(body.reason) || "人工下发作业",
         });
+        // 轨迹落库，并把下发用的路径点挂到作业步参数上——MQTT 指令载荷带的是路径点，
+        // 设备拿不到数据库里的轨迹行
+        if (trajectoryDraft) {
+          const trajectory = await trajectories.create(undefined, { jobId: job.id, tenantId, plotCode, ...trajectoryDraft });
+          const operationStage = stages.find((stage) => stage.stage === "OPERATION");
+          if (operationStage) operationStage.parameters = { ...operationStage.parameters, path: trajectory.path };
+        }
         for (const stage of stages) {
           await jobs.addStage(undefined, {
             jobId: job.id, stage: stage.stage, commandType: stage.commandType,
@@ -161,7 +224,8 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
         const job = await jobs.findJob(jobId);
         if (!job) { send(res, 404, null, traceId, "作业不存在"); return; }
         const stages = await jobs.listStages(job.id);
-        send(res, 200, { job, stages }, traceId);
+        const trajectory = await trajectories.findByJob(job.id);
+        send(res, 200, { job, stages, trajectory }, traceId);
         return;
       }
 
