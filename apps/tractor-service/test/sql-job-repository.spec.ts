@@ -23,6 +23,7 @@ describe.runIf(databaseUrl)("SqlTractorJobRepository 更新与租约（真实库
       expect(stage.jobId).toBe(job.id);
       expect(await repository.claimJob(tenantId, job.id, "owner-a", 60_000)).not.toBeNull();
       expect(await repository.updateJob(tenantId, job.id, { status: "RUNNING" }, { expectedStatus: "PLANNED", owner: "owner-a" })).toMatchObject({ status: "RUNNING" });
+      expect(await repository.listJobs({ tenantId, status: "RUNNING", limit: 10, offset: 0 })).toMatchObject([{ id: job.id }]);
       expect(await repository.updateStage(tenantId, stage.id, { status: "SENT", commandId: "cmd-smoke" }, { expectedStatus: "PENDING", owner: "owner-a" })).toMatchObject({ status: "SENT", commandId: "cmd-smoke" });
       expect(await repository.updateJob(tenantId, job.id, { status: "FAILED" }, { expectedStatus: "RUNNING", owner: "owner-b" })).toBeNull();
       expect(await repository.updateStage(tenantId, stage.id, { status: "FAILED" }, { expectedStatus: "SENT", owner: "owner-b" })).toBeNull();

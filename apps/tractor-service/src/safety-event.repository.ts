@@ -113,7 +113,7 @@ export class SqlTractorSafetyEventRepository implements TractorSafetyEventReposi
   }
 
   async list(query: TractorSafetyEventQuery): Promise<TractorSafetyEvent[]> {
-    const conditions: string[] = ["tenant_id = ?"];
+    const conditions: string[] = ["tenant_id = $1"];
     const params: unknown[] = [query.tenantId];
     const add = (sql: string, value: unknown): void => {
       params.push(value);

@@ -39,7 +39,7 @@
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openDetail(row)">分步</el-button>
           <el-button v-if="row.status === 'RUNNING'" link type="warning" size="small" :disabled="!canWrite" @click="stop(row, false)">暂停</el-button>
-          <el-button v-if="row.status === 'RUNNING' || row.status === 'PAUSED'" link type="danger" size="small" :disabled="!canWrite" @click="stop(row, true)">急停</el-button>
+          <el-button v-if="row.status === 'RUNNING' || row.status === 'PAUSED' || row.status === 'SAFETY_UNKNOWN'" link type="danger" size="small" :disabled="!canWrite" @click="stop(row, true)">急停</el-button>
           <el-button v-if="row.status === 'PAUSED'" link type="primary" size="small" :disabled="!canWrite" @click="resume(row)">恢复</el-button>
         </template>
       </el-table-column>
@@ -171,6 +171,7 @@ const statusOptions: Array<{ value: string; label: string }> = [
   { value: 'PLANNED', label: '已排程' },
   { value: 'RUNNING', label: '作业中' },
   { value: 'PAUSED', label: '已暂停' },
+  { value: 'SAFETY_UNKNOWN', label: '安全状态未知' },
   { value: 'COMPLETED', label: '已完成' },
   { value: 'FAILED', label: '失败' },
   { value: 'ESTOPPED', label: '已急停' },
@@ -181,7 +182,7 @@ const statusLabel = (status: string): string => statusOptions.find((item) => ite
 const stageLabel = (value: string): string => ({ TOOL_SWITCH: '换具', OPERATION: '作业', RETURN_HOME: '返航', PENDING: '待下发', SENT: '已下发', DONE: '已完成', FAILED: '失败', SKIPPED: '跳过' }[value] ?? value)
 const kindLabel = (kind: string): string => ({ PRECHECK_FAIL: '预检失败', GEOFENCE_BREACH: '围栏越界', RTK_QUALITY: 'RTK 质量', COMM_LOSS: '通信失联', ESTOP: '急停', TRAJECTORY_DEVIATION: '轨迹偏离' }[kind] ?? kind)
 const statusTagType = (status: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' =>
-  status === 'RUNNING' ? 'primary' : status === 'PAUSED' ? 'warning' : status === 'COMPLETED' ? 'success' : status === 'FAILED' || status === 'ESTOPPED' ? 'danger' : 'info'
+  status === 'RUNNING' ? 'primary' : status === 'PAUSED' ? 'warning' : status === 'COMPLETED' ? 'success' : status === 'FAILED' || status === 'ESTOPPED' || status === 'SAFETY_UNKNOWN' ? 'danger' : 'info'
 const stageTagType = (status: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' =>
   status === 'SENT' ? 'primary' : status === 'DONE' ? 'success' : status === 'FAILED' ? 'danger' : 'info'
 

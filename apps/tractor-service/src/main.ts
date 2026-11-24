@@ -18,7 +18,7 @@ import { InMemoryTrajectoryRepository, SqlTrajectoryRepository } from "./traject
 import type { TrajectoryRepository } from "./trajectory.repository.js";
 import { createTrajectoryPlanner } from "./trajectory.js";
 import type { CoveragePlanView } from "./trajectory.js";
-import { createJobExecutor, recoverUnfinishedJobs, recoveryCommand } from "./executor.js";
+import { createJobActionLock, createJobExecutor, recoverUnfinishedJobs, recoveryCommand } from "./executor.js";
 import type { ControlDispatchInput } from "./executor.js";
 import { createTractorMonitor } from "./monitor.js";
 import type { RtkSample } from "./monitor.js";
@@ -319,7 +319,9 @@ async function bootstrap(): Promise<void> {
     return reachable ? "TIMEOUT" : "UNAVAILABLE";
   };
 
+  const withJobAction = createJobActionLock();
   const executor = createJobExecutor({
+    withJobAction,
     jobs,
     safetyEvents,
     dispatch: control.dispatch,
@@ -355,6 +357,7 @@ async function bootstrap(): Promise<void> {
   });
 
   const monitor = createTractorMonitor({
+    withJobAction,
     tenantId,
     jobs,
     safetyEvents,

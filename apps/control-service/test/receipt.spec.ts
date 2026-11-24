@@ -126,6 +126,23 @@ describe("指令仓储跃迁", () => {
     expect(
       pendingMinutesOf(command({ status: "ACKED", sentAt: "2026-11-12T00:01:00.000Z", ackedAt: "2026-11-12T00:59:00.000Z" }), now),
     ).toBe(1);
+    expect(
+      pendingMinutesOf(command({
+        status: "PAUSED",
+        sentAt: "2026-11-12T00:01:00.000Z",
+        ackedAt: "2026-11-12T00:02:00.000Z",
+        pausedAt: "2026-11-12T00:50:00.000Z",
+      }), now),
+    ).toBe(10);
+    expect(
+      pendingMinutesOf(command({
+        status: "ACKED",
+        sentAt: "2026-11-12T00:01:00.000Z",
+        ackedAt: "2026-11-12T00:55:00.000Z",
+        pausedAt: "2026-11-12T00:50:00.000Z",
+        resumedAt: "2026-11-12T00:58:00.000Z",
+      }), now),
+    ).toBe(2);
     expect(pendingMinutesOf(command({ status: "DONE", finishedAt: "2026-11-12T00:30:00.000Z" }), now)).toBeUndefined();
   });
 
@@ -228,6 +245,92 @@ describe("设备通道：下发确认与执行回执", () => {
     expect((await repository.find(TENANT, "cmd-done"))?.status).toBe("DONE");
   });
 
+  it("恢复后到达的陈旧 PAUSED 回执不能把运行目标改回暂停", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "cmd-resumed",
+        status: "ACKED",
+        version: 5,
+        sentAt: "2026-11-12T00:01:00.000Z",
+        ackedAt: "2026-11-12T00:02:00.000Z",
+        pausedAt: "2026-11-12T00:03:00.000Z",
+        resumedAt: "2026-11-12T00:05:00.000Z",
+      }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+
+    const stale = await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "cmd-resumed",
+      status: "PAUSED",
+      at: "2026-11-12T00:04:00.000Z",
+    });
+    expect(stale.status).toBe(400);
+    expect((await stale.json() as { message: string }).message).toContain("早于上一次状态推进");
+    expect((await repository.find(TENANT, "cmd-resumed"))?.status).toBe("ACKED");
+  });
+
+  it("暂停与恢复联动写入时序，并拒绝跨暂停周期的陈旧 RESUME 结单", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "job", status: "ACKED", version: 3, sentAt: "2026-11-12T00:01:00.000Z", ackedAt: "2026-11-12T00:02:00.000Z" }),
+      command({ id: "pause", type: "PAUSE", status: "SENT", version: 2, sentAt: "2026-11-12T00:02:30.000Z", parameters: { targetCommandId: "job" } }),
+      command({ id: "resume", type: "RESUME", status: "SENT", version: 2, sentAt: "2026-11-12T00:04:00.000Z", parameters: { targetCommandId: "job" } }),
+      command({ id: "stale-resume", type: "RESUME", status: "SENT", version: 2, sentAt: "2026-11-12T00:04:00.000Z", parameters: { targetCommandId: "job" } }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+
+    expect((await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "pause", status: "DONE", at: "2026-11-12T00:03:00.000Z",
+    })).status).toBe(200);
+    expect((await repository.find(TENANT, "job"))).toMatchObject({ status: "PAUSED", pausedAt: "2026-11-12T00:03:00.000Z" });
+
+    expect((await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "resume", status: "DONE", at: "2026-11-12T00:05:00.000Z",
+    })).status).toBe(200);
+    expect((await repository.find(TENANT, "job"))).toMatchObject({ status: "ACKED", resumedAt: "2026-11-12T00:05:00.000Z" });
+
+    const pausedAgain = await repository.find(TENANT, "job");
+    expect(await repository.transition(TENANT, {
+      id: "job", status: "PAUSED", at: "2026-11-12T00:06:00.000Z", version: pausedAgain!.version,
+    })).not.toBeNull();
+    const staleResume = await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "stale-resume", status: "DONE", at: "2026-11-12T00:05:30.000Z",
+    });
+    expect(staleResume.status).toBe(409);
+    expect((await staleResume.json() as { message: string }).message).toContain("拒绝陈旧联动");
+    expect((await repository.find(TENANT, "job"))?.status).toBe("PAUSED");
+  });
+
+  it("联动暂停按目标完整生命周期校验时刻，不能把较晚的接收状态倒写为暂停", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "job-late-ack",
+        status: "ACKED",
+        version: 4,
+        sentAt: "2026-11-12T00:01:00.000Z",
+        ackedAt: "2026-11-12T00:10:00.000Z",
+      }),
+      command({
+        id: "pause-too-early",
+        type: "PAUSE",
+        status: "SENT",
+        version: 2,
+        sentAt: "2026-11-12T00:02:00.000Z",
+        parameters: { targetCommandId: "job-late-ack" },
+      }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+
+    const stale = await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "pause-too-early",
+      status: "DONE",
+      at: "2026-11-12T00:05:00.000Z",
+    });
+    expect(stale.status).toBe(400);
+    expect((await stale.json() as { message: string }).message).toContain("早于上一次状态推进");
+    expect((await repository.find(TENANT, "job-late-ack"))).toMatchObject({ status: "ACKED", version: 4 });
+    expect((await repository.find(TENANT, "pause-too-early"))?.status).toBe("SENT");
+  });
+
   it("下发与回执校验指令设备归属，越权设备不能推进状态", async () => {
     const repository = new InMemoryControlCommandRepository([command(), command({ id: "cmd-sent", status: "SENT", version: 2, sentAt: "2026-11-12T00:01:00.000Z" })]);
     const base = await start(createControlHttpServer(repository));
@@ -307,7 +410,7 @@ describe("设备通道：下发确认与执行回执", () => {
 
     const earlyAck = await postJson(base, "/api/v1/control/device/receipt", { commandId: created.id, status: "ACKED", at: "2026-11-12T07:59:00.000Z", message: "补报接收" });
     expect(earlyAck.status).toBe(400);
-    expect((await earlyAck.json() as { message: string }).message).toContain("早于下发时刻");
+    expect((await earlyAck.json() as { message: string }).message).toContain("早于上一次状态推进");
 
     // 倒流的接收回执被拒后指令仍停在 SENT，不能被写成半截生命周期
     const listed = await dataOf(await getJson(base, "/api/v1/control/commands?deviceId=device-fert-009"));
@@ -412,6 +515,20 @@ describe("设备通道：待执行指令轮询", () => {
     expect(queued.items[1].parameters).toEqual({ zones: [{ zoneCode: "ZONE-01", areaMu: 10, targetMm: 20 }] });
   });
 
+  it("设备待执行队列优先急停和断电，再按创建时间正序执行", async () => {
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString();
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "resume", type: "RESUME", createdAt: minutesAgo(5), parameters: { targetCommandId: "job" } }),
+      command({ id: "normal", type: "IRRIGATION", createdAt: minutesAgo(4) }),
+      command({ id: "power-off", type: "POWER_OFF", createdAt: minutesAgo(3) }),
+      command({ id: "estop", type: "ESTOP", createdAt: minutesAgo(2) }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+
+    const queued = await dataOf(await getJson(base, "/api/v1/control/device/pending?deviceId=device-fert-001"));
+    expect(queued.items.map((item: any) => item.id)).toEqual(["power-off", "estop", "resume", "normal"]);
+  });
+
   it("缺设备标识直接拒绝，翻页不重不漏，别家租户轮不到一条", async () => {
     const base = await start(createControlHttpServer(queueRepository()));
 
@@ -506,6 +623,51 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 回执列（真实库�
       expect((await repository.page(TENANT, { page: 1, size: 200, pending: true, pendingOverMin: 1 })).items.map((item) => item.id)).toContain(id);
     } finally {
       await client.$executeRawUnsafe("DELETE FROM control_commands WHERE id = $1", id);
+      await client.$disconnect();
+    }
+  });
+
+  it("暂停与恢复重置 SQL 超时起点，设备队列优先安全指令", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const repository = new SqlControlCommandRepository(client);
+    const suffix = Date.now();
+    const pausedId = `cmd-paused-smoke-${suffix}`;
+    const deviceId = `device-priority-smoke-${suffix}`;
+    const resumeId = `cmd-resume-smoke-${suffix}`;
+    const powerOffId = `cmd-power-off-smoke-${suffix}`;
+    const estopId = `cmd-estop-smoke-${suffix}`;
+    const ids = [pausedId, resumeId, powerOffId, estopId];
+    try {
+      const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+      await repository.create(command({ id: pausedId, createdAt: minutesAgo(60) }));
+      let current = await repository.find(TENANT, pausedId);
+      expect(await repository.transition(TENANT, { id: pausedId, status: "SENT", at: minutesAgo(59), version: current!.version })).not.toBeNull();
+      current = await repository.find(TENANT, pausedId);
+      expect(await repository.transition(TENANT, { id: pausedId, status: "ACKED", at: minutesAgo(58), version: current!.version })).not.toBeNull();
+      current = await repository.find(TENANT, pausedId);
+      expect(await repository.transition(TENANT, { id: pausedId, status: "PAUSED", at: minutesAgo(2), version: current!.version })).not.toBeNull();
+      expect((await repository.page(TENANT, { page: 1, size: 10, pending: true, pendingOverMin: 15 })).items.map((item) => item.id)).not.toContain(pausedId);
+
+      current = await repository.find(TENANT, pausedId);
+      expect(await repository.transition(TENANT, { id: pausedId, status: "ACKED", at: minutesAgo(1), version: current!.version })).not.toBeNull();
+      expect((await repository.page(TENANT, { page: 1, size: 10, pending: true, pendingOverMin: 15 })).items.map((item) => item.id)).not.toContain(pausedId);
+      current = await repository.find(TENANT, pausedId);
+      await expect(repository.transition(TENANT, {
+        id: pausedId,
+        status: "PAUSED",
+        at: minutesAgo(3),
+        version: current!.version,
+      })).rejects.toThrow("control_commands_pause_after_ack_check");
+      expect((await repository.find(TENANT, pausedId))?.status).toBe("ACKED");
+
+      await repository.create(command({ id: resumeId, deviceId, type: "RESUME", parameters: { targetCommandId: pausedId }, createdAt: minutesAgo(5) }));
+      await repository.create(command({ id: powerOffId, deviceId, type: "POWER_OFF", parameters: {}, createdAt: minutesAgo(3) }));
+      await repository.create(command({ id: estopId, deviceId, type: "ESTOP", parameters: {}, createdAt: minutesAgo(2) }));
+      const due = await repository.page(TENANT, { deviceId, pending: true, dueOnly: true, ascending: true, page: 1, size: 10 });
+      expect(due.items.map((item) => item.id)).toEqual([powerOffId, estopId, resumeId]);
+    } finally {
+      await client.$executeRawUnsafe("DELETE FROM control_commands WHERE id = ANY($1::text[])", ids);
       await client.$disconnect();
     }
   });

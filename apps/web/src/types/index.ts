@@ -679,7 +679,7 @@ export interface PredictionRecord {
 // 拖拉机作业（B2）：一次作业的编排留痕与分步指令
 export type TractorOperationType = 'SEEDING' | 'TILLAGE' | 'WEEDING'
 
-export type TractorJobStatus = 'PLANNED' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'ESTOPPED'
+export type TractorJobStatus = 'PLANNED' | 'RUNNING' | 'PAUSED' | 'SAFETY_UNKNOWN' | 'COMPLETED' | 'FAILED' | 'ESTOPPED'
 
 export type TractorStageKind = 'TOOL_SWITCH' | 'OPERATION' | 'RETURN_HOME'
 

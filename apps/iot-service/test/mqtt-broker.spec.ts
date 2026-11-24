@@ -362,6 +362,23 @@ describe("createMqttBroker", () => {
     expect(warnings.find((entry) => entry.message.includes("入站投递失败"))?.meta).toMatchObject({ topic: "agri/tenant-demo/DEV-001/telemetry" });
   });
 
+  it.each([400, 404, 409])("业务侧返回 %s 时确认入站消息并停止重试", async (status) => {
+    const deliveries = new InMemoryMqttDeliveryRepository();
+    const fetchImpl = (async () => new Response(null, { status })) as unknown as typeof fetch;
+    const { broker, warnings, receive } = createHarness({ fetchImpl, deliveries, retryIntervalMs: 500 });
+    const ack = vi.fn();
+    broker.start();
+    receive("agri/tenant-demo/DEV-001/receipt", JSON.stringify({ commandId: "cmd-unknown", status: "ACKED" }), ack);
+
+    await vi.waitFor(() => expect(ack).toHaveBeenCalledWith(0, 0));
+    expect(await deliveries.due(Date.now() + 60_000, 10)).toEqual([]);
+    expect(warnings.find((entry) => entry.message.includes("永久拒绝"))?.meta).toMatchObject({
+      topic: "agri/tenant-demo/DEV-001/receipt",
+      status,
+    });
+    await broker.stop();
+  });
+
   it("使用稳定 clientId、持久会话和 broker 凭据", () => {
     const password = randomBytes(16).toString("hex");
     const { client } = createHarness({ username: "iot-service", password, clientId: "iot-service-tenant-demo" });

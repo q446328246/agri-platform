@@ -118,8 +118,8 @@ export function createMqttBroker(options: MqttBrokerOptions = {}): MqttBroker {
     pendingAcks.set(deliveryId, callbacks);
   }
 
-  async function forward(delivery: MqttDelivery): Promise<void> {
-    if (delivery.direction !== "INBOUND") return;
+  async function forward(delivery: MqttDelivery): Promise<number> {
+    if (delivery.direction !== "INBOUND") return 0;
     const path = delivery.topic.endsWith("/telemetry") ? "/api/v1/telemetry/report" : "/api/v1/control/device/receipt";
     const baseUrl = delivery.topic.endsWith("/telemetry") ? telemetryBaseUrl : controlBaseUrl;
     const response = await fetchImpl(`${baseUrl}${path}`, {
@@ -128,7 +128,7 @@ export function createMqttBroker(options: MqttBrokerOptions = {}): MqttBroker {
       body: JSON.stringify(delivery.payload),
       signal: AbortSignal.timeout(5000),
     });
-    if (!response.ok) throw new Error(`${path} 返回 ${response.status}`);
+    return response.status;
   }
 
   async function processInbound(delivery: MqttDelivery): Promise<void> {
@@ -140,11 +140,14 @@ export function createMqttBroker(options: MqttBrokerOptions = {}): MqttBroker {
     if (running) return running;
     const task = (async () => {
       try {
-        await forward(delivery);
+        const status = await forward(delivery);
+        const rejected = [400, 404, 409].includes(status);
+        if (!rejected && (status < 200 || status >= 300)) throw new Error(`HTTP 返回 ${status}`);
         await deliveries.complete(delivery.id);
         completedDeliveryIds.add(delivery.id);
         if (completedDeliveryIds.size > 10_000) completedDeliveryIds.delete(completedDeliveryIds.values().next().value!);
         acknowledge(delivery.id);
+        if (rejected) logger.warn("MQTT 入站消息被业务侧永久拒绝，已确认并停止重试", { topic: delivery.topic, status });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await deliveries.fail(delivery.id, message, Date.now());

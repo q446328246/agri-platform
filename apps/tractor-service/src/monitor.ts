@@ -3,7 +3,7 @@ import type { EventTopicValue } from "@agri/contracts";
 import type { TractorJob, TractorJobRepository, TractorJobStatus } from "./job.repository.js";
 import type { TractorSafetyEventRepository } from "./safety-event.repository.js";
 import type { TrajectoryRepository } from "./trajectory.repository.js";
-import type { ControlDispatchInput } from "./executor.js";
+import type { ControlDispatchInput, JobActionLock } from "./executor.js";
 import { recordSafetyEvent, TractorCommandError } from "./executor.js";
 import { distanceToPolylineM } from "./trajectory.js";
 
@@ -17,6 +17,7 @@ export interface RtkSample {
 }
 
 export interface TractorMonitorDeps {
+  withJobAction?: JobActionLock;
   tenantId: string;
   jobs: TractorJobRepository;
   safetyEvents: TractorSafetyEventRepository;
@@ -68,6 +69,7 @@ export function createTractorMonitor(deps: TractorMonitorDeps): TractorMonitor {
   const breachWatch = new Set<string>();
   const deviationCounts = new Map<string, number>();
   const deviationWatch = new Set<string>();
+  const safetyAttempts = new Map<string, { attempt: number; rejected: boolean }>();
   const trajectoryDeviationMaxM = deps.trajectoryDeviationMaxM ?? 5;
   let running: Promise<void> | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -78,29 +80,45 @@ export function createTractorMonitor(deps: TractorMonitorDeps): TractorMonitor {
     expectedStatus: TractorJobStatus,
     patch: { status: "PAUSED" | "ESTOPPED"; reason: string; finishedAt?: string },
   ): Promise<string> => {
-    let targetCommandId: string | null = null;
-    if (type === "PAUSE") {
-      const stages = await deps.jobs.listStages(deps.tenantId, job.id);
-      targetCommandId = stages.find((stage) => stage.status === "SENT" && stage.commandId)?.commandId ?? null;
-      if (!targetCommandId) throw new TractorCommandError("当前没有可暂停的在途分步指令");
-    }
-    const dispatched = await deps.dispatch({
-      tenantId: deps.tenantId,
-      deviceId: job.deviceId,
-      plotCode: job.plotCode,
-      type,
-      parameters: targetCommandId === null ? {} : { targetCommandId },
-      operator: job.operator,
-    }).catch(() => null);
-    if (!dispatched) throw new TractorCommandError(`${type} 指令下发被控制侧拒绝，作业状态未变更`);
-    const result = await deps.waitCommand(deps.tenantId, job.deviceId, dispatched.commandId, deps.safetyCommandTimeoutMs ?? 30_000);
-    if (result !== "DONE") {
-      const detail = result === "TIMEOUT" ? "确认超时" : result === "UNAVAILABLE" ? "确认服务不可用" : "执行失败";
-      throw new TractorCommandError(`${type} 指令${detail}，作业状态未变更`);
-    }
-    const updated = await deps.jobs.updateJob(deps.tenantId, job.id, patch, { expectedStatus });
-    if (!updated) throw new TractorCommandError("等待控制确认期间作业状态已变化，本次监测不再改写");
-    return dispatched.commandId;
+    const confirm = async (): Promise<string> => {
+      let targetCommandId: string | null = null;
+      if (type === "PAUSE") {
+        const stages = await deps.jobs.listStages(deps.tenantId, job.id);
+        targetCommandId = stages.find((stage) => stage.status === "SENT" && stage.commandId)?.commandId ?? null;
+        if (!targetCommandId) throw new TractorCommandError("当前没有可暂停的在途分步指令");
+      }
+      const attemptKey = `${job.id}:${type}:${targetCommandId ?? "device"}`;
+      const attempt = safetyAttempts.get(attemptKey) ?? { attempt: 0, rejected: false };
+      const dispatched = await deps.dispatch({
+        tenantId: deps.tenantId,
+        deviceId: job.deviceId,
+        plotCode: job.plotCode,
+        type,
+        parameters: targetCommandId === null ? {} : { targetCommandId },
+        operator: job.operator,
+        idempotencyKey: `tractor:${job.id}:monitor:${type}:${targetCommandId ?? "device"}:${attempt.attempt}`,
+      }).catch(() => null);
+      if (!dispatched) {
+        safetyAttempts.set(attemptKey, attempt.rejected
+          ? { attempt: attempt.attempt + 1, rejected: false }
+          : { attempt: attempt.attempt, rejected: true });
+        throw new TractorCommandError(`${type} 指令下发被控制侧拒绝，作业状态未变更`);
+      }
+      const result = await deps.waitCommand(deps.tenantId, job.deviceId, dispatched.commandId, deps.safetyCommandTimeoutMs ?? 30_000);
+      if (result === "DONE") safetyAttempts.delete(attemptKey);
+      else if (result === "FAILED") safetyAttempts.set(attemptKey, { attempt: attempt.attempt + 1, rejected: false });
+      else safetyAttempts.set(attemptKey, { attempt: attempt.attempt, rejected: false });
+      if (result !== "DONE") {
+        const detail = result === "TIMEOUT" ? "确认超时" : result === "UNAVAILABLE" ? "确认服务不可用" : "执行失败";
+        throw new TractorCommandError(`${type} 指令${detail}，作业状态未变更`);
+      }
+      const updated = await deps.jobs.updateJob(deps.tenantId, job.id, patch, { expectedStatus });
+      if (!updated) throw new TractorCommandError("等待控制确认期间作业状态已变化，本次监测不再改写");
+      return dispatched.commandId;
+    };
+    return deps.withJobAction
+      ? deps.withJobAction(`${deps.tenantId}:${job.id}`, confirm)
+      : confirm();
   };
 
   const tick = async (): Promise<void> => {
@@ -108,10 +126,12 @@ export function createTractorMonitor(deps: TractorMonitorDeps): TractorMonitor {
     running = (async () => {
       const active: TractorJob[] = [];
       const size = 200;
-      for (let offset = 0; ; offset += size) {
-        const records = await deps.jobs.listJobs({ tenantId: deps.tenantId, status: "RUNNING", limit: size, offset });
-        active.push(...records);
-        if (records.length < size) break;
+      for (const status of ["RUNNING", "SAFETY_UNKNOWN"] as const) {
+        for (let offset = 0; ; offset += size) {
+          const records = await deps.jobs.listJobs({ tenantId: deps.tenantId, status, limit: size, offset });
+          active.push(...records);
+          if (records.length < size) break;
+        }
       }
       const watched = await Promise.all([...breachWatch].map((jobId) => deps.jobs.findJob(deps.tenantId, jobId)));
       const deviated = await Promise.all([...deviationWatch].map((jobId) => deps.jobs.findJob(deps.tenantId, jobId)));
@@ -124,6 +144,15 @@ export function createTractorMonitor(deps: TractorMonitorDeps): TractorMonitor {
       ].filter((job) => (seen.has(job.id) ? false : (seen.add(job.id), true)));
       for (const job of jobs) {
         try {
+          if (job.status === "SAFETY_UNKNOWN") {
+            await confirmAndUpdate(job, "ESTOP", "SAFETY_UNKNOWN", { status: "ESTOPPED", reason: "恢复结果未知，急停确认后收口", finishedAt: now().toISOString() });
+            await recordSafetyEvent(deps, {
+              tenantId: job.tenantId, jobId: job.id, plotCode: job.plotCode, deviceId: job.deviceId,
+              kind: "ESTOP", level: "CRITICAL",
+              message: "恢复指令结果未知，已重新急停并确认设备停车",
+            });
+            continue;
+          }
           const sample = await deps.fetchRtk(job.deviceId).catch(() => null);
           const recordedMs = sample?.recordedAt ? Date.parse(sample.recordedAt) : NaN;
           if (!sample || !Number.isFinite(recordedMs) || now().getTime() - recordedMs > commLossSeconds * 1000) {

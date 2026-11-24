@@ -6,10 +6,10 @@ export type TractorOperationType = "SEEDING" | "TILLAGE" | "WEEDING";
 
 export const TRACTOR_OPERATION_TYPES: TractorOperationType[] = ["SEEDING", "TILLAGE", "WEEDING"];
 
-/** 作业状态机：PLANNED 已排程 → RUNNING 作业中 → COMPLETED 完成 / PAUSED 安全暂停 / FAILED 失败 / ESTOPPED 急停终态 */
-export type TractorJobStatus = "PLANNED" | "RUNNING" | "PAUSED" | "COMPLETED" | "FAILED" | "ESTOPPED";
+/** 作业状态机：PLANNED 已排程 → RUNNING 作业中 → COMPLETED 完成 / PAUSED 安全暂停 / FAILED 失败 / ESTOPPED 急停终态；SAFETY_UNKNOWN 表示恢复结果未知，必须急停核实 */
+export type TractorJobStatus = "PLANNED" | "RUNNING" | "PAUSED" | "SAFETY_UNKNOWN" | "COMPLETED" | "FAILED" | "ESTOPPED";
 
-export const TRACTOR_JOB_STATUSES: TractorJobStatus[] = ["PLANNED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "ESTOPPED"];
+export const TRACTOR_JOB_STATUSES: TractorJobStatus[] = ["PLANNED", "RUNNING", "PAUSED", "SAFETY_UNKNOWN", "COMPLETED", "FAILED", "ESTOPPED"];
 
 /** 分步类型：换具 → 作业 → 返航 */
 export type TractorStageKind = "TOOL_SWITCH" | "OPERATION" | "RETURN_HOME";
@@ -298,7 +298,7 @@ export class SqlTractorJobRepository implements TractorJobRepository {
   }
 
   async listJobs(query: TractorJobQuery): Promise<TractorJob[]> {
-    const conditions: string[] = ["tenant_id = ?"];
+    const conditions: string[] = ["tenant_id = $1"];
     const params: unknown[] = [query.tenantId];
     const add = (sql: string, value: unknown): void => {
       params.push(value);

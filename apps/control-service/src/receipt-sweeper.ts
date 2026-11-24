@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { CommandTimeoutPayload } from "@agri/contracts";
 import { EventTopic } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
@@ -5,6 +7,17 @@ import type { OutboxService } from "@agri/mq";
 
 import { effectiveTimeoutMin, pendingMinutesOf } from "./control.repository.js";
 import type { ControlCommand, ControlCommandRepository } from "./control.repository.js";
+
+const TIMEOUT_ESTOP_PREFIX = "control-timeout-estop:";
+const TRACTOR_STAGE_KEY = /^tractor:[^:]+:stage:[^:]+$/;
+
+function isTractorCommand(command: ControlCommand): boolean {
+  return command.idempotencyKey !== undefined && TRACTOR_STAGE_KEY.test(command.idempotencyKey);
+}
+
+function isTimeoutEstop(command: ControlCommand): boolean {
+  return command.idempotencyKey?.startsWith(TIMEOUT_ESTOP_PREFIX) === true;
+}
 
 /**
  * 超时未回执的收口任务。
@@ -84,15 +97,19 @@ export class ControlReceiptSweeper {
     this.running = true;
     try {
       const candidates = await this.commands.listOverdue(this.options.timeoutMin, nowMs, this.options.batchSize ?? 50);
-      let closed = 0;
+      let closedCount = 0;
       for (const command of candidates) {
         try {
-          if (await this.fail(command, nowMs)) closed += 1;
+          if (isTimeoutEstop(command)) continue;
+          const closed = isTractorCommand(command)
+            ? await this.failAfterEmergencyStop(command, nowMs)
+            : await this.fail(command, nowMs);
+          if (closed) closedCount += 1;
         } catch (error) {
           this.options.onError?.(command.id, error instanceof Error ? error : new Error(String(error)));
         }
       }
-      return closed;
+      return closedCount;
     } finally {
       this.running = false;
     }
@@ -102,7 +119,65 @@ export class ControlReceiptSweeper {
    * 收口一条指令：状态置 FAILED，并按配置同事务写超时事件。
    * @returns 是否真的推进了（版本被现场回执抢走时返回 false）
    */
-  private async fail(command: ControlCommand, nowMs: number): Promise<boolean> {
+  private async failAfterEmergencyStop(command: ControlCommand, nowMs: number): Promise<boolean> {
+    const idempotencyKey = `${TIMEOUT_ESTOP_PREFIX}${command.id}`;
+    let emergencyStop = await this.commands.findByIdempotencyKey(command.tenantId, idempotencyKey);
+    if (!emergencyStop) {
+      emergencyStop = await this.commands.create({
+        id: randomUUID(),
+        tenantId: command.tenantId,
+        deviceId: command.deviceId,
+        plotCode: command.plotCode,
+        operatorId: "system-timeout",
+        type: "ESTOP",
+        parameters: { targetCommandId: command.id },
+        status: "QUEUED",
+        version: 1,
+        origin: "EVENT",
+        idempotencyKey,
+        reason: `拖拉机指令 ${command.id} 回执超时，先急停并等待设备确认`,
+        createdAt: new Date(nowMs).toISOString(),
+      });
+      emergencyStop ??= await this.commands.findByIdempotencyKey(command.tenantId, idempotencyKey);
+    }
+    let failedAttempt: string | undefined;
+    let retryCreated = false;
+    while (emergencyStop && (emergencyStop.status === "FAILED" || emergencyStop.status === "CANCELLED")) {
+      failedAttempt ??= `超时急停指令已${emergencyStop.status === "CANCELLED" ? "取消" : "失败"}，原作业指令保持未收口`;
+      const retryKey = `${idempotencyKey}:retry:${emergencyStop.version}`;
+      const retry = await this.commands.findByIdempotencyKey(command.tenantId, retryKey);
+      if (retry) {
+        emergencyStop = retry;
+        continue;
+      }
+      emergencyStop = await this.commands.create({
+        id: randomUUID(),
+        tenantId: command.tenantId,
+        deviceId: command.deviceId,
+        plotCode: command.plotCode,
+        operatorId: "system-timeout",
+        type: "ESTOP",
+        parameters: { targetCommandId: command.id },
+        status: "QUEUED",
+        version: 1,
+        origin: "EVENT",
+        idempotencyKey: retryKey,
+        reason: `拖拉机指令 ${command.id} 回执超时，先急停并等待设备确认`,
+        createdAt: new Date(nowMs).toISOString(),
+      });
+      emergencyStop ??= await this.commands.findByIdempotencyKey(command.tenantId, retryKey);
+      retryCreated = true;
+      break;
+    }
+    if (!emergencyStop) throw new Error("超时急停指令创建失败，原作业指令保持未收口");
+    if (emergencyStop.status === "DONE") {
+      return this.fail(command, nowMs, `超过有效回执阈值未收到设备回执，已由急停指令 ${emergencyStop.id} 确认停车后收口为失败`);
+    }
+    if (retryCreated && failedAttempt) throw new Error(failedAttempt);
+    return false;
+  }
+
+  private async fail(command: ControlCommand, nowMs: number, message?: string): Promise<boolean> {
     const waited = pendingMinutesOf(command, nowMs) ?? 0;
     const timeoutMin = effectiveTimeoutMin(command, this.options.timeoutMin);
     const transition = {
@@ -110,7 +185,7 @@ export class ControlReceiptSweeper {
       status: "FAILED" as const,
       at: new Date(nowMs).toISOString(),
       version: command.version,
-      message: `超过有效回执阈值 ${timeoutMin} 分钟未收到设备回执（已等待 ${waited} 分钟），系统自动收口为失败`,
+      message: message ?? `超过有效回执阈值 ${timeoutMin} 分钟未收到设备回执（已等待 ${waited} 分钟），系统自动收口为失败`,
     };
     const payload: CommandTimeoutPayload = {
       commandId: command.id,

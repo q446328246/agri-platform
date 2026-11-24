@@ -81,6 +81,10 @@ export interface ControlCommand {
   sentAt?: string;
   /** 设备回执「已接收」的时间 */
   ackedAt?: string;
+  /** 最近一次暂停时间，用于识别跨恢复周期的陈旧暂停回执 */
+  pausedAt?: string;
+  /** 最近一次从暂停恢复的时间，用于识别跨恢复周期的陈旧恢复/暂停回执 */
+  resumedAt?: string;
   /** 执行到位或失败的时间，即生命周期结束时间 */
   finishedAt?: string;
   /** 最后一次回执说明：失败原因或设备侧提示 */
@@ -144,14 +148,21 @@ function toPage(items: ControlCommand[], total: number, page: number, size: numb
   return { items, total, page, size, pages: Math.ceil(total / size) };
 }
 
-/** 指令在途起点：最后一次状态推进时间；没有推进过就是入队时间，
+/** 指令在途起点：最后一次状态推进时间（含暂停/恢复）；没有推进过就是入队时间，
  *  定时指令取入队与预约时刻的较晚者——预约明早执行的指令不该今晚就被算成超时 */
 function overdueSinceMs(command: ControlCommand): number {
-  const progressed = command.ackedAt ?? command.sentAt;
-  if (progressed !== undefined) return Date.parse(progressed);
+  const progressed = [command.sentAt, command.ackedAt, command.pausedAt, command.resumedAt]
+    .filter((value): value is string => value !== undefined)
+    .map((value) => Date.parse(value))
+    .filter((value) => Number.isFinite(value));
+  if (progressed.length > 0) return Math.max(...progressed);
   const created = Date.parse(command.createdAt);
   const scheduled = command.scheduledAt === undefined ? NaN : Date.parse(command.scheduledAt);
   return Number.isFinite(scheduled) ? Math.max(created, scheduled) : created;
+}
+
+function overdueSinceSql(): string {
+  return "COALESCE(GREATEST(acked_at, sent_at, paused_at, resumed_at), GREATEST(created_at, scheduled_at))";
 }
 
 /** 在途时长（分钟），从最后一次状态推进时间起算；已结束的指令返回 undefined */
@@ -188,7 +199,7 @@ export function isCommandOverdue(command: ControlCommand, nowMs: number, timeout
 }
 
 const COLUMNS =
-  "id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, idempotency_key, reason, scheduled_at, sent_at, acked_at, finished_at, receipt_message, result_json, version, created_at";
+  "id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, idempotency_key, reason, scheduled_at, sent_at, acked_at, paused_at, resumed_at, finished_at, receipt_message, result_json, version, created_at";
 
 function overdueThresholdSql(param: string): string {
   return `GREATEST(${param}::int, CEIL(COALESCE(CASE WHEN jsonb_typeof(parameters->'plan'->'totalDurationMin') = 'number' THEN (parameters->'plan'->>'totalDurationMin')::numeric ELSE 0 END, 0) + 1)::int)`;
@@ -214,6 +225,8 @@ function toRecord(row: Record<string, unknown>): ControlCommand {
     ["scheduled_at", "scheduledAt"],
     ["sent_at", "sentAt"],
     ["acked_at", "ackedAt"],
+    ["paused_at", "pausedAt"],
+    ["resumed_at", "resumedAt"],
     ["finished_at", "finishedAt"],
   ] as const) {
     if (row[column] !== null && row[column] !== undefined) record[key] = toIsoTimestamp(row[column]);
@@ -297,7 +310,7 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     }
     if (query.pendingOverMin !== undefined) {
       values.push(query.pendingOverMin);
-      conditions.push(`now() - COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)) > make_interval(mins => ${overdueThresholdSql(`$${values.length}`)})`);
+      conditions.push(`now() - ${overdueSinceSql()} > make_interval(mins => ${overdueThresholdSql(`$${values.length}`)})`);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const totalRows = await this.client.$queryRawUnsafe<Array<{ total: number }>>(
@@ -307,10 +320,11 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     const total = Number(totalRows[0]?.total ?? 0);
     values.push(query.size, (query.page - 1) * query.size);
     const order = query.ascending ? "ASC" : "DESC";
+    const priorityOrder = query.dueOnly ? "CASE WHEN type IN ('ESTOP', 'POWER_OFF') THEN 0 ELSE 1 END," : "";
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `SELECT ${COLUMNS}
        FROM control_commands ${where}
-       ORDER BY created_at ${order}, id ${order} LIMIT $${values.length - 1} OFFSET $${values.length}`,
+       ORDER BY ${priorityOrder} created_at ${order}, id ${order} LIMIT $${values.length - 1} OFFSET $${values.length}`,
       ...values,
     );
     return toPage(rows.map(toRecord), total, query.page, query.size);
@@ -364,6 +378,8 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
               version = version + 1,
               sent_at = CASE WHEN $4 = 'SENT' THEN $5::timestamptz ELSE sent_at END,
               acked_at = CASE WHEN $4 = 'ACKED' THEN $5::timestamptz ELSE acked_at END,
+              paused_at = CASE WHEN $4 = 'PAUSED' THEN $5::timestamptz ELSE paused_at END,
+              resumed_at = CASE WHEN $4 = 'ACKED' AND status = 'PAUSED' THEN $5::timestamptz ELSE resumed_at END,
               finished_at = CASE WHEN $4 IN ('DONE', 'FAILED', 'CANCELLED') THEN $5::timestamptz ELSE finished_at END,
               receipt_message = COALESCE($6::text, receipt_message),
               result_json = COALESCE($7::jsonb, result_json)
@@ -397,8 +413,8 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
       `SELECT ${COLUMNS}
        FROM control_commands
        WHERE status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED')
-         AND now() - COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)) > make_interval(mins => ${overdueThresholdSql("$1")})
-       ORDER BY COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)), id
+         AND now() - ${overdueSinceSql()} > make_interval(mins => ${overdueThresholdSql("$1")})
+       ORDER BY ${overdueSinceSql()}, id
        LIMIT $2`,
       timeoutMin,
       limit,
@@ -441,6 +457,8 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     };
     delete record.sentAt;
     delete record.ackedAt;
+    delete record.pausedAt;
+    delete record.resumedAt;
     delete record.finishedAt;
     delete record.receiptMessage;
     delete record.result;
@@ -465,7 +483,10 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     // 排序与 SQL 侧一致（created_at/id 同向，默认 DESC）：内存里靠插入顺序，一旦有回填的
     // 历史指令就会翻页，同一页两套模式拿到不同的行。
     const rank = (left: ControlCommand, right: ControlCommand) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
-    filtered.sort((a, b) => (query.ascending ? 1 : -1) * rank(a, b));
+    const safetyRank = (left: ControlCommand, right: ControlCommand) => query.dueOnly
+      ? Number(!["ESTOP", "POWER_OFF"].includes(left.type)) - Number(!["ESTOP", "POWER_OFF"].includes(right.type))
+      : 0;
+    filtered.sort((a, b) => safetyRank(a, b) || (query.ascending ? 1 : -1) * rank(a, b));
     const start = (query.page - 1) * query.size;
     return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
   }
@@ -491,10 +512,15 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
   async transition(tenantId: string, transition: CommandTransition, _tx?: Tx): Promise<ControlCommand | null> {
     const row = this.rows.find((item) => item.tenantId === tenantId && item.id === transition.id);
     if (!row || row.version !== transition.version || !canTransition(row.status, transition.status)) return null;
+    const previousStatus = row.status;
     row.status = transition.status;
     row.version += 1;
     if (transition.status === "SENT") row.sentAt = transition.at;
-    if (transition.status === "ACKED") row.ackedAt = transition.at;
+    if (transition.status === "ACKED") {
+      row.ackedAt = transition.at;
+      if (previousStatus === "PAUSED") row.resumedAt = transition.at;
+    }
+    if (transition.status === "PAUSED") row.pausedAt = transition.at;
     if (transition.status === "DONE" || transition.status === "FAILED" || transition.status === "CANCELLED") row.finishedAt = transition.at;
     if (transition.message !== undefined) row.receiptMessage = transition.message;
     if (transition.result !== undefined) row.result = structuredClone(transition.result);

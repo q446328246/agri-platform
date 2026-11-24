@@ -121,12 +121,11 @@ function receiptAt(value: unknown): string {
  * 两套部署对同一个错报文给出不同答复。
  */
 function assertReceiptOrder(command: ControlCommand, status: ControlCommandStatus, at: string): void {
-  const previous = command.ackedAt ?? command.sentAt;
-  const label = status === "DONE" ? "结单" : status === "PAUSED" ? "暂停" : "失败收口";
-  if ((status === "ACKED" || status === "PAUSED") && command.sentAt !== undefined && Date.parse(at) < Date.parse(command.sentAt)) {
-    throw new Error(`${status === "PAUSED" ? "暂停" : "接收"}回执的时刻（${at}）早于下发时刻（${command.sentAt}）`);
-  }
-  if ((status === "DONE" || status === "FAILED") && previous !== undefined && Date.parse(at) < Date.parse(previous)) {
+  const previous = [command.ackedAt, command.sentAt, command.pausedAt, command.resumedAt]
+    .filter((value): value is string => value !== undefined)
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
+  const label = status === "DONE" ? "结单" : status === "PAUSED" ? "暂停" : status === "ACKED" ? "接收" : "失败收口";
+  if (["ACKED", "PAUSED", "DONE", "FAILED"].includes(status) && previous !== undefined && Date.parse(at) < Date.parse(previous)) {
     throw new Error(`${label}回执的时刻（${at}）早于上一次状态推进（${previous}）`);
   }
 }
@@ -513,6 +512,17 @@ export function createControlHttpServer(
           const linkedTarget = targetId ? await repository.find(tenantId, targetId) : null;
           if (!linkedTarget) { send(res, 409, null, traceId, "目标指令不存在，无法联动结单，请核实后改报 FAILED"); return; }
           const desired: ControlCommandStatus = target.type === "PAUSE" ? "PAUSED" : "ACKED";
+          const staleBefore = target.type === "PAUSE" ? linkedTarget.resumedAt : linkedTarget.pausedAt;
+          if (staleBefore !== undefined && Date.parse(at) < Date.parse(staleBefore)) {
+            send(res, 409, null, traceId, `${target.type} 指令结单时刻早于目标最近一次${target.type === "PAUSE" ? "恢复" : "暂停"}，拒绝陈旧联动`);
+            return;
+          }
+          try {
+            assertReceiptOrder(linkedTarget, desired, at);
+          } catch (error) {
+            send(res, 400, null, traceId, error instanceof Error ? error.message : "目标指令回执时序非法");
+            return;
+          }
           // 目标已处在期望状态（重复回执/设备自主上报先到）时跳过联动，不空转推高版本
           if (linkedTarget.status !== desired) {
             if (!canTransition(linkedTarget.status, desired)) {
