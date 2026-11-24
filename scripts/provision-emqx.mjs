@@ -147,27 +147,30 @@ await request("/authorization/settings", {
   method: "PUT",
   body: { ...authorizationSettings, no_match: "deny", deny_action: "disconnect" },
 });
-await request("/authorization/sources/built_in_database/rules/users", {
-  token,
-  method: "POST",
-  body: [
-    {
-      username: serviceUsername,
-      rules: [
-        { action: "subscribe", permission: "allow", topic: `${topicPrefix}/${tenantId}/+/telemetry` },
-        { action: "subscribe", permission: "allow", topic: `${topicPrefix}/${tenantId}/+/receipt` },
-        { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/+/command` },
-      ],
-    },
-    {
-      username: deviceUsername,
-      rules: [
-        { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/${deviceUsername}/telemetry` },
-        { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/${deviceUsername}/receipt` },
-        { action: "subscribe", permission: "allow", topic: `${topicPrefix}/${tenantId}/${deviceUsername}/command` },
-      ],
-    },
-  ],
-});
+const aclUsers = [
+  {
+    username: serviceUsername,
+    rules: [
+      { action: "subscribe", permission: "allow", topic: `${topicPrefix}/${tenantId}/+/telemetry` },
+      { action: "subscribe", permission: "allow", topic: `${topicPrefix}/${tenantId}/+/receipt` },
+      { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/+/command` },
+    ],
+  },
+  {
+    username: deviceUsername,
+    rules: [
+      { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/${deviceUsername}/telemetry` },
+      { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/${deviceUsername}/receipt` },
+      { action: "subscribe", permission: "allow", topic: `${topicPrefix}/${tenantId}/${deviceUsername}/command` },
+    ],
+  },
+];
+for (const user of aclUsers) {
+  await request(`/authorization/sources/built_in_database/rules/users/${encodeURIComponent(user.username)}`, {
+    token,
+    method: "PUT",
+    body: user,
+  });
+}
 await request("/authorization/cache", { token, method: "DELETE" });
 console.log(`EMQX authentication and ACLs provisioned for tenant ${tenantId}`);

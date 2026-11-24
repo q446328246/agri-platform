@@ -24,7 +24,8 @@ describe("EMQX provisioning", () => {
     let sourceCreated = false;
     const users = new Map<string, Record<string, unknown>>();
     const loginPasswords: string[] = [];
-    const aclBatches: unknown[] = [];
+    const acls = new Map<string, Record<string, unknown>>();
+    const aclUpdates: Record<string, unknown>[] = [];
     let authorizationSettings: Record<string, unknown> | undefined;
 
     const server = createServer(async (request, response) => {
@@ -78,8 +79,13 @@ describe("EMQX provisioning", () => {
         return send(204);
       }
       if (path === "/api/v5/authorization/sources/built_in_database/rules/users" && method === "POST") {
-        aclBatches.push(body);
-        return send(201, body);
+        return send(409, { message: "ACL user already exists" });
+      }
+      if (path.startsWith("/api/v5/authorization/sources/built_in_database/rules/users/") && method === "PUT") {
+        const username = decodeURIComponent(path.split("/").at(-1)!);
+        acls.set(username, body);
+        aclUpdates.push(body);
+        return send(204);
       }
       if (path === "/api/v5/authorization/cache" && method === "DELETE") return send(204);
       return send(404, { message: `Unexpected ${method} ${path}` });
@@ -111,26 +117,25 @@ describe("EMQX provisioning", () => {
       expect(users.get("test-service")).toMatchObject({ password: "test-service-password", is_superuser: false });
       expect(users.get("TEST-DEVICE")).toMatchObject({ password: "test-device-password", is_superuser: false });
       expect(authorizationSettings).toMatchObject({ no_match: "deny", deny_action: "disconnect" });
-      expect(aclBatches).toHaveLength(2);
-      expect(aclBatches[0]).toEqual(aclBatches[1]);
-      expect(aclBatches[0]).toEqual([
-        {
-          username: "test-service",
-          rules: [
-            { action: "subscribe", permission: "allow", topic: "agri/tenant-test/+/telemetry" },
-            { action: "subscribe", permission: "allow", topic: "agri/tenant-test/+/receipt" },
-            { action: "publish", permission: "allow", topic: "agri/tenant-test/+/command" },
-          ],
-        },
-        {
-          username: "TEST-DEVICE",
-          rules: [
-            { action: "publish", permission: "allow", topic: "agri/tenant-test/TEST-DEVICE/telemetry" },
-            { action: "publish", permission: "allow", topic: "agri/tenant-test/TEST-DEVICE/receipt" },
-            { action: "subscribe", permission: "allow", topic: "agri/tenant-test/TEST-DEVICE/command" },
-          ],
-        },
-      ]);
+      expect(aclUpdates).toHaveLength(4);
+      expect(aclUpdates.slice(0, 2)).toEqual(aclUpdates.slice(2));
+      expect([...acls.keys()].sort()).toEqual(["TEST-DEVICE", "test-service"]);
+      expect(acls.get("test-service")).toEqual({
+        username: "test-service",
+        rules: [
+          { action: "subscribe", permission: "allow", topic: "agri/tenant-test/+/telemetry" },
+          { action: "subscribe", permission: "allow", topic: "agri/tenant-test/+/receipt" },
+          { action: "publish", permission: "allow", topic: "agri/tenant-test/+/command" },
+        ],
+      });
+      expect(acls.get("TEST-DEVICE")).toEqual({
+        username: "TEST-DEVICE",
+        rules: [
+          { action: "publish", permission: "allow", topic: "agri/tenant-test/TEST-DEVICE/telemetry" },
+          { action: "publish", permission: "allow", topic: "agri/tenant-test/TEST-DEVICE/receipt" },
+          { action: "subscribe", permission: "allow", topic: "agri/tenant-test/TEST-DEVICE/command" },
+        ],
+      });
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

@@ -33,17 +33,13 @@ export function createPgClient(options: PgClientOptions): pg.Pool {
 }
 
 export class PgClientAdapter implements PrismaClientLike {
-  private readonly client: pg.Pool;
-
   /** ORM 风格的模型访问在本示例不使用，显式标注为未知以对齐契约索引签名 */
   [key: string]: unknown;
 
-  constructor(client: pg.Pool) {
-    this.client = client;
-  }
+  constructor(private readonly client: pg.Pool, private readonly connectionString?: string) {}
 
   static fromUrl(url: string): PgClientAdapter {
-    return new PgClientAdapter(createPgClient({ url }));
+    return new PgClientAdapter(createPgClient({ url }), url);
   }
 
   /** 暴露 pg 原生连接池，供需要流式查询、COPY 等高级特性的场景使用 */
@@ -58,6 +54,18 @@ export class PgClientAdapter implements PrismaClientLike {
 
   async $disconnect(): Promise<void> {
     await this.client.end();
+  }
+
+  async withSessionConnection<R>(action: (client: pg.Client) => Promise<R>): Promise<R> {
+    const connectionString = this.connectionString;
+    if (typeof connectionString !== "string") throw new Error("独立会话连接需要 PostgreSQL 连接串");
+    const client = new pg.Client({ connectionString });
+    await client.connect();
+    try {
+      return await action(client);
+    } finally {
+      await client.end();
+    }
   }
 
   /**

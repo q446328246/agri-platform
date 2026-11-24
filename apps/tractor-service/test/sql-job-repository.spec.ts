@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PgClientAdapter } from "@agri/db";
+import { createPgClient, PgClientAdapter } from "@agri/db";
 import type { PrismaClientLike } from "@agri/db";
 
 import { SqlTractorJobRepository } from "../src/job.repository.js";
@@ -8,47 +8,83 @@ const databaseUrl = process.env.DB_URL;
 
 describe("SqlTractorJobRepository 分布式作业锁", () => {
   it("另一实例必须等待当前实例释放 PostgreSQL advisory lock", async () => {
-    let locked = false;
-    const client = (): PrismaClientLike => ({
-      $queryRawUnsafe: vi.fn(async (sql: string) => {
-        if (sql.includes("pg_try_advisory_lock")) {
-          if (locked) return [{ locked: false }];
-          locked = true;
-          return [{ locked: true }];
+    let lockOwner: symbol | undefined;
+    const makeClient = () => {
+      const sequence: string[] = [];
+      const connectionId = Symbol("connection");
+      const connection = {
+        query: vi.fn(async (sql: string) => {
+          if (sql.includes("pg_try_advisory_lock")) {
+            sequence.push("lock");
+            if (lockOwner) return { rows: [{ locked: false }] };
+            lockOwner = connectionId;
+            return { rows: [{ locked: true }] };
+          }
+          if (sql.includes("pg_advisory_unlock")) {
+            sequence.push("unlock");
+            const unlocked = lockOwner === connectionId;
+            if (unlocked) lockOwner = undefined;
+            return { rows: [{ unlocked }] };
+          }
+          throw new Error("非预期查询");
+        }),
+      };
+      const withSessionConnection = vi.fn(async (run: (client: typeof connection) => Promise<unknown>) => {
+        sequence.push("connect");
+        try {
+          return await run(connection);
+        } finally {
+          sequence.push("end");
         }
-        if (sql.includes("pg_advisory_unlock")) {
-          locked = false;
-          return [{ unlocked: true }];
-        }
-        throw new Error("非预期查询");
-      }),
-    }) as unknown as PrismaClientLike;
-    const firstRepository = new SqlTractorJobRepository(client());
-    const secondClient = client();
-    const secondQuery = vi.mocked(secondClient.$queryRawUnsafe);
-    const secondRepository = new SqlTractorJobRepository(secondClient);
+      });
+      const native = { connect: vi.fn() };
+      const repository = new SqlTractorJobRepository({ withSessionConnection, native } as unknown as PrismaClientLike);
+      return { repository, connection, native, sequence, withSessionConnection };
+    };
+    const firstClient = makeClient();
+    const secondClient = makeClient();
     let release!: () => void;
     let entered!: () => void;
     const firstEntered = new Promise<void>((resolve) => { entered = resolve; });
     const blocked = new Promise<void>((resolve) => { release = resolve; });
 
-    const first = firstRepository.withJobLock("tenant", "job", async () => {
+    const first = firstClient.repository.withJobLock("tenant", "job", async () => {
+      firstClient.sequence.push("action");
       entered();
       await blocked;
     });
     await firstEntered;
     let secondEntered = false;
-    const second = secondRepository.withJobLock("tenant", "job", async () => { secondEntered = true; });
-    await vi.waitFor(() => expect(secondQuery).toHaveBeenCalled());
+    const second = secondClient.repository.withJobLock("tenant", "job", async () => { secondEntered = true; });
+    await vi.waitFor(() => expect(secondClient.connection.query).toHaveBeenCalled());
     expect(secondEntered).toBe(false);
     release();
     await Promise.all([first, second]);
     expect(secondEntered).toBe(true);
-    expect(locked).toBe(false);
+    expect(lockOwner).toBeUndefined();
+    expect(firstClient.native.connect).not.toHaveBeenCalled();
+    expect(firstClient.withSessionConnection).toHaveBeenCalledTimes(1);
+    expect(firstClient.sequence).toEqual(["connect", "lock", "action", "unlock", "end"]);
   });
 });
 
 describe.runIf(databaseUrl)("SqlTractorJobRepository 更新与租约（真实库）", () => {
+  it("锁使用池外连接，单连接业务池可并发执行持锁动作", async () => {
+    const client = new PgClientAdapter(createPgClient({ url: databaseUrl as string, poolSize: 1 }), databaseUrl as string);
+    const repository = new SqlTractorJobRepository(client, 5_000);
+    try {
+      const results = await Promise.all(Array.from({ length: 6 }, (_, index) =>
+        repository.withJobLock("tenant-lock-pool", `job-${index}`, async () => {
+          const rows = await client.$queryRawUnsafe<Array<{ ok: number }>>("SELECT 1 AS ok");
+          return rows[0]?.ok;
+        }),
+      ));
+      expect(results).toEqual([1, 1, 1, 1, 1, 1]);
+    } finally {
+      await client.$disconnect();
+    }
+  });
+
   it("SET/WHERE 参数正确且过期执行者不能覆盖新租约", async () => {
     const client = PgClientAdapter.fromUrl(databaseUrl as string);
     await client.$connect();

@@ -464,22 +464,26 @@ export class SqlTractorJobRepository implements TractorJobRepository {
   }
 
   async withJobLock<T>(tenantId: string, id: string, action: () => Promise<T>): Promise<T> {
-    const key = `tractor-job:${tenantId}:${id}`;
-    const deadline = Date.now() + this.jobLockTimeoutMs;
-    let locked = false;
-    try {
-      while (!locked) {
-        const rows = await this.client.$queryRawUnsafe<Array<{ locked: boolean }>>(
-          "SELECT pg_try_advisory_lock(hashtext($1)) AS locked", key,
-        );
-        locked = rows[0]?.locked === true;
-        if (locked) break;
-        if (Date.now() >= deadline) throw new Error(`等待作业 ${id} 分布式锁超时`);
-        await new Promise((resolve) => setTimeout(resolve, 50));
+    const withSession = this.client.withSessionConnection as ((run: (client: {
+      query: (query: string, values?: unknown[]) => Promise<{ rows: Array<{ locked?: boolean; unlocked?: boolean }> }>;
+    }) => Promise<T>) => Promise<T>) | undefined;
+    if (!withSession) throw new Error("SQL 作业锁需要独立会话连接");
+    return withSession.call(this.client, async (client) => {
+      const key = `tractor-job:${tenantId}:${id}`;
+      const deadline = Date.now() + this.jobLockTimeoutMs;
+      let locked = false;
+      try {
+        while (!locked) {
+          const result = await client.query("SELECT pg_try_advisory_lock(hashtext($1)) AS locked", [key]);
+          locked = result.rows[0]?.locked === true;
+          if (locked) break;
+          if (Date.now() >= deadline) throw new Error(`等待作业 ${id} 分布式锁超时`);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return await action();
+      } finally {
+        if (locked) await client.query("SELECT pg_advisory_unlock(hashtext($1))", [key]);
       }
-      return await action();
-    } finally {
-      if (locked) await this.client.$queryRawUnsafe("SELECT pg_advisory_unlock(hashtext($1))", key);
-    }
+    });
   }
 }
