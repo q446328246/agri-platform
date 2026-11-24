@@ -3,6 +3,7 @@ import { PgClientAdapter } from "@agri/db";
 import { EventTopic } from "@agri/contracts";
 
 import { SqlTaskRepository } from "../src/task.repository.js";
+import { SqlTaskChangeLogRepository } from "../src/task-change-log.repository.js";
 import { SqlOperationOutbox } from "../src/outbox.repository.js";
 
 /**
@@ -15,7 +16,7 @@ describe.runIf(databaseUrl)("SqlTaskRepository + SqlOperationOutbox（真实库�
   it("创建、筛选、租户隔离、状态流转与完成事件原子入队", async () => {
     const client = PgClientAdapter.fromUrl(databaseUrl as string);
     await client.$connect();
-    const repository = new SqlTaskRepository(client);
+    const repository = new SqlTaskRepository(client, new SqlTaskChangeLogRepository(client));
     const outbox = new SqlOperationOutbox(client);
     const tenantId = "tenant-smoke-ops";
     const suffix = Date.now();
@@ -117,7 +118,7 @@ describe.runIf(databaseUrl)("SqlTaskRepository + SqlOperationOutbox（真实库�
   it("软删归档：读路径全部过滤、行与已入队事件留在库里、归档行不能再跃迁", async () => {
     const client = PgClientAdapter.fromUrl(databaseUrl as string);
     await client.$connect();
-    const repository = new SqlTaskRepository(client);
+    const repository = new SqlTaskRepository(client, new SqlTaskChangeLogRepository(client));
     const tenantId = "tenant-smoke-ops-archive";
     const suffix = Date.now();
     const archivedId = `task-smoke-archive-${suffix}`;

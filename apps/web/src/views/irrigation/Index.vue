@@ -89,7 +89,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart, BarChart } from 'echarts/charts'
 import { TooltipComponent, LegendComponent, GridComponent } from 'echarts/components'
 import { controlApi, iotApi } from '@/api'
-import type { IrrigationPlan } from '@/api'
+import type { IrrigationPlan, IrrigationPlanInput } from '@/api'
 
 /**
  * 水肥配比与变量灌溉页。
@@ -114,38 +114,73 @@ const form = reactive({
 })
 
 const plan = ref<IrrigationPlan | null>(null)
+/** 方案与生成时的输入快照绑定；任何方案输入变化都会同时清空两者。 */
+const planInput = ref<(IrrigationPlanInput & { withRecipe: boolean }) | null>(null)
+let planRequest = 0
 const calculating = ref(false)
 const dispatching = ref(false)
 
+type PlanInputSnapshot = IrrigationPlanInput & { withRecipe: boolean }
+function capturePlanInput(): PlanInputSnapshot {
+  return {
+    plotCode: form.plotCode.trim(),
+    flowM3h: form.flowM3h,
+    zones: form.zones.map((zone) => ({ ...zone })),
+    withRecipe: form.withRecipe,
+    ...(form.withRecipe ? { recipe: { ...form.recipe }, stir: { ...form.stir } } : {}),
+  }
+}
+
+function invalidatePlan() {
+  plan.value = null
+  planInput.value = null
+}
+
+watch(() => capturePlanInput(), invalidatePlan, { deep: true, immediate: true })
+
 /**
- * 执行设备选择：从设备台账按当前指令类型筛出可执行的水肥设备。
- * 口径与控制侧自动指令的设备推断同源——灌溉取灌溉泵站/灌溉阀门，施肥取水肥阀；
- * 填了地块编码就按地块过滤，避免选到别的地块的设备。
+ * 执行设备选择：先按页拉全设备台账，再按当前指令类型和地块筛选。
+ * 不能把类型/地块条件下发后只取前 200 台，否则候选设备可能被硬分页漏掉。
  */
 const deviceOptions = ref<Array<{ id: string; label: string }>>([])
 const devicesLoading = ref(false)
+let devicesRequest = 0
 
 const eligibleDeviceTypes = computed(() =>
   form.withRecipe ? ['FERTILIZER_VALVE'] : ['IRRIGATION_PUMP', 'IRRIGATION_VALVE']
 )
 
 async function loadDevices() {
+  const request = ++devicesRequest
   devicesLoading.value = true
   try {
-    const page = await iotApi.getDevices({
-      ...(form.plotCode.trim() ? { plotCode: form.plotCode.trim() } : {}),
-      size: 200,
-    })
-    const options = (page.items ?? [])
+    const items: any[] = []
+    const size = 200
+    let page = 1
+    let total = 0
+    do {
+      const result = await iotApi.getDevices({ page, size })
+      items.push(...(result.items ?? []))
+      total = result.total
+      page += 1
+      if (!result.items?.length) break
+    } while (items.length < total)
+    if (request !== devicesRequest) return
+    const plotCode = form.plotCode.trim()
+    const options = items
       .filter((device) => eligibleDeviceTypes.value.includes(device.type))
+      .filter((device) => !plotCode || String(device.plotCode ?? device.parcelCode ?? '') === plotCode)
       .map((device) => ({ id: device.id, label: `${device.name || device.deviceNo}（${device.deviceNo}）` }))
     deviceOptions.value = options
     // 指令类型或地块变了，原先选中的设备可能已不在候选里，清掉避免拿旧设备下发
     if (form.deviceId && !options.some((device) => device.id === form.deviceId)) form.deviceId = ''
   } catch {
-    deviceOptions.value = []
+    if (request === devicesRequest) {
+      deviceOptions.value = []
+      form.deviceId = ''
+    }
   } finally {
-    devicesLoading.value = false
+    if (request === devicesRequest) devicesLoading.value = false
   }
 }
 
@@ -179,24 +214,43 @@ async function calculate() {
     ElMessage.warning('至少需要一个灌溉分区')
     return
   }
+  const request = ++planRequest
+  const input = capturePlanInput()
+  const { withRecipe: _withRecipe, ...requestInput } = input
+  plan.value = null
+  planInput.value = null
   calculating.value = true
   try {
-    plan.value = await controlApi.buildIrrigationPlan({
-      ...(form.plotCode ? { plotCode: form.plotCode } : {}),
-      flowM3h: form.flowM3h,
-      zones: form.zones.map((zone) => ({ ...zone })),
-      ...(form.withRecipe ? { recipe: { ...form.recipe }, stir: { ...form.stir } } : {}),
-    })
+    const result = await controlApi.buildIrrigationPlan(requestInput)
+    // 请求期间改过任何方案输入时，丢弃旧响应，禁止把旧方案重新挂回页面。
+    if (request === planRequest && JSON.stringify(input) === JSON.stringify(capturePlanInput())) {
+      plan.value = result
+      planInput.value = input
+    }
   } catch (error) {
-    plan.value = null
-    ElMessage.error(error instanceof Error ? error.message : '方案生成失败')
+    if (request === planRequest && JSON.stringify(input) === JSON.stringify(capturePlanInput())) {
+      plan.value = null
+      planInput.value = null
+      ElMessage.error(error instanceof Error ? error.message : '方案生成失败')
+    }
   } finally {
     calculating.value = false
   }
 }
 
 async function dispatch() {
-  if (!plan.value) return
+  const currentPlan = plan.value
+  const snapshot = planInput.value
+  if (!currentPlan || !snapshot) {
+    ElMessage.warning('请先生成灌溉方案')
+    return
+  }
+  // 下发前再核对一次快照，防止响应式监听之外的调用拿到已失效方案。
+  if (JSON.stringify(snapshot) !== JSON.stringify(capturePlanInput())) {
+    invalidatePlan()
+    ElMessage.warning('方案参数已变更，请重新生成后再下发')
+    return
+  }
   if (!form.deviceId.trim()) {
     ElMessage.warning('请选择执行设备')
     return
@@ -205,13 +259,13 @@ async function dispatch() {
   try {
     await controlApi.sendCommand({
       deviceId: form.deviceId,
-      ...(form.plotCode ? { plotCode: form.plotCode } : {}),
-      type: form.withRecipe ? 'FERTILIZATION' : 'IRRIGATION',
+      ...(snapshot.plotCode ? { plotCode: snapshot.plotCode } : {}),
+      type: snapshot.withRecipe ? 'FERTILIZATION' : 'IRRIGATION',
       parameters: {
-        zones: plan.value.zones.map((zone) => ({ zoneCode: zone.zoneCode, areaMu: zone.areaMu, targetMm: zone.targetMm })),
-        flowM3h: plan.value.flowM3h,
-        ...(plan.value.recipe ? { recipe: { nitrogen: plan.value.recipe.nitrogen, phosphorus: plan.value.recipe.phosphorus, potassium: plan.value.recipe.potassium } } : {}),
-        ...(plan.value.stir ? { stir: plan.value.stir } : {}),
+        zones: currentPlan.zones.map((zone) => ({ zoneCode: zone.zoneCode, areaMu: zone.areaMu, targetMm: zone.targetMm })),
+        flowM3h: currentPlan.flowM3h,
+        ...(currentPlan.recipe ? { recipe: { nitrogen: currentPlan.recipe.nitrogen, phosphorus: currentPlan.recipe.phosphorus, potassium: currentPlan.recipe.potassium } } : {}),
+        ...(currentPlan.stir ? { stir: currentPlan.stir } : {}),
       },
     })
     ElMessage.success('灌溉指令已进入执行队列')

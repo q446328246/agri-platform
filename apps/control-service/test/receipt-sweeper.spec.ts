@@ -67,7 +67,22 @@ describe("ControlReceiptSweeper 超时收口", () => {
     expect((await repository.find("tenant-demo", "acked-5"))?.status).toBe("ACKED");
     expect((await repository.find("tenant-demo", "done-100"))?.status).toBe("DONE");
     // 收口写清楚等了多久，人工回填时不用再去翻时间戳
-    expect((await repository.find("tenant-demo", "queued-40"))?.receiptMessage).toBe("超过 15 分钟未收到设备回执（已等待 40 分钟），系统自动收口为失败");
+    expect((await repository.find("tenant-demo", "queued-40"))?.receiptMessage).toBe("超过有效回执阈值 15 分钟未收到设备回执（已等待 40 分钟），系统自动收口为失败");
+  });
+
+  it("长作业按执行包络延长回执阈值，超过作业时长后才收口", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "cmd-long",
+        type: "SEEDING",
+        parameters: { areaMu: 20, durationMin: 120, plan: { totalDurationMin: 120 } },
+        createdAt: new Date(nowMs - 20 * MINUTE).toISOString(),
+      }),
+    ]);
+    const sweeper = new ControlReceiptSweeper(repository, { timeoutMin: 15 });
+    expect(await sweeper.sweepOnce(nowMs)).toBe(0);
+    expect(await sweeper.sweepOnce(nowMs + 102 * MINUTE)).toBe(1);
+    expect((await repository.find("tenant-demo", "cmd-long"))?.receiptMessage).toContain("有效回执阈值 121 分钟");
   });
 
   it("再扫一轮不重复收口：终态指令不进候选", async () => {

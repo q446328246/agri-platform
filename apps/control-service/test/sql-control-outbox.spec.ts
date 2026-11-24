@@ -156,7 +156,7 @@ describe.runIf(databaseUrl)("超时收口真实库链路", () => {
 
       expect(await sweeper.sweepOnce(Date.now())).toBe(1);
       expect(await commands.find(TENANT, id)).toMatchObject({ status: "FAILED", version: 2 });
-      expect((await commands.find(TENANT, id))?.receiptMessage).toContain("超过 15 分钟未收到设备回执");
+      expect((await commands.find(TENANT, id))?.receiptMessage).toContain("超过有效回执阈值 15 分钟未收到设备回执");
 
       const pending = (await store.listPending(500)).filter((record) => record.traceId === traceId);
       expect(pending).toHaveLength(1);

@@ -257,11 +257,13 @@ describe("设备现场接入绑定", () => {
     // 端口/单元标识/超时都是可以从规范与剖面缺省推出的值，不该让人反复抄
     expect(created.data.binding).toEqual({ host: "10.20.30.41", port: 502, unitId: 1, profile: "WATER_M3", timeoutMs: 2000 });
 
-    // 演示台账 12 台全是回调式，加上新建的这一台现场设备
+    // 演示台账除拖拉机走 MQTT 直连外，其余均保持 HTTP 回调
     const field = await jsonOf(await fetch(`${base}/api/v1/devices?protocol=MODBUS_TCP&size=200`));
     expect(field.data.items.map((item: { deviceNo: string }) => item.deviceNo)).toEqual(["DZ-P-100"]);
     const callback = await jsonOf(await fetch(`${base}/api/v1/devices?protocol=HTTP&size=200`));
-    expect(callback.data.total).toBe(demoDevices().length);
+    expect(callback.data.total).toBe(demoDevices().filter((item) => item.protocol === "HTTP").length);
+    const mqtt = await jsonOf(await fetch(`${base}/api/v1/devices?protocol=MQTT&size=200`));
+    expect(mqtt.data.items.map((item: { deviceNo: string }) => item.deviceNo)).toEqual(["DZ-T-001"]);
   });
 
   it("协议与绑定不配套、剖面未知或与类型不符都会被拒，台账不留半行", async () => {

@@ -41,7 +41,7 @@
           <div v-for="(cameraId, index) in slots" :key="index" class="split-cell">
             <div class="split-head">
               <el-select :model-value="cameraId" placeholder="分配摄像机" clearable size="small" class="split-select" @update:model-value="(value: any) => assignCamera(index, value)">
-                <el-option v-for="camera in cameras" :key="camera.id" :label="camera.name" :value="camera.id" />
+                <el-option v-for="camera in cameraOptions" :key="camera.id" :label="camera.name" :value="camera.id" />
               </el-select>
               <el-tag v-if="slotCamera(index)" :type="slotCamera(index)!.status === 'ONLINE' ? 'success' : 'info'" size="small">
                 {{ slotCamera(index)!.status === 'ONLINE' ? '在线' : '离线' }}
@@ -76,7 +76,7 @@
               </div>
             </div>
             <div class="camera-actions split-actions">
-              <el-button size="small" :disabled="!slotCamera(index)" @click="openPtz(slotCamera(index)!)">云台</el-button>
+              <el-button size="small" :disabled="!canControl || !slotCamera(index)" @click="openPtz(slotCamera(index)!)">云台</el-button>
               <el-button size="small" :disabled="playState[`slot-${index}`] !== 'playing'" @click="screenshot(`slot-${index}`, slotCamera(index)?.name ?? `画面${index + 1}`)">截图</el-button>
               <el-button size="small" :disabled="!slotCamera(index) || !playable(slotCamera(index)!)" @click="fullscreen(`slot-${index}`)">全屏</el-button>
               <el-button size="small" :disabled="!slotCamera(index) || !playable(slotCamera(index)!)" @click="retrySlot(index)">刷新</el-button>
@@ -90,7 +90,7 @@
           <el-form :inline="true" @submit.prevent="loadRecordings">
             <el-form-item label="摄像机">
               <el-select v-model="recQuery.cameraId" placeholder="全部" clearable style="width: 200px">
-                <el-option v-for="camera in cameras" :key="camera.id" :label="camera.name" :value="camera.id" />
+                <el-option v-for="camera in cameraOptions" :key="camera.id" :label="camera.name" :value="camera.id" />
               </el-select>
             </el-form-item>
             <el-form-item label="开始日期">
@@ -117,7 +117,7 @@
           <el-form :inline="true" @submit.prevent="loadArchives">
             <el-form-item label="摄像机">
               <el-select v-model="arcQuery.cameraId" placeholder="全部" clearable style="width: 180px">
-                <el-option v-for="camera in cameras" :key="camera.id" :label="camera.name" :value="camera.id" />
+                <el-option v-for="camera in cameraOptions" :key="camera.id" :label="camera.name" :value="camera.id" />
               </el-select>
             </el-form-item>
             <el-form-item label="来源">
@@ -140,7 +140,7 @@
             <el-form-item>
               <el-button type="primary" @click="arcPage = 1; loadArchives()">查询</el-button>
               <el-button @click="resetArcQuery">重置</el-button>
-              <el-button type="success" plain @click="openArcDialog">人工补登留档</el-button>
+              <el-button v-if="canControl" type="success" plain @click="openArcDialog">人工补登留档</el-button>
             </el-form-item>
           </el-form>
         </div>
@@ -218,7 +218,7 @@
           </el-table-column>
           <el-table-column label="操作" width="90" fixed="right">
             <template #default="{ row }">
-              <el-button v-if="!row.forwarded" size="small" type="primary" link :loading="retryingId === row.id" @click="retryAiEvent(row)">重试</el-button>
+              <el-button v-if="canControl && !row.forwarded" size="small" type="primary" link :loading="retryingId === row.id" @click="retryAiEvent(row)">重试</el-button>
               <span v-else class="muted">—</span>
             </template>
           </el-table-column>
@@ -232,7 +232,7 @@
           <el-form :inline="true" @submit.prevent="loadPtzCommands">
             <el-form-item label="摄像机">
               <el-select v-model="ptzFilterCameraId" placeholder="全部" clearable style="width: 200px">
-                <el-option v-for="camera in cameras" :key="camera.id" :label="camera.name" :value="camera.id" />
+                <el-option v-for="camera in cameraOptions" :key="camera.id" :label="camera.name" :value="camera.id" />
               </el-select>
             </el-form-item>
             <el-form-item><el-button type="primary" @click="ptzPage = 1; loadPtzCommands()">查询</el-button><el-button @click="ptzFilterCameraId = ''; ptzPage = 1; loadPtzCommands()">重置</el-button></el-form-item>
@@ -251,7 +251,7 @@
           <el-table-column label="下发时间" min-width="160"><template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template></el-table-column>
           <el-table-column label="操作" width="90" fixed="right">
             <template #default="{ row }">
-              <el-button v-if="row.status !== 'SENT'" size="small" type="primary" link :loading="retryingId === row.id" @click="retryPtzCommand(row)">重试</el-button>
+              <el-button v-if="canControl && row.status !== 'SENT'" size="small" type="primary" link :loading="retryingId === row.id" @click="retryPtzCommand(row)">重试</el-button>
               <span v-else class="muted">—</span>
             </template>
           </el-table-column>
@@ -274,7 +274,7 @@
             <el-form-item>
               <el-button type="primary" @click="cameraPage = 1; loadCameras()">查询</el-button>
               <el-button @click="resetCameraQuery">重置</el-button>
-              <el-button type="success" plain @click="openCameraDialog()">添加摄像头</el-button>
+              <el-button v-if="canControl" type="success" plain @click="openCameraDialog()">添加摄像头</el-button>
             </el-form-item>
           </el-form>
         </div>
@@ -291,8 +291,8 @@
           <el-table-column prop="streamUrl" label="流地址" min-width="260" show-overflow-tooltip />
           <el-table-column label="操作" width="140" fixed="right">
             <template #default="{ row }">
-              <el-button size="small" type="primary" link @click="openCameraDialog(row)">编辑</el-button>
-              <el-button size="small" type="danger" link @click="removeCamera(row)">删除</el-button>
+              <el-button v-if="canControl" size="small" type="primary" link @click="openCameraDialog(row)">编辑</el-button>
+              <el-button v-if="canControl" size="small" type="danger" link @click="removeCamera(row)">删除</el-button>
             </template>
           </el-table-column>
           <template #empty><el-empty description="暂无摄像机" /></template>
@@ -304,16 +304,16 @@
     <el-dialog v-model="ptzDialogVisible" :title="`云台控制 · ${ptzCamera?.name ?? ''}`" width="600px">
       <div class="ptz-panel">
         <div class="ptz-pad">
-          <span /><el-button :disabled="!ptzCameraOnline" @click="ptzAction('UP')"><el-icon><Top /></el-icon>上仰</el-button><span />
-          <el-button :disabled="!ptzCameraOnline" @click="ptzAction('LEFT')"><el-icon><Back /></el-icon>左转</el-button>
-          <el-button :disabled="!ptzCameraOnline" type="danger" plain @click="ptzAction('STOP')"><el-icon><VideoPause /></el-icon>停止</el-button>
-          <el-button :disabled="!ptzCameraOnline" @click="ptzAction('RIGHT')">右转<el-icon><Right /></el-icon></el-button>
-          <span /><el-button :disabled="!ptzCameraOnline" @click="ptzAction('DOWN')"><el-icon><Bottom /></el-icon>下俯</el-button><span />
+          <span /><el-button :disabled="!canControl || !ptzCameraOnline" @click="ptzAction('UP')"><el-icon><Top /></el-icon>上仰</el-button><span />
+          <el-button :disabled="!canControl || !ptzCameraOnline" @click="ptzAction('LEFT')"><el-icon><Back /></el-icon>左转</el-button>
+          <el-button :disabled="!canControl || !ptzCameraOnline" type="danger" plain @click="ptzAction('STOP')"><el-icon><VideoPause /></el-icon>停止</el-button>
+          <el-button :disabled="!canControl || !ptzCameraOnline" @click="ptzAction('RIGHT')">右转<el-icon><Right /></el-icon></el-button>
+          <span /><el-button :disabled="!canControl || !ptzCameraOnline" @click="ptzAction('DOWN')"><el-icon><Bottom /></el-icon>下俯</el-button><span />
         </div>
         <div class="ptz-side">
           <div class="ptz-zoom">
-            <el-button :disabled="!ptzCameraOnline" @click="ptzAction('ZOOM_IN')"><el-icon><ZoomIn /></el-icon>放大</el-button>
-            <el-button :disabled="!ptzCameraOnline" @click="ptzAction('ZOOM_OUT')"><el-icon><ZoomOut /></el-icon>缩小</el-button>
+            <el-button :disabled="!canControl || !ptzCameraOnline" @click="ptzAction('ZOOM_IN')"><el-icon><ZoomIn /></el-icon>放大</el-button>
+            <el-button :disabled="!canControl || !ptzCameraOnline" @click="ptzAction('ZOOM_OUT')"><el-icon><ZoomOut /></el-icon>缩小</el-button>
           </div>
           <div class="ptz-speed">
             <span>速度</span>
@@ -334,7 +334,7 @@
         <el-table-column label="时间" width="150"><template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template></el-table-column>
         <el-table-column label="操作" width="70">
           <template #default="{ row }">
-            <el-button v-if="row.status !== 'SENT'" size="small" type="primary" link :loading="retryingId === row.id" @click="retryPtzCommand(row, true)">重试</el-button>
+            <el-button v-if="canControl && row.status !== 'SENT'" size="small" type="primary" link :loading="retryingId === row.id" @click="retryPtzCommand(row, true)">重试</el-button>
           </template>
         </el-table-column>
         <template #empty><el-empty description="暂无指令" :image-size="60" /></template>
@@ -364,7 +364,7 @@
       </el-form>
       <template #footer>
         <el-button @click="cameraDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="cameraSaving" @click="submitCamera">保存</el-button>
+        <el-button v-if="canControl" type="primary" :loading="cameraSaving" @click="submitCamera">保存</el-button>
       </template>
     </el-dialog>
 
@@ -372,7 +372,7 @@
       <el-form label-width="110px">
         <el-form-item label="摄像机" required>
           <el-select v-model="arcForm.cameraId" placeholder="选择摄像机" style="width: 100%">
-            <el-option v-for="camera in cameras" :key="camera.id" :label="camera.name" :value="camera.id" />
+            <el-option v-for="camera in cameraOptions" :key="camera.id" :label="camera.name" :value="camera.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="事件时刻" required>
@@ -392,7 +392,7 @@
       </el-form>
       <template #footer>
         <el-button @click="arcDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="arcSaving" @click="submitArchive">登记留档</el-button>
+        <el-button v-if="canControl" type="primary" :loading="arcSaving" @click="submitArchive">登记留档</el-button>
       </template>
     </el-dialog>
 
@@ -427,10 +427,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { plotApi, videoApi } from '@/api'
 import { formatDateTime } from '@/utils'
+import { useUserStore } from '@/stores'
 import type { AiEventType, ArchiveSource, ArchiveStatus, Camera, PtzAction, PtzCommand, Recording, RecordingArchive, VideoAiEvent } from '@/types'
 
 /** 播放状态：加载中、播放中、加载失败、未开始 */
@@ -443,14 +444,28 @@ const PTZ_STATUS_LABELS: Record<string, string> = { QUEUED: '已排队', SENT: '
 const activeTab = ref<TabName>('live')
 const loading = ref(false)
 const cameras = ref<Camera[]>([])
+/** 独立于实时监看查询结果的完整目录，供各页签选择器与名称解析使用。 */
+const cameraOptions = ref<Camera[]>([])
 const total = ref(0)
 const query = reactive<{ keyword: string; plotCode: string; status: string }>({ keyword: '', plotCode: '', status: '' })
 const playableCount = computed(() => cameras.value.filter((camera) => playable(camera)).length)
 const playState = reactive<Record<string, PlayState>>({})
 const videoEls = new Map<string, HTMLVideoElement>()
+/** 保留每次拉流使用的媒体元素，弹窗 DOM 先销毁时仍能完整停流。 */
+const streamVideos = new Map<string, HTMLVideoElement>()
 const screenEls = new Map<string, HTMLElement>()
 const engines = new Map<string, () => void>()
+const playVersions = new Map<string, number>()
+const pageActive = ref(true)
 const retryingId = ref('')
+
+const userStore = useUserStore()
+const canControl = computed(() => userStore.hasPermission('device:control'))
+function ensureControl(): boolean {
+  if (canControl.value) return true
+  ElMessage.warning('无设备控制权限')
+  return false
+}
 
 function setVideoRef(key: string, el: unknown) {
   if (el instanceof HTMLVideoElement) videoEls.set(key, el)
@@ -464,13 +479,13 @@ function setScreenRef(cameraId: string, el: unknown) {
 
 /** 摄像机是否应展示播放器：必须有流地址且在线 */
 const playable = (camera: Camera) => Boolean(camera.streamUrl) && camera.status === 'ONLINE'
-const cameraName = (cameraId: string) => cameras.value.find((camera) => camera.id === cameraId)?.name ?? cameraId
+const cameraName = (cameraId: string) => cameraOptions.value.find((camera) => camera.id === cameraId)?.name ?? cameraId
 
 // —— 分屏监看（A13）：1/2/4/9 画面，每屏独立换台/截图/云台/全屏 ——
 const splitCount = ref<1 | 2 | 4 | 9>(4)
 const slots = ref<Array<string | null>>([])
 const slotKey = (index: number) => `slot-${index}`
-const slotCamera = (index: number): Camera | null => cameras.value.find((camera) => camera.id === slots.value[index]) ?? null
+const slotCamera = (index: number): Camera | null => cameraOptions.value.find((camera) => camera.id === slots.value[index]) ?? cameras.value.find((camera) => camera.id === slots.value[index]) ?? null
 
 /** 销毁现有分屏播放器：切换分屏先释放引擎与引用，不泄漏播放器实例 */
 function teardownSlots() {
@@ -482,12 +497,20 @@ function teardownSlots() {
   }
 }
 
-/** 按分屏数重建：在线摄像机优先自动分配到各屏，再逐屏拉流 */
-async function applyLayout() {
-  teardownSlots()
-  const ordered = [...cameras.value].sort((a, b) => Number(playable(b)) - Number(playable(a)))
-  slots.value = Array.from({ length: splitCount.value }, (_, index) => ordered[index]?.id ?? null)
+/** KeepAlive 隐藏时保留分屏选择，但停止所有拉流。 */
+function stopLivePlayback() {
+  const keys = new Set([...slots.value.map((_, index) => slotKey(index)), ...engines.keys(), ...streamVideos.keys()])
+  for (const key of keys) {
+    destroyEngine(key)
+    delete playState[key]
+  }
+}
+
+/** 回到页面后按原分屏选择恢复实时监看。 */
+async function resumeLivePlayback() {
+  if (!pageActive.value) return
   await nextTick()
+  if (!pageActive.value) return
   for (let index = 0; index < slots.value.length; index += 1) {
     const camera = slotCamera(index)
     if (camera && playable(camera)) {
@@ -497,15 +520,33 @@ async function applyLayout() {
   }
 }
 
-watch(splitCount, () => void applyLayout())
+/** 按分屏数重建：在线摄像机优先自动分配到各屏，再逐屏拉流 */
+async function applyLayout() {
+  teardownSlots()
+  const ordered = [...cameras.value].sort((a, b) => Number(playable(b)) - Number(playable(a)))
+  slots.value = Array.from({ length: splitCount.value }, (_, index) => ordered[index]?.id ?? null)
+  await nextTick()
+  if (!pageActive.value) return
+  for (let index = 0; index < slots.value.length; index += 1) {
+    const camera = slotCamera(index)
+    if (camera && playable(camera)) {
+      playState[slotKey(index)] = 'loading'
+      void playStream(slotKey(index), camera.streamUrl)
+    }
+  }
+}
+
+watch(splitCount, () => { if (pageActive.value) void applyLayout() })
 
 /** 单屏换台：先销毁旧引擎再挂新源，空选即回收该屏 */
 async function assignCamera(index: number, cameraId: string | null) {
+  if (!pageActive.value) return
   destroyEngine(slotKey(index))
   videoEls.delete(slotKey(index))
   delete playState[slotKey(index)]
   slots.value[index] = cameraId || null
   await nextTick()
+  if (!pageActive.value) return
   const camera = slotCamera(index)
   if (camera && playable(camera)) {
     playState[slotKey(index)] = 'loading'
@@ -515,7 +556,7 @@ async function assignCamera(index: number, cameraId: string | null) {
 
 function retrySlot(index: number) {
   const camera = slotCamera(index)
-  if (camera) void playStream(slotKey(index), camera.streamUrl)
+  if (pageActive.value && camera && playable(camera)) void playStream(slotKey(index), camera.streamUrl)
 }
 
 /** 原生视频源兜底：HLS 用 canPlayType 探测，FLV/未知协议直接判为不支持。 */
@@ -542,14 +583,19 @@ async function loadHls(): Promise<any | null> {
 /** 挂载播放：优先 HLS.js 拉流，不支持时回退到原生 video，都不可用则提示失败。 */
 async function playStream(key: string, url: string) {
   const video = videoEls.get(key)
-  if (!video || !url) return
+  if (!pageActive.value || !video || !url) return
   destroyEngine(key)
+  const version = (playVersions.get(key) ?? 0) + 1
+  playVersions.set(key, version)
+  streamVideos.set(key, video)
   playState[key] = 'loading'
   if (useNativeSource(video, url)) {
     void video.play().catch(() => undefined)
     return
   }
   const Hls = await loadHls()
+  // 动态 import 返回前可能已切台、关闭弹窗或页面被 KeepAlive 隐藏。
+  if (playVersions.get(key) !== version || videoEls.get(key) !== video) return
   if (!Hls || !Hls.isSupported?.()) {
     playState[key] = 'error'
     return
@@ -557,29 +603,64 @@ async function playStream(key: string, url: string) {
   const hls = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 30 })
   const release = () => {
     hls.destroy()
-    engines.delete(key)
+    if (engines.get(key) === release) engines.delete(key)
   }
   engines.set(key, release)
-  hls.on(Hls.Events.MANIFEST_PARSED, () => void video.play().catch(() => undefined))
+  const isCurrent = () => playVersions.get(key) === version && videoEls.get(key) === video && engines.get(key) === release
+  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    if (isCurrent()) void video.play().catch(() => undefined)
+  })
   hls.on(Hls.Events.ERROR, (_event: unknown, data: { fatal?: boolean }) => {
-    if (!data?.fatal) return
-    release()
+    if (!data?.fatal || !isCurrent()) return
+    destroyEngine(key)
     playState[key] = 'error'
   })
   hls.loadSource(url)
   hls.attachMedia(video)
 }
 
+/** 版本失效后禁止旧异步调用继续挂载，同时彻底释放媒体源。 */
 function destroyEngine(key: string) {
-  engines.get(key)?.()
+  playVersions.set(key, (playVersions.get(key) ?? 0) + 1)
+  const release = engines.get(key)
   engines.delete(key)
+  release?.()
+  const video = streamVideos.get(key) ?? videoEls.get(key)
+  if (video) {
+    video.pause()
+    video.removeAttribute('src')
+    video.load()
+  }
+  streamVideos.delete(key)
 }
 
 /** 切换/销毁播放器会清空 src 并触发一次空错误，只有真的带错误码的媒体故障才算拉流失败 */
 function onVideoError(key: string, event: Event) {
   const video = event.target as HTMLVideoElement
-  if (!video.error || !video.currentSrc) return
+  if (videoEls.get(key) !== video || !video.error || !video.currentSrc) return
   playState[key] = 'error'
+}
+
+let cameraOptionsRequest = 0
+/** 后端单页最多 200 台；选择器目录必须循环取全，不能沿用实时监看的筛选分页。 */
+async function loadCameraOptions() {
+  const request = ++cameraOptionsRequest
+  const items: Camera[] = []
+  const size = 200
+  let page = 1
+  let total = 0
+  try {
+    do {
+      const res = await videoApi.getCameras({ page, size })
+      items.push(...(res.items ?? []))
+      total = res.total
+      page += 1
+      if (!res.items?.length) break
+    } while (items.length < total)
+    if (request === cameraOptionsRequest) cameraOptions.value = items
+  } catch {
+    if (request === cameraOptionsRequest) cameraOptions.value = []
+  }
 }
 
 async function load() {
@@ -647,6 +728,7 @@ const ptzDialogLoading = ref(false)
 const ptzCameraOnline = computed(() => Boolean(ptzCamera.value && playable(ptzCamera.value)))
 
 function openPtz(camera: Camera) {
+  if (!ensureControl() || !camera) return
   ptzCamera.value = camera
   ptzDialogVisible.value = true
   void loadPtzDialogCommands()
@@ -674,7 +756,7 @@ function reportPtzResult(command: PtzCommand) {
 }
 
 async function ptzAction(action: PtzAction) {
-  if (!ptzCamera.value) return
+  if (!ensureControl() || !ptzCamera.value) return
   try {
     const command = await videoApi.sendPtz(ptzCamera.value.id, { action, speed: ptzSpeed.value })
     reportPtzResult(command)
@@ -685,6 +767,7 @@ async function ptzAction(action: PtzAction) {
 }
 
 async function retryPtzCommand(command: PtzCommand, inDialog = false) {
+  if (!ensureControl()) return
   retryingId.value = command.id
   try {
     const updated = await videoApi.retryPtz(command.id)
@@ -736,6 +819,7 @@ function durationText(recording: Recording): string {
 }
 
 async function playRecording(recording: Recording) {
+  if (!pageActive.value) return
   recordingPlaying.value = recording
   recordingDialogVisible.value = true
   playState['recording'] = 'loading'
@@ -744,14 +828,16 @@ async function playRecording(recording: Recording) {
 }
 
 function retryRecording() {
-  if (recordingPlaying.value) void playStream('recording', recordingPlaying.value.playbackUrl)
+  if (pageActive.value && recordingPlaying.value) void playStream('recording', recordingPlaying.value.playbackUrl)
 }
 
 function stopRecordingPlayback() {
   destroyEngine('recording')
   videoEls.delete('recording')
+  streamVideos.delete('recording')
   playState['recording'] = 'idle'
   recordingPlaying.value = null
+  recordingDialogVisible.value = false
 }
 
 // —— 录像留档（A13）：告警时刻前后窗口的片段档案，切片本体依赖流媒体服务 ——
@@ -792,7 +878,8 @@ async function loadArchives() {
 function resetArcQuery() { arcQuery.cameraId = ''; arcQuery.source = ''; arcQuery.status = ''; arcQuery.range = []; arcPage.value = 1; void loadArchives() }
 
 function openArcDialog() {
-  arcForm.cameraId = cameras.value[0]?.id ?? ''
+  if (!ensureControl()) return
+  arcForm.cameraId = cameraOptions.value[0]?.id ?? ''
   arcForm.eventAt = formatDateTime(new Date().toISOString())
   arcForm.preSeconds = 30
   arcForm.postSeconds = 60
@@ -801,6 +888,7 @@ function openArcDialog() {
 }
 
 async function submitArchive() {
+  if (!ensureControl()) return
   if (!arcForm.cameraId) { ElMessage.warning('请选择摄像机'); return }
   if (!arcForm.eventAt) { ElMessage.warning('请选择事件时刻'); return }
   arcSaving.value = true
@@ -872,6 +960,7 @@ async function loadAiEvents() {
 function resetAiQuery() { aiQuery.plotCode = ''; aiQuery.eventType = ''; aiQuery.forwarded = ''; aiPage.value = 1; void loadAiEvents() }
 
 async function retryAiEvent(event: VideoAiEvent) {
+  if (!ensureControl()) return
   retryingId.value = event.id
   try {
     const updated = await videoApi.retryAiEvent(event.id)
@@ -965,6 +1054,7 @@ async function ensurePlotOptions() {
 }
 
 function openCameraDialog(camera?: Camera) {
+  if (!ensureControl()) return
   cameraForm.id = camera?.id ?? ''
   cameraForm.name = camera?.name ?? ''
   cameraForm.plotCode = camera?.plotCode ?? ''
@@ -975,6 +1065,7 @@ function openCameraDialog(camera?: Camera) {
 }
 
 async function submitCamera() {
+  if (!ensureControl()) return
   if (!cameraForm.name.trim()) {
     ElMessage.warning('请填写摄像头名称')
     return
@@ -991,9 +1082,7 @@ async function submitCamera() {
     else await videoApi.createCamera(payload)
     ElMessage.success(cameraForm.id ? '摄像头配置已更新' : '摄像头已登记')
     cameraDialogVisible.value = false
-    await loadCameras()
-    // 台账变了，监看页的可用摄像机也要跟着刷新
-    void load()
+    await Promise.all([loadCameras(), load(), loadCameraOptions()])
   } catch {
     // 错误提示由请求层统一弹出
   } finally {
@@ -1002,6 +1091,7 @@ async function submitCamera() {
 }
 
 async function removeCamera(camera: Camera) {
+  if (!ensureControl()) return
   try {
     await ElMessageBox.confirm(
       `确认删除摄像机「${camera.name}」？其云台指令、识别事件与留档记录按摄像机标识关联保留，不随删除清除。`,
@@ -1014,8 +1104,7 @@ async function removeCamera(camera: Camera) {
   try {
     await videoApi.deleteCamera(camera.id)
     ElMessage.success('摄像机已删除')
-    await loadCameras()
-    void load()
+    await Promise.all([loadCameras(), load(), loadCameraOptions()])
   } catch {
     // 错误提示由请求层统一弹出
   }
@@ -1034,14 +1123,33 @@ function refreshActive() {
   else if (activeTab.value === 'recordings') void loadRecordings()
   else if (activeTab.value === 'archives') void loadArchives()
   else if (activeTab.value === 'ai') void loadAiEvents()
-  else if (activeTab.value === 'cameras') void loadCameras()
+  else if (activeTab.value === 'cameras') { void loadCameras(); void loadCameraOptions() }
   else void loadPtzCommands()
 }
 
-onMounted(() => void load())
+function deactivatePlayback() {
+  pageActive.value = false
+  stopLivePlayback()
+  stopRecordingPlayback()
+}
+
+function activatePlayback() {
+  pageActive.value = true
+  void resumeLivePlayback()
+}
+
+onMounted(() => {
+  void loadCameraOptions()
+  void load()
+})
+onActivated(activatePlayback)
+onDeactivated(deactivatePlayback)
 onUnmounted(() => {
-  for (const key of [...engines.keys()]) destroyEngine(key)
+  pageActive.value = false
+  const keys = new Set([...engines.keys(), ...videoEls.keys(), ...streamVideos.keys(), ...slots.value.map((_, index) => slotKey(index)), 'recording'])
+  for (const key of keys) destroyEngine(key)
   videoEls.clear()
+  streamVideos.clear()
   screenEls.clear()
   engines.clear()
 })

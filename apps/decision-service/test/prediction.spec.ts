@@ -50,8 +50,8 @@ describe("墒情/虫害/产量预测引擎", () => {
   it("降雨概率达到抑制阈值时墒情降幅按零处理，不按持续干旱外推", () => {
     const noRain = predictSoilMoisture(soilSeries([[0, 32], [12, 30], [24, 28]]), {}, 30, 24);
     expect(noRain.level).toBe("WARNING");
-    const likelyRain = predictSoilMoisture(soilSeries([[0, 32], [12, 30], [24, 28]]), {}, 80, 24);
-    expect(likelyRain.predictedValue).toBe(28);
+    const likelyRain = predictSoilMoisture(soilSeries([[0, 36], [12, 34], [24, 32]]), {}, 80, 24);
+    expect(likelyRain.predictedValue).toBe(32);
     expect(likelyRain.level).toBe("NORMAL");
     expect(likelyRain.inputs).toMatchObject({ effectiveSlopePerHour: 0 });
   });

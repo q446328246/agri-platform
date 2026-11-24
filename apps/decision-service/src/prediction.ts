@@ -176,7 +176,7 @@ export function predictPestRisk(
   const density = Math.min(recent.length * 15, 45);
   const severity = maxLevel >= 3 ? 25 : maxLevel === 2 ? 12 : 0;
   const tempSuitable = forecastAvgTemp !== undefined && forecastAvgTemp >= 18 && forecastAvgTemp <= 30 ? 15 : 0;
-  const score = clamp(density + severity + tempSuitable, 0, 100);
+  const score = recent.length === 0 ? 0 : clamp(density + severity + tempSuitable, 0, 100);
   const level: PredictionLevel = score >= critical ? "CRITICAL" : score >= warn ? "WARNING" : "NORMAL";
   return {
     predictedValue: score,

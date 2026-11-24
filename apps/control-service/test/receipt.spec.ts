@@ -140,6 +140,27 @@ describe("指令仓储跃迁", () => {
   });
 });
 
+describe("指令详情查询", () => {
+  it("按 id 查询不受最新分页限制，并保持租户隔离", async () => {
+    const old = command({ id: "cmd-old", status: "SENT", version: 2 });
+    const newer = Array.from({ length: 25 }, (_, index) => command({
+      id: `cmd-new-${index}`,
+      createdAt: `2026-11-12T00:${String(index + 1).padStart(2, "0")}:00.000Z`,
+    }));
+    const base = await start(createControlHttpServer(new InMemoryControlCommandRepository([
+      old, ...newer, command({ id: "cmd-other", tenantId: "tenant-other" }),
+    ])));
+
+    const latest = await dataOf(await getJson(base, "/api/v1/control/commands?size=20"));
+    expect(latest.items.some((item: ControlCommand) => item.id === "cmd-old")).toBe(false);
+    const detail = await getJson(base, "/api/v1/control/commands/cmd-old");
+    expect(detail.status).toBe(200);
+    expect(await dataOf(detail)).toMatchObject({ id: "cmd-old", status: "SENT" });
+    expect((await getJson(base, "/api/v1/control/commands/cmd-other")).status).toBe(404);
+    expect((await getJson(base, "/api/v1/control/commands/missing")).status).toBe(404);
+  });
+});
+
 describe("设备通道：下发确认与执行回执", () => {
   it("走完整链路到执行到位，非法跃迁 409、重复下发幂等、结单后不再改", async () => {
     const base = await start(createControlHttpServer(new InMemoryControlCommandRepository(), { receiptTimeoutMin: 15 }));
@@ -181,6 +202,43 @@ describe("设备通道：下发确认与执行回执", () => {
     const list = await dataOf(await getJson(base, "/api/v1/control/commands"));
     expect(list.total).toBe(1);
     expect(list.items[0]).toMatchObject({ id: created.id, status: "DONE", version: 4 });
+  });
+
+  it("MQTT 恢复只允许重发 SENT，不重发已暂停或终态指令", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "cmd-sent", status: "SENT", version: 2, sentAt: "2026-11-12T00:01:00.000Z" }),
+      command({ id: "cmd-acked", status: "ACKED", version: 3, sentAt: "2026-11-12T00:01:00.000Z", ackedAt: "2026-11-12T00:02:00.000Z" }),
+      command({ id: "cmd-paused", status: "PAUSED", version: 3, sentAt: "2026-11-12T00:01:00.000Z", ackedAt: "2026-11-12T00:02:00.000Z" }),
+      command({ id: "cmd-done", status: "DONE", version: 4, finishedAt: "2026-11-12T00:03:00.000Z" }),
+      command({ id: "cmd-cancelled", status: "CANCELLED", version: 2, finishedAt: "2026-11-12T00:03:00.000Z" }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+
+    for (const [id, dispatchable] of [
+      ["cmd-sent", true],
+      ["cmd-acked", false],
+      ["cmd-paused", false],
+      ["cmd-done", false],
+      ["cmd-cancelled", false],
+    ] as const) {
+      const response = await postJson(base, "/api/v1/control/device/dispatch", { commandId: id, deviceId: "device-fert-001", requireQueued: true });
+      expect(response.status).toBe(200);
+      expect(await dataOf(response)).toMatchObject({ id, dispatchable });
+    }
+    expect((await repository.find(TENANT, "cmd-done"))?.status).toBe("DONE");
+  });
+
+  it("下发与回执校验指令设备归属，越权设备不能推进状态", async () => {
+    const repository = new InMemoryControlCommandRepository([command(), command({ id: "cmd-sent", status: "SENT", version: 2, sentAt: "2026-11-12T00:01:00.000Z" })]);
+    const base = await start(createControlHttpServer(repository));
+
+    const wrongDispatch = await postJson(base, "/api/v1/control/device/dispatch", { commandId: "cmd-1", deviceId: "device-other" });
+    expect(wrongDispatch.status).toBe(409);
+    expect((await repository.find(TENANT, "cmd-1"))?.status).toBe("QUEUED");
+
+    const wrongReceipt = await postJson(base, "/api/v1/control/device/receipt", { commandId: "cmd-sent", deviceId: "device-other", status: "ACKED" });
+    expect(wrongReceipt.status).toBe(409);
+    expect((await repository.find(TENANT, "cmd-sent"))?.status).toBe("SENT");
   });
 
   it("指令归属只认可信租户头，请求体自报的 tenantId 不生效", async () => {
@@ -468,7 +526,7 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 回执列（真实库�
       { id: oldest, createdAt: new Date(Date.now() - 3000).toISOString() },
     ];
     try {
-      for (const item of queue) await repository.create(command({ id: item.id, deviceId, createdAt: item.createdAt }));
+      for (const item of queue) await repository.create(command({ id: item.id, deviceId, type: "ESTOP", parameters: {}, createdAt: item.createdAt }));
 
       const asc = await repository.page(TENANT, { deviceId, pending: true, ascending: true, page: 1, size: 3 });
       expect(asc.items.map((item) => item.id)).toEqual([oldest, middle, newest]);

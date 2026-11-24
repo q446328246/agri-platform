@@ -8,6 +8,8 @@ zhao-guang-farm-master/
 .env.local
 # Ed25519 密钥对（和风 JWT）：私钥绝不能入库
 *.pem
+# MQTT 本地 CA/服务端证书与私钥由 scripts/init-mqtt-certs.mjs 在本机生成
+infra/emqx/certs/*
 coverage/
 .tmp/
 # 备份产物：由 scripts/backup-system.mjs 写入，不入库

@@ -1,4 +1,4 @@
-import type { PageResult } from "@agri/contracts";
+import { isJobCommandType, type PageResult } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
 import { toIsoTimestamp } from "@agri/shared";
 
@@ -71,6 +71,8 @@ export interface ControlCommand {
   origin: ControlOrigin;
   /** 来源事件标识，同一事件的重复投递只会生成一条指令 */
   sourceEventId?: string;
+  /** 调用方幂等键；拖拉机分步崩溃重试复用同一指令 */
+  idempotencyKey?: string;
   /** 指令缘由，用于列表展示与追溯 */
   reason: string;
   /** 定时执行时刻（迁移 050）：设备网关只领取已到期的指令，缺省入队即可执行 */
@@ -127,6 +129,8 @@ export interface ControlCommandQuery {
 export interface ControlCommandRepository {
   /** 写入指令；来源事件已存在时返回 null */
   create(command: ControlCommand): Promise<ControlCommand | null>;
+  findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<ControlCommand | null>;
+  hasActiveJob(tenantId: string, deviceId: string, excludeId?: string): Promise<boolean>;
   page(tenantId: string, query: ControlCommandQuery): Promise<PageResult<ControlCommand>>;
   find(tenantId: string, id: string): Promise<ControlCommand | null>;
   /** 沿合法跃迁表推进状态；记录不存在、不属于该租户、版本过期或跃迁非法时返回 null。
@@ -158,8 +162,15 @@ export function pendingMinutesOf(command: ControlCommand, nowMs: number): number
   return Math.max(0, Math.round((nowMs - since) / 60000));
 }
 
+/** 执行包络给出的作业时长优先于通用回执阈值，另留 1 分钟确认缓冲。 */
+export function effectiveTimeoutMin(command: ControlCommand, timeoutMin: number): number {
+  const plan = command.parameters.plan;
+  const duration = plan && typeof plan === "object" ? Number((plan as Record<string, unknown>).totalDurationMin) : NaN;
+  return Number.isFinite(duration) && duration > 0 ? Math.max(timeoutMin, Math.ceil(duration + 1)) : timeoutMin;
+}
+
 /**
- * 是否已超时未回执：在途且等待时长超过阈值。
+ * 是否已超时未回执：在途且等待时长超过该指令有效阈值。
  * 列表筛选与定时收口必须同一个判断，否则「页面上标红」和「后台真正收口」会变成两套口径。
  * 这里按毫秒精确比较、用严格大于，与 SQL 侧 `now() - … > make_interval(mins => n)` 对齐：
  * 先四舍五入再比大小会让内存模式把只差半分钟的行也算成超时。
@@ -169,11 +180,19 @@ function isOverdue(command: ControlCommand, nowMs: number, timeoutMin: number | 
   if (!PENDING_STATUSES.includes(command.status)) return false;
   const since = overdueSinceMs(command);
   if (!Number.isFinite(since)) return false;
-  return nowMs - since > timeoutMin * 60_000;
+  return nowMs - since > effectiveTimeoutMin(command, timeoutMin) * 60_000;
+}
+
+export function isCommandOverdue(command: ControlCommand, nowMs: number, timeoutMin: number): boolean {
+  return isOverdue(command, nowMs, timeoutMin);
 }
 
 const COLUMNS =
-  "id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, scheduled_at, sent_at, acked_at, finished_at, receipt_message, result_json, version, created_at";
+  "id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, idempotency_key, reason, scheduled_at, sent_at, acked_at, finished_at, receipt_message, result_json, version, created_at";
+
+function overdueThresholdSql(param: string): string {
+  return `GREATEST(${param}::int, CEIL(COALESCE(CASE WHEN jsonb_typeof(parameters->'plan'->'totalDurationMin') = 'number' THEN (parameters->'plan'->>'totalDurationMin')::numeric ELSE 0 END, 0) + 1)::int)`;
+}
 
 function toRecord(row: Record<string, unknown>): ControlCommand {
   const record: ControlCommand = {
@@ -200,6 +219,7 @@ function toRecord(row: Record<string, unknown>): ControlCommand {
     if (row[column] !== null && row[column] !== undefined) record[key] = toIsoTimestamp(row[column]);
   }
   if (row.source_event_id !== null && row.source_event_id !== undefined) record.sourceEventId = String(row.source_event_id);
+  if (row.idempotency_key !== null && row.idempotency_key !== undefined) record.idempotencyKey = String(row.idempotency_key);
   if (row.receipt_message !== null && row.receipt_message !== undefined) record.receiptMessage = String(row.receipt_message);
   if (row.result_json !== null && row.result_json !== undefined) record.result = row.result_json as Record<string, unknown>;
   return record;
@@ -212,8 +232,8 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
   async create(command: ControlCommand): Promise<ControlCommand | null> {
     // 唯一索引冲突说明同一来源事件对该设备已生成指令，返回空表示无需重复写入
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `INSERT INTO control_commands (id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, reason, scheduled_at, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)
+      `INSERT INTO control_commands (id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, idempotency_key, reason, scheduled_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
        ON CONFLICT DO NOTHING
        RETURNING ${COLUMNS}`,
       command.id,
@@ -227,6 +247,7 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
       command.status,
       command.origin,
       command.sourceEventId ?? null,
+      command.idempotencyKey ?? null,
       command.reason,
       command.scheduledAt ?? null,
       command.createdAt,
@@ -276,7 +297,7 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     }
     if (query.pendingOverMin !== undefined) {
       values.push(query.pendingOverMin);
-      conditions.push(`now() - COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)) > make_interval(mins => $${values.length}::int)`);
+      conditions.push(`now() - COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)) > make_interval(mins => ${overdueThresholdSql(`$${values.length}`)})`);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const totalRows = await this.client.$queryRawUnsafe<Array<{ total: number }>>(
@@ -302,6 +323,31 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
       id,
     );
     return rows[0] ? toRecord(rows[0]) : null;
+  }
+
+  async findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<ControlCommand | null> {
+    const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
+      `SELECT ${COLUMNS} FROM control_commands WHERE tenant_id = $1 AND idempotency_key = $2 LIMIT 1`,
+      tenantId,
+      idempotencyKey,
+    );
+    return rows[0] ? toRecord(rows[0]) : null;
+  }
+
+  async hasActiveJob(tenantId: string, deviceId: string, excludeId?: string): Promise<boolean> {
+    const rows = await this.client.$queryRawUnsafe<Array<{ exists: boolean }>>(
+      `SELECT EXISTS (
+         SELECT 1 FROM control_commands
+          WHERE tenant_id = $1 AND device_id = $2
+            AND type IN ('SEEDING', 'IRRIGATION', 'WEEDING', 'FERTILIZATION', 'TOOL_SWITCH', 'RETURN_HOME', 'TILLAGE')
+            AND status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED')
+            AND ($3::text IS NULL OR id <> $3)
+       ) AS exists`,
+      tenantId,
+      deviceId,
+      excludeId ?? null,
+    );
+    return rows[0]?.exists === true;
   }
 
   async transition(tenantId: string, transition: CommandTransition, tx?: Tx): Promise<ControlCommand | null> {
@@ -351,7 +397,7 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
       `SELECT ${COLUMNS}
        FROM control_commands
        WHERE status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED')
-         AND now() - COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)) > make_interval(mins => $1::int)
+         AND now() - COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)) > make_interval(mins => ${overdueThresholdSql("$1")})
        ORDER BY COALESCE(acked_at, sent_at, GREATEST(created_at, scheduled_at)), id
        LIMIT $2`,
       timeoutMin,
@@ -371,6 +417,14 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
 
   async create(command: ControlCommand): Promise<ControlCommand | null> {
     if (this.rows.some((row) => row.id === command.id)) return null;
+    if (command.idempotencyKey !== undefined && this.rows.some((row) => row.tenantId === command.tenantId && row.idempotencyKey === command.idempotencyKey)) {
+      return null;
+    }
+    if (isJobCommandType(command.type) && PENDING_STATUSES.includes(command.status)
+      && this.rows.some((row) => row.tenantId === command.tenantId && row.deviceId === command.deviceId
+        && isJobCommandType(row.type) && PENDING_STATUSES.includes(row.status))) {
+      return null;
+    }
     // 去重粒度与 SQL 侧部分唯一索引一致：（来源事件, 设备）——同一事件的多设备建单各留一条，
     // 重放同一事件对同一设备才被挡住
     if (command.sourceEventId !== undefined && this.rows.some((row) => row.sourceEventId === command.sourceEventId && row.deviceId === command.deviceId)) {
@@ -419,6 +473,19 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
   async find(tenantId: string, id: string): Promise<ControlCommand | null> {
     const row = this.rows.find((item) => item.tenantId === tenantId && item.id === id);
     return row ? structuredClone(row) : null;
+  }
+
+  async findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<ControlCommand | null> {
+    const row = this.rows.find((item) => item.tenantId === tenantId && item.idempotencyKey === idempotencyKey);
+    return row ? structuredClone(row) : null;
+  }
+
+  async hasActiveJob(tenantId: string, deviceId: string, excludeId?: string): Promise<boolean> {
+    return this.rows.some((row) => row.tenantId === tenantId
+      && row.deviceId === deviceId
+      && row.id !== excludeId
+      && isJobCommandType(row.type)
+      && PENDING_STATUSES.includes(row.status));
   }
 
   async transition(tenantId: string, transition: CommandTransition, _tx?: Tx): Promise<ControlCommand | null> {

@@ -3,7 +3,7 @@ import { EventTopic } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
 import type { OutboxService } from "@agri/mq";
 
-import { pendingMinutesOf } from "./control.repository.js";
+import { effectiveTimeoutMin, pendingMinutesOf } from "./control.repository.js";
 import type { ControlCommand, ControlCommandRepository } from "./control.repository.js";
 
 /**
@@ -104,12 +104,13 @@ export class ControlReceiptSweeper {
    */
   private async fail(command: ControlCommand, nowMs: number): Promise<boolean> {
     const waited = pendingMinutesOf(command, nowMs) ?? 0;
+    const timeoutMin = effectiveTimeoutMin(command, this.options.timeoutMin);
     const transition = {
       id: command.id,
       status: "FAILED" as const,
       at: new Date(nowMs).toISOString(),
       version: command.version,
-      message: `超过 ${this.options.timeoutMin} 分钟未收到设备回执（已等待 ${waited} 分钟），系统自动收口为失败`,
+      message: `超过有效回执阈值 ${timeoutMin} 分钟未收到设备回执（已等待 ${waited} 分钟），系统自动收口为失败`,
     };
     const payload: CommandTimeoutPayload = {
       commandId: command.id,
@@ -117,7 +118,7 @@ export class ControlReceiptSweeper {
       deviceId: command.deviceId,
       commandType: command.type,
       pendingMin: waited,
-      timeoutMin: this.options.timeoutMin,
+      timeoutMin,
       failedAt: transition.at,
     };
     const outbox = this.options.outbox;

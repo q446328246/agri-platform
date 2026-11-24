@@ -3,6 +3,9 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { createVideoHttpServer } from "../src/http.js";
+import type { VideoHttpOptions } from "../src/http.js";
+import { InMemoryCameraRepository, demoCameras } from "../src/camera.repository.js";
+import type { Camera } from "../src/camera.repository.js";
 import type { ForwardResult } from "../src/ai-event.js";
 import { InMemoryRecordingArchiveRepository, archiveWindow } from "../src/recording-archive.repository.js";
 import type { RecordingArchive } from "../src/recording-archive.repository.js";
@@ -22,6 +25,10 @@ afterEach(async () => {
 
 const detection = { cameraId: "camera-001", plotCode: "P-001", pestType: "稻飞虱", level: 2, confidence: 0.9, detectedAt: "2026-11-10T02:00:00Z" };
 const forwardOk = async (): Promise<ForwardResult> => ({ forwarded: true, status: 201, message: "已生成虫情告警" });
+
+function serverWithCameras(options: VideoHttpOptions = {}) {
+  return createVideoHttpServer({ ...options, cameras: options.cameras ?? new InMemoryCameraRepository(demoCameras()) });
+}
 
 async function request(base: string, path: string, init: RequestInit = {}): Promise<{ status: number; body: any }> {
   const response = await fetch(`${base}${path}`, { headers: { "content-type": "application/json", ...(init.headers as Record<string, string> | undefined) }, ...init });
@@ -78,8 +85,32 @@ describe("InMemoryRecordingArchiveRepository", () => {
 });
 
 describe("录像留档接口", () => {
+  it("录像按租户隔离，地块映射覆盖全部摄像机分页", async () => {
+    const now = new Date().toISOString();
+    const fillers: Camera[] = Array.from({ length: 200 }, (_, index) => ({
+      id: `aaa-${String(index).padStart(3, "0")}`,
+      tenantId: "tenant-demo",
+      name: `陪衬摄像机 ${index}`,
+      plotCode: "OTHER",
+      status: "OFFLINE",
+      streamUrl: "",
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const cameras = new InMemoryCameraRepository([...fillers, ...demoCameras()]);
+    const video = await start(serverWithCameras({ cameras }));
+    const plotCode = demoCameras()[1]!.plotCode;
+
+    const own = await request(video, `/api/v1/video/recordings?plotCode=${encodeURIComponent(plotCode)}`);
+    expect(own.body.data.items.map((item: { id: string }) => item.id)).toEqual(["rec-demo-002"]);
+
+    const other = await request(video, "/api/v1/video/recordings", { headers: { "x-tenant-id": "tenant-other" } });
+    expect(other.body.data.total).toBe(0);
+    expect(other.body.data.items).toEqual([]);
+  });
+
   it("识别事件落库时自动登记前后窗口留档，来源可筛选", async () => {
-    const video = await start(createVideoHttpServer({ forward: forwardOk }));
+    const video = await start(serverWithCameras({ forward: forwardOk }));
     const reported = await post(video, "/api/v1/video/ai-events", detection);
     expect(reported.status).toBe(201);
 
@@ -100,7 +131,7 @@ describe("录像留档接口", () => {
   });
 
   it("人工补登校验摄像头与窗口参数，非法输入 400/404", async () => {
-    const video = await start(createVideoHttpServer({ forward: forwardOk }));
+    const video = await start(serverWithCameras({ forward: forwardOk }));
     const created = await post(video, "/api/v1/video/recording-archives", { cameraId: "camera-002", eventAt: "2026-11-10T02:00:00Z", preSeconds: 10, postSeconds: 20, note: "巡田发现异常" });
     expect(created.status).toBe(201);
     expect(created.body.data.source).toBe("MANUAL");
@@ -115,7 +146,7 @@ describe("录像留档接口", () => {
   });
 
   it("内部回填只认 INTERNAL_TOKEN，留档成功必须带存储键或回放地址", async () => {
-    const video = await start(createVideoHttpServer({ forward: forwardOk }));
+    const video = await start(serverWithCameras({ forward: forwardOk }));
     const created = await post(video, "/api/v1/video/recording-archives", { cameraId: "camera-001", eventAt: "2026-11-10T02:00:00Z" });
     const id = created.body.data.id as string;
     const settlePath = `/api/v1/internal/video/recording-archives/${id}/settle`;

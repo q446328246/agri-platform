@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { isDeepStrictEqual } from "node:util";
 
 import { isJobCommandType, type ApiResponse, type PageResult } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
@@ -11,7 +12,7 @@ import { buildFinishedEvent, DEFAULT_FERTILIZER_DENSITY_KG_PER_L } from "./comma
 import { buildIrrigationPlan, executionPlanOf, validateCommandParameters } from "./command-spec.js";
 import type { IrrigationPlanInput } from "./command-spec.js";
 import type { ControlAuthorization, ControlAuthorizationRepository } from "./authorization.repository.js";
-import { CONTROL_STATUSES, canTransition, pendingMinutesOf } from "./control.repository.js";
+import { CONTROL_STATUSES, canTransition, isCommandOverdue, pendingMinutesOf } from "./control.repository.js";
 import { InMemoryControlCommandRepository } from "./control.repository.js";
 import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, ControlCommandType, ControlOrigin } from "./control.repository.js";
 
@@ -145,7 +146,14 @@ function receiptResult(value: unknown): Record<string, unknown> | undefined {
 /** 给指令附加在途信息：终态没有 pendingMin，超阈值即标记 overdue */
 function toView(command: ControlCommand, timeoutMin: number, nowMs: number): CommandView {
   const waited = pendingMinutesOf(command, nowMs);
-  return { ...command, ...(waited === undefined ? {} : { pendingMin: waited }), overdue: waited !== undefined && waited >= timeoutMin };
+  return { ...command, ...(waited === undefined ? {} : { pendingMin: waited }), overdue: isCommandOverdue(command, nowMs, timeoutMin) };
+}
+
+function sameIdempotentRequest(existing: ControlCommand, requested: ControlCommand): boolean {
+  return existing.deviceId === requested.deviceId
+    && existing.plotCode === requested.plotCode
+    && existing.type === requested.type
+    && isDeepStrictEqual(existing.parameters, requested.parameters);
 }
 
 /** 解析分页与过滤条件，页码与条数在边界内被修正 */
@@ -229,6 +237,26 @@ export function createControlHttpServer(
       });
       if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
 
+      if (req.method === "GET" && url.pathname === "/api/v1/control/commands/by-idempotency-key") {
+        const idempotencyKey = url.searchParams.get("key")?.trim();
+        if (!idempotencyKey || idempotencyKey.length > 200) {
+          send(res, 400, null, traceId, "idempotencyKey 需为 1~200 个字符");
+          return;
+        }
+        const command = await repository.findByIdempotencyKey(tenantOf(req), idempotencyKey);
+        send(res, 200, command ? toView(command, timeoutMin, Date.now()) : null, traceId);
+        return;
+      }
+
+      const commandMatch = url.pathname.match(/^\/api\/v1\/control\/commands\/([^/]+)$/);
+      if (commandMatch && req.method === "GET") {
+        const nowMs = Date.now();
+        const command = await repository.find(tenantOf(req), decodeURIComponent(commandMatch[1]!));
+        if (!command) { send(res, 404, null, traceId, "指令不存在"); return; }
+        send(res, 200, toView(command, timeoutMin, nowMs), traceId);
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/api/v1/control/commands") {
         const nowMs = Date.now();
         const page: PageResult<ControlCommand> = await repository.page(tenantOf(req), query(url.searchParams, timeoutMin));
@@ -250,6 +278,14 @@ export function createControlHttpServer(
           return;
         }
         const parameters = body.parameters && typeof body.parameters === "object" ? (body.parameters as Record<string, unknown>) : {};
+        let idempotencyKey: string | undefined;
+        if (body.idempotencyKey !== undefined) {
+          if (typeof body.idempotencyKey !== "string" || body.idempotencyKey.trim() === "" || body.idempotencyKey.trim().length > 200) {
+            send(res, 400, null, traceId, "idempotencyKey 需为 1~200 个字符");
+            return;
+          }
+          idempotencyKey = body.idempotencyKey.trim();
+        }
         // 水肥类指令的参数会直接决定用水量与配比，下发前必须校验，避免脏参数进入执行队列
         const parameterErrors = validateCommandParameters(type, parameters);
         if (parameterErrors.length > 0) {
@@ -283,6 +319,7 @@ export function createControlHttpServer(
           parameters: plan === undefined ? parameters : { ...parameters, plan },
           status: "QUEUED",
           origin: "MANUAL",
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
           reason: typeof body.reason === "string" && body.reason !== "" ? body.reason : "人工确认执行",
           ...(scheduledAt === undefined ? {} : { scheduledAt }),
           version: 1,
@@ -292,16 +329,22 @@ export function createControlHttpServer(
           send(res, 400, null, traceId, "控制指令需要设备标识");
           return;
         }
-        // 作业联锁（B4）：同一设备同时只允许一条在途作业指令，两条作业抢同一台设备等于互相踩踏。
-        // 控制类指令（急停/断电/暂停等）不在此列——它们是对在途作业的处置动作，不是新的作业。
-        if (isJobCommandType(type)) {
-          for (const status of ["SENT", "ACKED"] as const) {
-            const inTransit = await repository.page(command.tenantId, { deviceId: command.deviceId, status, page: 1, size: 1 });
-            if (inTransit.items.length > 0) {
-              send(res, 409, null, traceId, `作业联锁：设备 ${command.deviceId} 已有在途作业指令（${status}），完成或取消后再下发新作业指令`);
+        if (idempotencyKey !== undefined) {
+          const existing = await repository.findByIdempotencyKey(command.tenantId, idempotencyKey);
+          if (existing) {
+            if (!sameIdempotentRequest(existing, command)) {
+              send(res, 409, null, traceId, "幂等键已用于不同指令内容");
               return;
             }
+            send(res, 200, toView(existing, timeoutMin, Date.now()), traceId);
+            return;
           }
+        }
+        // 作业联锁（B4）：同一设备同时只允许一条在途作业指令，两条作业抢同一台设备等于互相踩踏。
+        // 控制类指令（急停/断电/暂停等）不在此列——它们是对在途作业的处置动作，不是新的作业。
+        if (isJobCommandType(type) && await repository.hasActiveJob(command.tenantId, command.deviceId)) {
+          send(res, 409, null, traceId, `作业联锁：设备 ${command.deviceId} 已有在途作业指令，完成或取消后再下发新作业指令`);
+          return;
         }
         // PAUSE/RESUME 是指向另一条指令的联动指令：目标必须存在、同设备、且处在可暂停/可恢复的状态，
         // 否则入队一条永远联动不上的孤儿指令，现场设备也不知道该停谁
@@ -332,8 +375,19 @@ export function createControlHttpServer(
             return;
           }
         }
-        await repository.create(command);
-        send(res, 202, toView(command, timeoutMin, Date.now()), traceId);
+        const created = await repository.create(command);
+        if (!created) {
+          if (idempotencyKey !== undefined) {
+            const existing = await repository.findByIdempotencyKey(command.tenantId, idempotencyKey);
+            if (existing && sameIdempotentRequest(existing, command)) {
+              send(res, 200, toView(existing, timeoutMin, Date.now()), traceId);
+              return;
+            }
+          }
+          send(res, 409, null, traceId, "指令创建冲突，请刷新后重试");
+          return;
+        }
+        send(res, 202, toView(created, timeoutMin, Date.now()), traceId);
         return;
       }
 
@@ -358,6 +412,14 @@ export function createControlHttpServer(
         });
         if (!updated) { send(res, 409, null, traceId, "指令已被网关领取或状态已变化，请刷新后重试"); return; }
         send(res, 200, toView(updated, timeoutMin, Date.now()), traceId);
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/v1/control/device/in-transit") {
+        const deviceId = url.searchParams.get("deviceId")?.trim();
+        if (!deviceId) { send(res, 400, null, traceId, "查询在途作业需要设备标识 deviceId"); return; }
+        const excludeCommandId = url.searchParams.get("excludeCommandId")?.trim() || undefined;
+        send(res, 200, { inTransit: await repository.hasActiveJob(tenantOf(req), deviceId, excludeCommandId) }, traceId);
         return;
       }
 
@@ -390,8 +452,20 @@ export function createControlHttpServer(
         const tenantId = tenantOf(req);
         const target = await repository.find(tenantId, requiredText(body.commandId, "commandId"));
         if (!target) { send(res, 404, null, traceId, "指令不存在"); return; }
+        const deviceId = receiptText(body.deviceId, "deviceId");
+        if (deviceId && deviceId !== target.deviceId) { send(res, 409, null, traceId, "指令不属于该设备，不能下发"); return; }
         if (target.status === "FAILED") { send(res, 409, null, traceId, "指令已标记失败，不能再次下发"); return; }
-        if (target.status !== "QUEUED") { send(res, 200, toView(target, timeoutMin, Date.now()), traceId); return; }
+        if (target.status === "QUEUED" && isJobCommandType(target.type) && await repository.hasActiveJob(tenantId, target.deviceId, target.id)) {
+          send(res, 409, null, traceId, "作业联锁：设备已有其它在途作业指令");
+          return;
+        }
+        if (target.status !== "QUEUED") {
+          // MQTT 出站队列恢复时只允许补发 SENT；ACKED/PAUSED 说明设备已接收，终态更不能发。
+          // 普通网关重试仍按原口径幂等返回，避免网络重试改变 HTTP/Modbus 通道行为。
+          if (body.requireQueued === true) send(res, 200, { ...toView(target, timeoutMin, Date.now()), dispatchable: target.status === "SENT" }, traceId);
+          else send(res, 200, toView(target, timeoutMin, Date.now()), traceId);
+          return;
+        }
         const message = receiptText(body.message, "message");
         const updated = await repository.transition(tenantId, {
           id: target.id,
@@ -401,7 +475,7 @@ export function createControlHttpServer(
           ...(message === undefined ? {} : { message }),
         });
         if (!updated) { send(res, 409, null, traceId, "指令状态已被其它回执推进，请刷新后重试"); return; }
-        send(res, 200, toView(updated, timeoutMin, Date.now()), traceId);
+        send(res, 200, { ...toView(updated, timeoutMin, Date.now()), ...(body.requireQueued === true ? { dispatchable: true } : {}) }, traceId);
         return;
       }
 
@@ -422,6 +496,8 @@ export function createControlHttpServer(
         if (status === "FAILED" && message === undefined) throw new Error("FAILED 回执必须说明失败原因（message）");
         const target = await repository.find(tenantId, requiredText(body.commandId, "commandId"));
         if (!target) { send(res, 404, null, traceId, "指令不存在"); return; }
+        const deviceId = receiptText(body.deviceId, "deviceId");
+        if (deviceId && deviceId !== target.deviceId) { send(res, 409, null, traceId, "回执设备与指令设备不一致"); return; }
         // 急停/断电的 DONE 必须有到位确认，否则等于「没人确认设备真的停了」就结单
         if (CONFIRM_REQUIRED_TYPES.includes(target.type) && status === "DONE" && result?.confirmed !== true) {
           send(res, 400, null, traceId, `${target.type === "ESTOP" ? "急停" : "断电"}指令的执行完成回执必须带到位确认（result.confirmed=true）`);

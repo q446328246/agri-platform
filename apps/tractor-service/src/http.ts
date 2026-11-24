@@ -2,16 +2,18 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { ApiResponse, PageResult } from "@agri/contracts";
+import type { Tx } from "@agri/db";
 import { authorizeRequest } from "@agri/shared";
 
 import { InMemoryTractorJobRepository, TRACTOR_OPERATION_TYPES, TRACTOR_JOB_STATUSES } from "./job.repository.js";
-import type { TractorJob, TractorJobRepository, TractorJobStage, TractorOperationType } from "./job.repository.js";
+import type { TractorJob, TractorJobRepository, TractorJobStage, TractorOperationType, TractorStageKind } from "./job.repository.js";
 import { InMemoryTractorSafetyEventRepository, TRACTOR_SAFETY_KINDS } from "./safety-event.repository.js";
 import type { TractorSafetyEvent, TractorSafetyEventRepository } from "./safety-event.repository.js";
 import { InMemoryTrajectoryRepository } from "./trajectory.repository.js";
-import type { Trajectory, TrajectoryPoint, TrajectoryRepository } from "./trajectory.repository.js";
+import type { TrajectoryPoint, TrajectoryRepository } from "./trajectory.repository.js";
 import type { TrajectoryDraft } from "./trajectory.js";
 import type { JobExecutor } from "./executor.js";
+import { TractorCommandError } from "./executor.js";
 import { buildJobStages } from "./plan.js";
 import type { PlanOptions } from "./plan.js";
 import type { SafetyGateResult } from "./safety.js";
@@ -30,13 +32,16 @@ export interface TractorHttpDependencies {
   safetyEvents?: TractorSafetyEventRepository;
   executor?: JobExecutor;
   /** 作业前安全预检；缺省直接放行（仅供内存测试） */
-  precheck?: (input: { plotCode: string; deviceId: string; operator: string }) => Promise<TractorPrecheckResult>;
+  precheck?: (input: { tenantId: string; plotCode: string; deviceId: string; operator: string; allowCommandId?: string; stageKind?: TractorStageKind }) => Promise<TractorPrecheckResult>;
   /** 作业计划参数（机具编码、超时等） */
   planOptions?: PlanOptions;
   /** 轨迹台账；缺省空内存实现 */
   trajectories?: TrajectoryRepository;
   /** 轨迹规划：直接传点走 MANUAL、传幅宽走 AUTO；缺省不建轨迹 */
-  trajectoryPlanner?: (input: { plotCode: string; implementWidthM?: number; explicitPath?: TrajectoryPoint[] }) => Promise<TrajectoryDraft | null>;
+  trajectoryPlanner?: (input: { tenantId: string; plotCode: string; implementWidthM?: number; explicitPath?: TrajectoryPoint[] }) => Promise<TrajectoryDraft | null>;
+  /** SQL 组合根注入；作业、轨迹与分步在同一事务提交 */
+  transaction?: <T>(handler: (tx: Tx) => Promise<T>) => Promise<T>;
+  /** 请求未带 x-tenant-id 时的缺省租户 */
   tenantId?: string;
 }
 
@@ -49,6 +54,11 @@ function send<T>(res: ServerResponse, status: number, data: T | null, traceId: s
 function trace(req: IncomingMessage): string {
   const value = req.headers["x-request-id"];
   return typeof value === "string" && value.length > 0 ? value : randomUUID();
+}
+
+function requestTenant(req: IncomingMessage, fallback: string): string {
+  const value = req.headers["x-tenant-id"];
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
 async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -75,17 +85,19 @@ function text(value: unknown): string {
  * 少于 2 个点不成一条路径，返回 undefined 表示未传（交由幅宽走自动算）。
  */
 function parseTrajectoryPath(raw: unknown): TrajectoryPoint[] | undefined {
+  if (raw === undefined) return undefined;
   const coordinates = Array.isArray(raw) ? raw : (raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).path) ? (raw as Record<string, unknown>).path : undefined);
-  if (!Array.isArray(coordinates)) return undefined;
+  if (!Array.isArray(coordinates)) throw new Error("trajectory 需为 [经度, 纬度] 数组或含 path 的对象");
   const points: TrajectoryPoint[] = [];
   for (const item of coordinates) {
-    if (!Array.isArray(item) || item.length < 2) return undefined;
-    const lng = Number(item[0]);
-    const lat = Number(item[1]);
-    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return undefined;
+    if (!Array.isArray(item) || item.length < 2 || typeof item[0] !== "number" || typeof item[1] !== "number") throw new Error("trajectory.path 每个点需包含数值型经度和纬度");
+    const lng = item[0];
+    const lat = item[1];
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) throw new Error("trajectory.path 经纬度必须为有限数值");
     points.push([lng, lat]);
   }
-  return points.length >= 2 ? points : undefined;
+  if (points.length < 2) throw new Error("trajectory.path 至少需要 2 个轨迹点");
+  return points;
 }
 
 /** 农具幅宽（米）：自动算轨迹时必填，越界直接拒绝，不猜一个幅宽去铺作业带 */
@@ -108,17 +120,19 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
   const planOptions = dependencies?.planOptions;
   const trajectories = dependencies?.trajectories ?? new InMemoryTrajectoryRepository();
   const trajectoryPlanner = dependencies?.trajectoryPlanner;
-  const tenantId = dependencies?.tenantId ?? "tenant-demo";
+  const transaction = dependencies?.transaction;
+  const defaultTenantId = dependencies?.tenantId ?? "tenant-demo";
 
   return createServer(async (req, res) => {
     const traceId = trace(req);
     const url = new URL(req.url ?? "/", "http://localhost");
+    const tenantId = requestTenant(req, defaultTenantId);
     try {
       if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "tractor" }, traceId); return; }
       const denied = authorizeRequest(req, TRACTOR_POLICY);
       if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
 
-      // 下发作业：安全预检 → 计划生成 → 落作业与分步 → 启动执行
+      // 下发作业：安全预检 → 计划生成 → 单事务落作业/轨迹/分步 → 启动执行
       if (req.method === "POST" && url.pathname === `${API_PREFIX}/jobs`) {
         const body = await json(req);
         const plotCode = text(body.plotCode);
@@ -129,14 +143,16 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
         if (!deviceId) { send(res, 400, null, traceId, "deviceId 不能为空"); return; }
         if (!TRACTOR_OPERATION_TYPES.includes(operationType)) { send(res, 400, null, traceId, `operationType 需为 ${TRACTOR_OPERATION_TYPES.join("/")} 之一`); return; }
         const parameters = body.parameters && typeof body.parameters === "object" ? (body.parameters as Record<string, unknown>) : {};
+        const explicitPath = parseTrajectoryPath(body.trajectory);
+        const implementWidthM = readImplementWidth(body.implementWidthM);
 
-        // 安全验证：预检不过不排程，留安全事件并回给调用方
         if (precheck) {
-          const result = await precheck({ plotCode, deviceId, operator });
+          const result = await precheck({ tenantId, plotCode, deviceId, operator });
+          if (result.tenantId !== tenantId) { send(res, 403, null, traceId, "安全预检租户与请求租户不一致"); return; }
           if (!result.passed) {
             const failed = result.gates.filter((gate) => !gate.passed);
             await safetyEvents.create(undefined, {
-              tenantId: result.tenantId,
+              tenantId,
               plotCode,
               deviceId,
               kind: "PRECHECK_FAIL",
@@ -148,11 +164,6 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
           }
         }
 
-        // 轨迹入参：直接传点走 MANUAL，传幅宽走 AUTO；两者都无则不建轨迹
-        const explicitPath = parseTrajectoryPath(body.trajectory);
-        const implementWidthM = readImplementWidth(body.implementWidthM);
-
-        // 计划算法：分步指令序列，参数不满足包络口径直接拒绝
         let stages;
         try {
           stages = buildJobStages(operationType, parameters, planOptions);
@@ -160,12 +171,11 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
           send(res, 400, null, traceId, error instanceof Error ? error.message : "作业参数非法");
           return;
         }
-        // 轨迹规划先于作业落库：AUTO 模式地块无边界或覆盖规划不可达时抛错，
-        // 此时尚未建作业，不会留下无分步的孤儿作业
-        let trajectoryDraft: TrajectoryDraft | null = null;
+        let plannedTrajectory: TrajectoryDraft | null = null;
         if (trajectoryPlanner) {
           try {
-            trajectoryDraft = await trajectoryPlanner({
+            plannedTrajectory = await trajectoryPlanner({
+              tenantId,
               plotCode,
               ...(implementWidthM !== undefined ? { implementWidthM } : {}),
               ...(explicitPath !== undefined ? { explicitPath } : {}),
@@ -175,30 +185,53 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
             return;
           }
         }
-        const job = await jobs.createJob(undefined, {
-          tenantId, plotCode, deviceId, operationType, parameters, operator,
-          reason: text(body.reason) || "人工下发作业",
-        });
-        // 轨迹落库，并把下发用的路径点挂到作业步参数上——MQTT 指令载荷带的是路径点，
-        // 设备拿不到数据库里的轨迹行
-        if (trajectoryDraft) {
-          const trajectory = await trajectories.create(undefined, { jobId: job.id, tenantId, plotCode, ...trajectoryDraft });
-          const operationStage = stages.find((stage) => stage.stage === "OPERATION");
-          if (operationStage) operationStage.parameters = { ...operationStage.parameters, path: trajectory.path };
+        // 作业参数 durationMin 是指令与超时的唯一权威值；轨迹展示同步该值，AUTO 估算差异仅作提示。
+        const durationMin = Number(parameters.durationMin);
+        const trajectoryDraft: TrajectoryDraft | null = plannedTrajectory ? {
+          ...plannedTrajectory,
+          durationMin,
+          warnings: plannedTrajectory.source === "AUTO" && plannedTrajectory.durationMin !== durationMin
+            ? [...plannedTrajectory.warnings, `轨迹估算 ${plannedTrajectory.durationMin} 分钟，执行按作业参数 ${durationMin} 分钟`]
+            : plannedTrajectory.warnings,
+        } : null;
+
+        let createdJobId: string | undefined;
+        let job: TractorJob;
+        try {
+          const persist = async (tx: Tx | undefined): Promise<TractorJob> => {
+            const created = await jobs.createJob(tx, {
+              tenantId, plotCode, deviceId, operationType, parameters, operator,
+              reason: text(body.reason) || "人工下发作业",
+            });
+            createdJobId = created.id;
+            if (trajectoryDraft) {
+              const trajectory = await trajectories.create(tx, { jobId: created.id, tenantId, plotCode, ...trajectoryDraft });
+              const operationStage = stages.find((stage) => stage.stage === "OPERATION");
+              if (operationStage) operationStage.parameters = { ...operationStage.parameters, path: trajectory.path };
+            }
+            for (const stage of stages) {
+              await jobs.addStage(tx, {
+                tenantId,
+                jobId: created.id, stage: stage.stage, commandType: stage.commandType,
+                parameters: stage.parameters, timeoutMs: stage.timeoutMs,
+              });
+            }
+            return created;
+          };
+          job = transaction ? await transaction(persist) : await persist(undefined);
+        } catch (error) {
+          // 内存降级没有跨仓储事务：把已建作业明确收口为 FAILED，绝不返回成功的 PLANNED 孤儿。
+          if (createdJobId && !transaction) {
+            await jobs.updateJob(tenantId, createdJobId, { status: "FAILED", reason: "建单失败，作业未完整落库" }, { expectedStatus: "PLANNED" }).catch(() => {});
+          }
+          throw error;
         }
-        for (const stage of stages) {
-          await jobs.addStage(undefined, {
-            jobId: job.id, stage: stage.stage, commandType: stage.commandType,
-            parameters: stage.parameters, timeoutMs: stage.timeoutMs,
-          });
-        }
-        // 执行在后台推进，接口立即返回排程结果
         if (executor) void executor.run(job);
         send(res, 201, job, traceId);
         return;
       }
 
-      // 作业列表：按地块/设备/状态筛选
+      // 作业列表：租户 + 地块/设备/状态筛选
       if (req.method === "GET" && url.pathname === `${API_PREFIX}/jobs`) {
         const plotCode = url.searchParams.get("plotCode") ?? undefined;
         const deviceId = url.searchParams.get("deviceId") ?? undefined;
@@ -208,6 +241,7 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
           return;
         }
         const records = await jobs.listJobs({
+          tenantId,
           ...(plotCode ? { plotCode } : {}),
           ...(deviceId ? { deviceId } : {}),
           ...(status ? { status: status as TractorJob["status"] } : {}),
@@ -217,54 +251,40 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
         return;
       }
 
-      // 作业详情：作业 + 分步指令序列（stop/resume 子路径共用同一作业标识提取）
+      // 作业详情：作业 + 分步指令序列 + 轨迹，全部按请求租户读取
       const jobMatch = url.pathname.match(/^\/api\/v1\/tractor\/jobs\/([^/]+)(?:\/(?:stop|resume))?$/);
       const jobId = jobMatch?.[1] ? decodeURIComponent(jobMatch[1]) : undefined;
       if (jobId && req.method === "GET" && url.pathname === `${API_PREFIX}/jobs/${jobId}`) {
-        const job = await jobs.findJob(jobId);
+        const job = await jobs.findJob(tenantId, jobId);
         if (!job) { send(res, 404, null, traceId, "作业不存在"); return; }
-        const stages = await jobs.listStages(job.id);
-        const trajectory = await trajectories.findByJob(job.id);
+        const stages = await jobs.listStages(tenantId, job.id);
+        const trajectory = await trajectories.findByJob(tenantId, job.id);
         send(res, 200, { job, stages, trajectory }, traceId);
         return;
       }
 
-      // 人工处置：暂停或急停（急停为安全事件）
+      // 人工处置：暂停或急停；控制侧 DONE 确认前不写作业状态
       if (jobId && req.method === "POST" && url.pathname === `${API_PREFIX}/jobs/${jobId}/stop`) {
         if (!executor) { send(res, 400, null, traceId, "作业执行器未配置"); return; }
         const body = await json(req);
-        const job = await executor.stop(jobId, body.emergency === true);
+        const job = await executor.stop(tenantId, jobId, body.emergency === true);
         if (!job) { send(res, 404, null, traceId, "作业不存在或不在作业中/暂停态"); return; }
         send(res, 200, job, traceId);
         return;
       }
 
-      // 恢复作业：重新安全预检，通过后从断点续跑
+      // 恢复作业：执行器在 RESUME 前后统一执行安全门，避免 HTTP 与执行器重复预检误判孤儿指令
       if (jobId && req.method === "POST" && url.pathname === `${API_PREFIX}/jobs/${jobId}/resume`) {
         if (!executor || !precheck) { send(res, 400, null, traceId, "执行器或预检未配置"); return; }
-        const job = await jobs.findJob(jobId);
+        const job = await jobs.findJob(tenantId, jobId);
         if (!job) { send(res, 404, null, traceId, "作业不存在"); return; }
-        const result = await precheck({ plotCode: job.plotCode, deviceId: job.deviceId, operator: job.operator });
-        if (!result.passed) {
-          const failed = result.gates.filter((gate) => !gate.passed);
-          await safetyEvents.create(undefined, {
-            tenantId: result.tenantId,
-            jobId: job.id,
-            plotCode: job.plotCode,
-            deviceId: job.deviceId,
-            kind: "PRECHECK_FAIL",
-            level: "WARNING",
-            message: `恢复作业预检未通过：${failed.map((gate) => gate.message).join("；")}`,
-          });
-          send(res, 409, null, traceId, `恢复作业预检未通过：${failed.map((gate) => gate.message).join("；")}`);
-          return;
-        }
-        void executor.run(job);
-        send(res, 200, job, traceId);
+        if (job.status !== "PAUSED") { send(res, 409, null, traceId, "只有 PAUSED 作业可以恢复"); return; }
+        const resumed = await executor.resume(tenantId, job.id);
+        send(res, 200, resumed, traceId);
         return;
       }
 
-      // 安全事件列表：按作业/地块/类型筛选
+      // 安全事件列表：租户 + 作业/地块/类型筛选
       if (req.method === "GET" && url.pathname === `${API_PREFIX}/safety-events`) {
         const jobId = url.searchParams.get("jobId") ?? undefined;
         const plotCode = url.searchParams.get("plotCode") ?? undefined;
@@ -274,6 +294,7 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
           return;
         }
         const events = await safetyEvents.list({
+          tenantId,
           ...(jobId ? { jobId } : {}),
           ...(plotCode ? { plotCode } : {}),
           ...(kind ? { kind: kind as TractorSafetyEvent["kind"] } : {}),
@@ -285,9 +306,8 @@ export function createTractorHttpServer(dependencies?: Partial<TractorHttpDepend
 
       send(res, 404, null, traceId, "接口不存在");
     } catch (error) {
-      // 等保错误处理：生产环境不泄露内部细节
       const detail = process.env.NODE_ENV === "production" ? "请求处理失败" : (error instanceof Error ? error.message : "请求处理失败");
-      send(res, 400, null, traceId, detail);
+      send(res, error instanceof TractorCommandError ? error.status : 400, null, traceId, detail);
     }
   });
 }

@@ -133,7 +133,7 @@ const routes: RouteRecordRaw[] = [
             path: 'irrigation',
             name: 'DeviceIrrigation',
             component: () => import('@/views/irrigation/Index.vue'),
-            meta: { title: '水肥灌溉', permission: 'device:control' }
+            meta: { title: '水肥灌溉', permissions: ['device:read', 'device:control'] }
           }
         ]
       },
@@ -265,9 +265,12 @@ router.beforeEach((to, _from, next) => {
     next('/login')
     return
   }
-  // 页面级权限：未授予时直接进 403，避免页面先渲染再被接口拒绝
-  const required = to.meta.permission as string | undefined
-  if (required && !checkPermission(cachedPermissions(), required)) {
+  // 页面级权限：permissions 表示必须全部具备；兼容既有路由的单个 permission。
+  const required = Array.isArray(to.meta.permissions)
+    ? to.meta.permissions as string[]
+    : to.meta.permission ? [to.meta.permission as string] : []
+  const granted = cachedPermissions()
+  if (required.some((permission) => !checkPermission(granted, permission))) {
     next({ path: '/403', replace: true })
     return
   }

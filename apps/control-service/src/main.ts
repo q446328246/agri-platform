@@ -44,8 +44,8 @@ function createDeviceResolver(iotUrl: string): (plotCode: string, commandType: s
         signal: AbortSignal.timeout(3000),
       });
       if (!response.ok) return [];
-      const payload = (await response.json()) as { items?: Array<{ id?: string; type?: string }> };
-      return (payload.items ?? [])
+      const payload = (await response.json()) as { data?: { items?: Array<{ id?: string; type?: string }> } };
+      return (payload.data?.items ?? [])
         .filter((device) => types.includes(device.type ?? ""))
         .map((device) => ({ id: String(device.id) }));
     } catch {

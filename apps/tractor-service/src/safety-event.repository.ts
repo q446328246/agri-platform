@@ -33,6 +33,7 @@ export interface CreateTractorSafetyEventInput {
 }
 
 export interface TractorSafetyEventQuery {
+  tenantId: string;
   jobId?: string;
   plotCode?: string;
   kind?: TractorSafetyKind;
@@ -85,7 +86,8 @@ export class InMemoryTractorSafetyEventRepository implements TractorSafetyEventR
 
   async list(query: TractorSafetyEventQuery): Promise<TractorSafetyEvent[]> {
     return [...this.events.values()]
-      .filter((event) => (query.jobId === undefined || event.jobId === query.jobId)
+      .filter((event) => event.tenantId === query.tenantId
+        && (query.jobId === undefined || event.jobId === query.jobId)
         && (query.plotCode === undefined || event.plotCode === query.plotCode)
         && (query.kind === undefined || event.kind === query.kind))
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
@@ -111,8 +113,8 @@ export class SqlTractorSafetyEventRepository implements TractorSafetyEventReposi
   }
 
   async list(query: TractorSafetyEventQuery): Promise<TractorSafetyEvent[]> {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
+    const conditions: string[] = ["tenant_id = ?"];
+    const params: unknown[] = [query.tenantId];
     const add = (sql: string, value: unknown): void => {
       params.push(value);
       conditions.push(sql.replace("?", `$${params.length}`));

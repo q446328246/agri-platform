@@ -17,8 +17,10 @@ const TEL = 3621;
 const DEC = 3622;
 const CTRL = 3623;
 const TRC = 3624;
+const IOT = 3625;
 const PLOT = "P-SMOKE-CONSUMERS";
-const DEVICE = `device-smoke-consumers-${Date.now()}`;
+const DEVICE = `DZ-SMOKE-CONSUMERS-${Date.now()}`;
+let controlDeviceId = null;
 
 function say(msg) {
   writeSync(1, `[smoke:consumers] ${msg}\n`);
@@ -41,8 +43,14 @@ function start(name, entry, env) {
 
 const tel = start("telemetry", "apps/telemetry-service/dist/main.js", { PORT: String(TEL), TELEMETRY_PUBLISH_EVENTS: "true" });
 const dec = start("decision", "apps/decision-service/dist/main.js", { PORT: String(DEC) });
-const ctrl = start("control", "apps/control-service/dist/main.js", { PORT: String(CTRL), CONTROL_POLL_INTERVAL_MS: "200" });
+const ctrl = start("control", "apps/control-service/dist/main.js", { PORT: String(CTRL), CONTROL_POLL_INTERVAL_MS: "200", IOT_SERVICE_URL: `http://127.0.0.1:${IOT}` });
 const trc = start("trace", "apps/trace-service/dist/main.js", { PORT: String(TRC), TRACE_POLL_INTERVAL_MS: "200" });
+const iot = start("iot", "apps/iot-service/dist/main.js", {
+  PORT: String(IOT),
+  IOT_MQTT_ENABLED: "false",
+  CONTROL_SERVICE_URL: `http://127.0.0.1:${CTRL}`,
+  TELEMETRY_SERVICE_URL: `http://127.0.0.1:${TEL}`,
+});
 
 async function waitHealth(port, name) {
   for (let i = 0; i < 100; i += 1) {
@@ -60,10 +68,10 @@ async function waitHealth(port, name) {
   throw new Error(`${name} 健康检查超时`);
 }
 
-async function request(url, method = "GET", body) {
+async function request(url, method = "GET", body, headers = {}) {
   const response = await fetch(url, {
     method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return response.json();
@@ -92,11 +100,12 @@ async function cleanData() {
     await client.query("DELETE FROM control_commands WHERE plot_code = $1", [PLOT]);
     await client.query("DELETE FROM trace_records WHERE plot_code = $1", [PLOT]);
     await client.query("DELETE FROM event_log WHERE payload_json->>'parcelId' = $1", [PLOT]);
-    await client.query("DELETE FROM telemetry_alerts WHERE device_id = $1", [DEVICE]);
-    await client.query("DELETE FROM telemetry_readings WHERE device_id = $1", [DEVICE]);
+    await client.query("DELETE FROM telemetry_alerts WHERE device_id = $1", [controlDeviceId ?? DEVICE]);
+    await client.query("DELETE FROM telemetry_readings WHERE device_id = $1", [controlDeviceId ?? DEVICE]);
     await client.query("DELETE FROM telemetry_outbox WHERE payload_json->>'parcelId' = $1", [PLOT]);
     await client.query("DELETE FROM decision_outbox WHERE payload_json->>'parcelId' = $1", [PLOT]);
     await client.query("DELETE FROM decision_prescriptions WHERE plot_code = $1", [PLOT]);
+    await client.query("DELETE FROM devices WHERE device_no = $1", [DEVICE]);
     if (ruleId) await client.query("DELETE FROM decision_rules WHERE id = $1", [ruleId]);
   } catch (error) {
     say(`清理告警：${error.message}`);
@@ -112,10 +121,22 @@ try {
   say("control healthy");
   await waitHealth(TRC, "trace");
   say("trace healthy");
+  await waitHealth(IOT, "iot");
+  say("iot healthy");
 
   client = new Client({ connectionString: DB });
   await client.connect();
   await cleanData();
+
+  const device = await request(`http://127.0.0.1:${IOT}/api/v1/devices`, "POST", {
+    deviceNo: DEVICE,
+    name: "冒烟事件消费阀",
+    type: "IRRIGATION_VALVE",
+    status: "ONLINE",
+    plotCode: PLOT,
+  });
+  assert(device.code === "OK" && device.data?.id, `冒烟设备建档失败：${JSON.stringify(device)}`);
+  controlDeviceId = device.data.id;
 
   // 冒烟专用规则：优先级高于默认规则，命中后给出灌溉处方
   const created = await request(`http://127.0.0.1:${DEC}/api/v1/decision/rules`, "POST", {
@@ -131,7 +152,7 @@ try {
 
   // 1. 遥测越限：低含水率触发越限事件
   const reported = await request(`http://127.0.0.1:${TEL}/api/v1/telemetry/report`, "POST", {
-    deviceId: DEVICE,
+    deviceId: controlDeviceId,
     plotCode: PLOT,
     metric: "soilMoisture",
     value: 18,
@@ -141,7 +162,20 @@ try {
   assert(reported.code === "OK", `上报读数失败：${JSON.stringify(reported)}`);
   say("threshold reading reported");
 
-  // 2. 处方生成：命中冒烟规则并发布处方事件
+  // 2. 越限事件先形成自动灌溉指令；设备级作业互锁要求前一条收口后才能生成下一条作业。
+  const thresholdCommands = await waitList(
+    `http://127.0.0.1:${CTRL}/api/v1/control/commands?plotCode=${encodeURIComponent(PLOT)}&origin=EVENT&size=50`,
+    (items) => items.some((item) => item.parameters?.source === "threshold"),
+    "越限自动控制指令",
+  );
+  const thresholdCommand = thresholdCommands.find((item) => item.parameters?.source === "threshold");
+  assert(thresholdCommand.type === "IRRIGATION", `越限指令类型异常：${JSON.stringify(thresholdCommand)}`);
+  assert(thresholdCommand.status === "QUEUED" && thresholdCommand.operatorId === "system:event", "自动指令未进入队列或执行人异常");
+  assert(thresholdCommand.sourceEventId, "自动指令未记录来源事件");
+  const cancelled = await request(`http://127.0.0.1:${CTRL}/api/v1/control/commands/${encodeURIComponent(thresholdCommand.id)}/cancel`, "POST", { reason: "冒烟设备互锁验证" }, { "x-user-id": "smoke-consumers" });
+  assert(cancelled.data?.status === "CANCELLED", `越限指令取消失败：${JSON.stringify(cancelled)}`);
+
+  // 3. 处方生成：前一条已取消，处方指令可以正常进入同一设备的作业队列。
   const prescription = await request(`http://127.0.0.1:${DEC}/api/v1/decision/prescriptions`, "POST", {
     plotCode: PLOT,
     plotName: "冒烟地块",
@@ -152,19 +186,15 @@ try {
   assert(prescription.data?.status === "RECOMMENDED", `处方未命中规则：${JSON.stringify(prescription)}`);
   say(`prescription issued ${prescription.data.id}`);
 
-  // 3. 控制侧消费：越限与处方各生成一条自动水肥指令
   const commands = await waitList(
     `http://127.0.0.1:${CTRL}/api/v1/control/commands?plotCode=${encodeURIComponent(PLOT)}&origin=EVENT&size=50`,
     (items) => items.some((item) => item.parameters?.source === "threshold") && items.some((item) => item.parameters?.source === "prescription"),
     "自动控制指令",
   );
-  const thresholdCommand = commands.find((item) => item.parameters?.source === "threshold");
   const prescriptionCommand = commands.find((item) => item.parameters?.source === "prescription");
-  assert(thresholdCommand.type === "IRRIGATION", `越限指令类型异常：${JSON.stringify(thresholdCommand)}`);
   assert(prescriptionCommand.type === "IRRIGATION", `处方指令类型异常：${JSON.stringify(prescriptionCommand)}`);
-  assert(thresholdCommand.status === "QUEUED" && thresholdCommand.operatorId === "system:event", "自动指令未进入队列或执行人异常");
-  assert(thresholdCommand.sourceEventId, "自动指令未记录来源事件");
-  say("threshold + prescription commands queued");
+  assert(prescriptionCommand.status === "QUEUED", `处方指令未进入队列：${JSON.stringify(prescriptionCommand)}`);
+  say("threshold + prescription commands consumed with device interlock");
 
   // 4. 追溯侧消费：处方事件写入生产档案
   const records = await waitList(

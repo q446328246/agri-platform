@@ -7,7 +7,7 @@
  */
 
 /** 执行类作业指令：同一设备同时只允许一条在途（作业联锁 B4） */
-export const JOB_COMMAND_TYPES = ["IRRIGATION", "FERTILIZATION", "SEEDING", "TILLAGE", "WEEDING"] as const;
+export const JOB_COMMAND_TYPES = ["IRRIGATION", "FERTILIZATION", "SEEDING", "TILLAGE", "WEEDING", "TOOL_SWITCH", "RETURN_HOME"] as const;
 
 export type JobCommandType = (typeof JOB_COMMAND_TYPES)[number];
 

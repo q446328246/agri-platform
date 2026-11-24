@@ -240,7 +240,7 @@ const baseMapKey = ref<BaseMapKey>(readStoredBaseMap())
 const baseMapLabel = computed(() => baseMapLabelOf(baseMapKey.value))
 
 // ---------- 左侧功能菜单（地图内浮层面板） ----------
-interface MenuItem { label: string; panel?: string; layer?: LineCat; draw?: MapShapeKind; perm?: string }
+interface MenuItem { label: string; panel?: string; layer?: LineCat; draw?: MapShapeKind; perm?: string | string[] }
 interface MenuGroup { title: string; icon: string; items: MenuItem[] }
 const icon = (path: string): string => `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="${path}"/></svg>`
 
@@ -326,8 +326,8 @@ const menuGroups: MenuGroup[] = [
       { label: '实时监控', panel: '/device/monitor', perm: 'device:read' },
       { label: '控制指令', panel: '/device/commands', perm: 'device:read' },
       { label: '拖拉机作业', panel: '/device/tractor', perm: 'tractor:read' },
-      { label: '智能灌溉', panel: '/device/irrigation', perm: 'device:control' },
-      { label: '水肥一体化', panel: '/device/irrigation', perm: 'device:control' },
+      { label: '智能灌溉', panel: '/device/irrigation', perm: ['device:read', 'device:control'] },
+      { label: '水肥一体化', panel: '/device/irrigation', perm: ['device:read', 'device:control'] },
     ],
   },
   {
@@ -364,19 +364,20 @@ const openGroups = reactive<Record<string, boolean>>(Object.fromEntries(menuGrou
 function toggleGroup(title: string) {
   openGroups[title] = !openGroups[title]
 }
-// 权限过滤：未授予的菜单项隐藏
-function allowed(perm?: string): boolean {
-  return !perm || checkPermission(userStore.permissions, perm)
+// 权限过滤：数组表示必须全部具备，与路由 permissions 守卫同口径。
+function allowed(perm?: string | string[]): boolean {
+  const required = Array.isArray(perm) ? perm : [perm]
+  return required.every((code) => !code || checkPermission(userStore.permissions, code))
 }
 
 // ---------- 快捷入口簇（A2）：高频业务一键直达 ----------
 // 目标面板均已在 panelComps 登记（/farm/record、/device/irrigation、/farm/task、/device/list、/finance），
-// 新增入口时须同步登记；权限码与路由 meta.permission 一致，经 checkPermission 过滤。
+// 新增入口时须同步登记；权限码与路由 meta.permission/permissions 一致，经 checkPermission 过滤。
 // 报表中心（监管统计报表）已随 P2/A4 落在投入产出核算页内，入口直达该页。
-interface QuickEntry { label: string; panel: string; perm: string; hint: string; icon: string }
+interface QuickEntry { label: string; panel: string; perm: string | string[]; hint: string; icon: string }
 const quickEntries: QuickEntry[] = [
   { label: '一键巡田', panel: '/farm/record', perm: 'operation:read', hint: '巡田登记：打开农事记录，巡查事件随手记', icon: icon('M12 2C8 2 5 5 5 9c0 5 7 13 7 13s7-8 7-13c0-4-3-7-7-7Zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5Z') },
-  { label: '快捷灌溉', panel: '/device/irrigation', perm: 'device:control', hint: '水肥灌溉：智能灌溉策略与一键启停', icon: icon('M12 2s6 6.6 6 11a6 6 0 0 1-12 0c0-4.4 6-11 6-11Z') },
+  { label: '快捷灌溉', panel: '/device/irrigation', perm: ['device:read', 'device:control'], hint: '水肥灌溉：智能灌溉策略与一键启停', icon: icon('M12 2s6 6.6 6 11a6 6 0 0 1-12 0c0-4.4 6-11 6-11Z') },
   { label: '作业计划', panel: '/farm/task', perm: 'operation:read', hint: '农事任务：作业计划排期与派发', icon: icon('M7 2v2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2V2h-2v2H9V2H7Zm12 8H5V6h14v4Z') },
   { label: '设备列表', panel: '/device/list', perm: 'device:read', hint: '设备台账：全部设备与在线状态', icon: icon('M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm4 14h8v2H8v-2Z') },
   { label: '报表中心', panel: '/finance', perm: 'finance:read', hint: '投入产出核算与监管统计报表，支持 CSV 导出', icon: icon('M4 20h16v2H4v-2Zm2-8h3v7H6v-7Zm5-6h3v13h-3V6Zm5 3h3v10h-3V9Z') },

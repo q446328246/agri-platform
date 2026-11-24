@@ -65,8 +65,8 @@ export interface CreateTrajectoryInput {
 
 export interface TrajectoryRepository {
   create(tx: Tx | undefined, input: CreateTrajectoryInput): Promise<Trajectory>;
-  findByJob(jobId: string): Promise<Trajectory | null>;
-  listByJob(jobId: string): Promise<Trajectory[]>;
+  findByJob(tenantId: string, jobId: string): Promise<Trajectory | null>;
+  listByJob(tenantId: string, jobId: string): Promise<Trajectory[]>;
 }
 
 /** 内存实现：仅供测试与降级路径，构造默认空库 */
@@ -74,6 +74,9 @@ export class InMemoryTrajectoryRepository implements TrajectoryRepository {
   private readonly trajectories = new Map<string, Trajectory>();
 
   async create(_tx: Tx | undefined, input: CreateTrajectoryInput): Promise<Trajectory> {
+    if ([...this.trajectories.values()].some((trajectory) => trajectory.jobId === input.jobId)) {
+      throw new Error("该作业已存在轨迹");
+    }
     const now = new Date().toISOString();
     const trajectory: Trajectory = {
       id: ulid(),
@@ -95,13 +98,13 @@ export class InMemoryTrajectoryRepository implements TrajectoryRepository {
     return structuredClone(trajectory);
   }
 
-  async findByJob(jobId: string): Promise<Trajectory | null> {
-    const found = [...this.trajectories.values()].find((trajectory) => trajectory.jobId === jobId);
+  async findByJob(tenantId: string, jobId: string): Promise<Trajectory | null> {
+    const found = [...this.trajectories.values()].find((trajectory) => trajectory.tenantId === tenantId && trajectory.jobId === jobId);
     return found ? structuredClone(found) : null;
   }
 
-  async listByJob(jobId: string): Promise<Trajectory[]> {
-    return [...this.trajectories.values()].filter((trajectory) => trajectory.jobId === jobId).map((trajectory) => structuredClone(trajectory));
+  async listByJob(tenantId: string, jobId: string): Promise<Trajectory[]> {
+    return [...this.trajectories.values()].filter((trajectory) => trajectory.tenantId === tenantId && trajectory.jobId === jobId).map((trajectory) => structuredClone(trajectory));
   }
 }
 
@@ -135,6 +138,10 @@ export class SqlTrajectoryRepository implements TrajectoryRepository {
 
   async create(tx: Tx | undefined, input: CreateTrajectoryInput): Promise<Trajectory> {
     const client = tx ?? this.client;
+    const parent = await client.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT id FROM tractor_jobs WHERE id = $1 AND tenant_id = $2 LIMIT 1`, input.jobId, input.tenantId,
+    );
+    if (!parent[0]) throw new Error("作业不存在或不属于当前租户");
     const now = new Date();
     const rows = await client.$queryRawUnsafe<Record<string, unknown>[]>(
       `INSERT INTO tractor_trajectories (id, job_id, tenant_id, plot_code, source, path, lanes, heading_deg, implement_width_m, total_distance_m, duration_min, warnings, created_at, updated_at)
@@ -153,16 +160,16 @@ export class SqlTrajectoryRepository implements TrajectoryRepository {
     return fromRow(rows[0]!);
   }
 
-  async findByJob(jobId: string): Promise<Trajectory | null> {
+  async findByJob(tenantId: string, jobId: string): Promise<Trajectory | null> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT ${columns} FROM tractor_trajectories WHERE job_id = $1 ORDER BY created_at LIMIT 1`, jobId,
+      `SELECT ${columns} FROM tractor_trajectories WHERE job_id = $1 AND tenant_id = $2 ORDER BY created_at LIMIT 1`, jobId, tenantId,
     );
     return rows[0] ? fromRow(rows[0]) : null;
   }
 
-  async listByJob(jobId: string): Promise<Trajectory[]> {
+  async listByJob(tenantId: string, jobId: string): Promise<Trajectory[]> {
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT ${columns} FROM tractor_trajectories WHERE job_id = $1 ORDER BY created_at`, jobId,
+      `SELECT ${columns} FROM tractor_trajectories WHERE job_id = $1 AND tenant_id = $2 ORDER BY created_at`, jobId, tenantId,
     );
     return rows.map(fromRow);
   }

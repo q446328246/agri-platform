@@ -169,9 +169,8 @@ export function demoDevices(tenantId: string = DEFAULT_TENANT): Device[] {
     type,
     status,
     ...(plotCode ? { plotCode } : {}),
-    // 演示台账全部保持回调式接入：现场协议设备必须由人给出真实地址与剖面，
-    // 编一个假 IP 进种子只会让网关每轮都连不上，把失败日志当成演示数据
-    protocol: DEFAULT_DEVICE_PROTOCOL,
+    // 演示拖拉机与迁移 074 一致，走 MQTT 直连；其余设备保持 HTTP 回调。
+    protocol: id === "device-tractor-001" ? "MQTT" : DEFAULT_DEVICE_PROTOCOL,
     lastSeenAt,
     createdAt: lastSeenAt ?? now,
     updatedAt: lastSeenAt ?? now,

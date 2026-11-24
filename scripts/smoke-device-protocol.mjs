@@ -408,6 +408,8 @@ try {
   assert(created.status === 201, `现场设备建档失败 ${created.status}：${JSON.stringify(created)}`);
   const device = created.data;
   assert(device.binding.host === "127.0.0.1" && device.binding.port === SLAVE_PORT, `台账未记住接入地址：${JSON.stringify(device.binding)}`);
+  const online = await request(iot(`/devices/${device.id}`), "PUT", { status: "ONLINE" });
+  assert(online.status === 200 && online.data.status === "ONLINE", `现场设备上线失败：${JSON.stringify(online)}`);
 
   // 收口条件由控制侧按分区参数现算，脚本只核对它够小、能在一次计量内达成
   const planResponse = await request(ctrl("/control/irrigation-plans"), "POST", { zones: [ZONE], flowM3h: FLOW_M3H }, MANUAL_HEADERS);
@@ -460,13 +462,18 @@ try {
   await waitRows("SELECT seq FROM event_log WHERE trace_id = $1", [`control-finished:${irrigation.id}`], (rows) => rows.length === 1, "结单事件进入共享事件日志");
   say(`irrigation closed with 实测 ${result.waterVolumeM3} m³（增量，非累计读数）并中继成事件`);
 
-  // ---------- ⑤ 算不出收口条件：不领取、不碰硬件，直接失败 ----------
+  // ---------- ⑤ 算不出收口条件：控制侧入队前拒绝，不碰硬件 ----------
   const writesBeforeBlind = slave.mark();
-  const blind = await sendCommand({ deviceId: device.id, type: "SEEDING", reason: "现场协议冒烟：无包络", parameters: {} });
-  const blindDone = await waitCommand(blind.id, ["FAILED"]);
-  assert(blindDone.receiptMessage?.includes("作业时长") === true, `无包络指令的失败原因未说清：${blindDone.receiptMessage}`);
+  const blind = await request(ctrl("/control/commands"), "POST", {
+    plotCode: PLOT,
+    deviceId: device.id,
+    type: "SEEDING",
+    reason: "现场协议冒烟：无包络",
+    parameters: {},
+  }, MANUAL_HEADERS);
+  assert(blind.status === 400 && blind.message.includes("durationMin"), `无包络指令未在入队前拒绝：${JSON.stringify(blind)}`);
   assert(slave.writesSince(writesBeforeBlind).length === 0, `算不出开多久的指令仍然动了硬件：${JSON.stringify(slave.writesSince(writesBeforeBlind))}`);
-  say("command without envelope failed before touching hardware");
+  say("command without envelope rejected before queueing or touching hardware");
 
   // ---------- ⑥ 急停：写停线圈，运行反馈消失才结单 ----------
   const writesBeforeEstop = slave.mark();
@@ -502,7 +509,7 @@ try {
   assert(callbackDevice.status === 201, `回调式设备建档失败 ${callbackDevice.status}：${JSON.stringify(callbackDevice)}`);
   assert(callbackDevice.data.binding === undefined, `回调式设备不该带绑定：${JSON.stringify(callbackDevice.data)}`);
   const writesBeforeCallback = slave.mark();
-  const callbackCommand = await sendCommand({ deviceId: callbackDevice.data.id, type: "SEEDING", reason: "现场协议冒烟：回调设备", parameters: {} });
+  const callbackCommand = await sendCommand({ deviceId: callbackDevice.data.id, type: "SEEDING", reason: "现场协议冒烟：回调设备", parameters: { areaMu: 1, durationMin: 1 } });
   await delay(TICK_MS * 4);
   const stillQueued = await command(callbackCommand.id);
   assert(stillQueued?.status === "QUEUED", `网关去领了回调式设备的指令：${JSON.stringify(stillQueued)}`);

@@ -29,8 +29,10 @@ const DEC = 3641;
 const CTRL = 3642;
 const TRC = 3643;
 const MSG = 3644;
+const IOT = 3645;
 const PLOT = "P-SMOKE-RECEIPT";
 const DEVICE = "device-smoke-receipt";
+const IRRIGATION_DEVICE = "device-smoke-receipt-irrigation";
 /** 设备实测用水量：断言里出现的数字全部由它派生，不在多处各抄一遍 */
 const REPORTED_WATER_M3 = 25.5;
 /** 设备实测作业时长（分钟） */
@@ -56,14 +58,16 @@ function start(name, entry, env) {
 }
 
 // 决策侧既下发处方事件、又消费结单事件；控制侧负责回执与消息表；追溯与消息中心是下游
-const dec = start("decision", "apps/decision-service/dist/main.js", { PORT: String(DEC), DECISION_POLL_INTERVAL_MS: "200" });
+const dec = start("decision", "apps/decision-service/dist/main.js", { PORT: String(DEC), DECISION_POLL_INTERVAL_MS: "200", DECISION_PREDICTION_ENABLED: "false" });
 const ctrl = start("control", "apps/control-service/dist/main.js", {
   PORT: String(CTRL),
+  IOT_SERVICE_URL: `http://127.0.0.1:${IOT}`,
   CONTROL_POLL_INTERVAL_MS: "200",
   CONTROL_OUTBOX_RELAY_INTERVAL_MS: "300",
 });
 const trc = start("trace", "apps/trace-service/dist/main.js", { PORT: String(TRC), TRACE_POLL_INTERVAL_MS: "200" });
 const msg = start("message", "apps/message-service/dist/main.js", { PORT: String(MSG), MESSAGE_POLL_INTERVAL_MS: "200" });
+const iot = start("iot", "apps/iot-service/dist/main.js", { PORT: String(IOT), IOT_MQTT_ENABLED: "false" });
 
 async function waitHealth(port, name) {
   for (let i = 0; i < 100; i += 1) {
@@ -129,6 +133,7 @@ async function cleanData() {
   if (!client) return;
   try {
     await client.query("DELETE FROM control_commands WHERE plot_code = $1", [PLOT]);
+    await client.query("DELETE FROM devices WHERE id = ANY($1::text[])", [[DEVICE, IRRIGATION_DEVICE]]);
     await client.query("DELETE FROM trace_records WHERE plot_code = $1", [PLOT]);
     await client.query("DELETE FROM ops_messages WHERE plot_code = $1", [PLOT]);
     await client.query("DELETE FROM decision_prescription_executions WHERE plot_code = $1", [PLOT]);
@@ -213,10 +218,19 @@ try {
   say("trace healthy");
   await waitHealth(MSG, "message");
   say("message healthy");
+  await waitHealth(IOT, "iot");
+  say("iot healthy");
 
   client = new Client({ connectionString: DB });
   await client.connect();
   await cleanData();
+  await client.query(
+    `INSERT INTO devices (id, device_no, name, type, status, plot_code, last_seen_at)
+     VALUES ($1, 'DZ-SMOKE-RECEIPT', '回执冒烟水肥阀', 'FERTILIZER_VALVE', 'ONLINE', $3, now()),
+            ($2, 'DZ-SMOKE-RECEIPT-P', '回执冒烟灌溉泵', 'IRRIGATION_PUMP', 'ONLINE', $3, now())
+     ON CONFLICT (id) DO UPDATE SET plot_code = EXCLUDED.plot_code, type = EXCLUDED.type, status = EXCLUDED.status`,
+    [DEVICE, IRRIGATION_DEVICE, PLOT],
+  );
 
   // 两条规则同命中一张处方：灌溉走「设备实测」正路，施肥留作「参数推不出用量」的诚实口径
   for (const rule of [

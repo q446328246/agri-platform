@@ -24,38 +24,79 @@ const aiEvent = {
 };
 const ptzCommand = { id: "ptz-1", cameraId: "camera-001", action: "LEFT", speed: 5, status: "QUEUED", message: "云台控制通道未配置，指令已留存", createdAt: "2026-11-10T02:00:00.000Z" };
 
-function mountVideo() {
-  // Node 无 DOM：桩掉元素类型判定，TestNode 不会命中 instanceof，播放器引用自然留空
-  vi.stubGlobal("HTMLVideoElement", class {});
+class FakeHls {
+  static Events = { MANIFEST_PARSED: "manifest", ERROR: "error" };
+  static instances: FakeHls[] = [];
+  static isSupported() { return true; }
+  handlers = new Map<string, (...args: any[]) => void>();
+  loadSource = vi.fn();
+  attachMedia = vi.fn();
+  destroy = vi.fn();
+  constructor(_options: unknown) { FakeHls.instances.push(this); }
+  on(event: string, handler: (...args: any[]) => void) { this.handlers.set(event, handler); }
+}
+
+class FakeVideo {
+  src = "";
+  canPlayType = vi.fn(() => "");
+  play = vi.fn().mockResolvedValue(undefined);
+  pause = vi.fn();
+  removeAttribute = vi.fn();
+  load = vi.fn();
+}
+
+interface VideoMountOptions {
+  canControl?: boolean;
+  cameras?: any[];
+  cameraPages?: Array<{ items: any[]; total: number }>;
+}
+
+function mountVideo(options: VideoMountOptions = {}) {
+  FakeHls.instances = [];
+  vi.stubGlobal("HTMLVideoElement", FakeVideo);
   vi.stubGlobal("HTMLElement", class {});
   // 编译真实 API 模块，仅替换 HTTP 边界，验证 cleanParams 对布尔假值的处理
   const apiUrl = new URL("../src/api/index.ts", import.meta.url);
   const { videoApi } = evaluateTs(readFileSync(apiUrl, "utf8"), apiUrl.pathname, {
     "@/utils/request": { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn() },
   });
-  vi.spyOn(videoApi, "getCameras").mockResolvedValue({ items: [camera, offlineCamera], total: 2, page: 1, size: 100, pages: 1 } as any);
+  const liveCameras = options.cameras ?? [camera, offlineCamera];
+  const directoryPages = options.cameraPages ?? [{ items: liveCameras, total: liveCameras.length }];
+  vi.spyOn(videoApi, "getCameras").mockImplementation(async (params: any) => {
+    if (params?.size === 200) return directoryPages[params.page - 1] ?? { items: [], total: directoryPages.at(-1)?.total ?? 0 } as any;
+    return { items: liveCameras, total: liveCameras.length, page: 1, size: 100, pages: 1 } as any;
+  });
   vi.spyOn(videoApi, "getRecordings").mockResolvedValue({ items: [recording], total: 1, page: 1, size: 10, pages: 1 } as any);
   vi.spyOn(videoApi, "getAiEvents").mockResolvedValue({ items: [aiEvent], total: 1, page: 1, size: 10, pages: 1 } as any);
   vi.spyOn(videoApi, "getPtzCommands").mockResolvedValue({ items: [ptzCommand], total: 1, page: 1, size: 10, pages: 1 } as any);
+  const createCamera = vi.spyOn(videoApi, "createCamera").mockResolvedValue(camera as any);
+  const updateCamera = vi.spyOn(videoApi, "updateCamera").mockResolvedValue(camera as any);
+  const deleteCamera = vi.spyOn(videoApi, "deleteCamera").mockResolvedValue(undefined);
+  const createRecordingArchive = vi.spyOn(videoApi, "createRecordingArchive").mockResolvedValue({ id: "arc-1" } as any);
   const sendPtz = vi.spyOn(videoApi, "sendPtz").mockResolvedValue({ ...ptzCommand } as any);
   const retryPtz = vi.spyOn(videoApi, "retryPtz").mockResolvedValue({ ...ptzCommand, status: "SENT", message: "摄像机网关已接收（200）", deliveredAt: "2026-11-10T02:00:05.000Z" } as any);
   const retryAiEvent = vi.spyOn(videoApi, "retryAiEvent").mockResolvedValue({ ...aiEvent, forwarded: true, forwardStatus: 201, forwardMessage: "已生成虫情告警" } as any);
   const message = messages();
+  const confirm = vi.fn().mockResolvedValue(true);
   const view = mountView(new URL("../src/views/video/Index.vue", import.meta.url), {
-    "element-plus": { ElMessage: message },
+    "element-plus": { ElMessage: message, ElMessageBox: { confirm } },
+    "hls.js": { __esModule: true, default: FakeHls },
     "@/api": { videoApi },
+    "@/stores": { useUserStore: () => ({ hasPermission: () => options.canControl ?? true }) },
     "@/utils": { formatDateTime: (value: string) => value },
     "@/types": types,
   });
   cleanups.push(view.unmount);
-  return { ...view, videoApi, sendPtz, retryPtz, retryAiEvent, message };
+  return { ...view, videoApi, createCamera, updateCamera, deleteCamera, createRecordingArchive, sendPtz, retryPtz, retryAiEvent, message, confirm };
 }
 
 describe("视频页标签页与数据接线", () => {
-  it("挂载只拉摄像机，切换标签页才拉录像/AI/云台历史", async () => {
+  it("挂载拉实时监看与完整目录，切换标签页才拉录像/AI/云台历史", async () => {
     const { state, videoApi } = mountVideo();
     await flushView();
-    expect(videoApi.getCameras).toHaveBeenCalledTimes(1);
+    expect(videoApi.getCameras).toHaveBeenCalledTimes(2);
+    expect(videoApi.getCameras).toHaveBeenCalledWith({ page: 1, size: 100 });
+    expect(videoApi.getCameras).toHaveBeenCalledWith({ page: 1, size: 200 });
     expect(videoApi.getRecordings).not.toHaveBeenCalled();
     expect(videoApi.getAiEvents).not.toHaveBeenCalled();
     expect(videoApi.getPtzCommands).not.toHaveBeenCalled();
@@ -93,6 +134,140 @@ describe("视频页标签页与数据接线", () => {
     state.aiQuery.plotCode = "P-001";
     await state.loadAiEvents();
     expect(videoApi.getAiEvents).toHaveBeenLastCalledWith({ page: 1, size: 10, plotCode: "P-001", forwarded: false });
+  });
+});
+
+describe("完整摄像机目录与写权限", () => {
+  it("按页拉全 200 台以上的目录，切 Tab 与名称解析不受实时查询分页影响", async () => {
+    const directory = Array.from({ length: 201 }, (_, index) => ({
+      ...camera, id: `camera-${index + 1}`, name: `摄像机 ${index + 1}`,
+    }));
+    const { state, videoApi } = mountVideo({
+      cameras: [directory[0]],
+      cameraPages: [
+        { items: directory.slice(0, 200), total: 201 },
+        { items: directory.slice(200), total: 201 },
+      ],
+    });
+    await flushView();
+    expect(videoApi.getCameras).toHaveBeenCalledWith({ page: 2, size: 200 });
+    expect(state.cameraOptions).toHaveLength(201);
+    expect(state.cameras).toHaveLength(1);
+    expect(state.cameraName("camera-201")).toBe("摄像机 201");
+
+    state.onTabChange("recordings");
+    await flushView();
+    expect(state.cameraName("camera-201")).toBe("摄像机 201");
+    await state.assignCamera(0, "camera-201");
+    expect(state.slotCamera(0)?.id).toBe("camera-201");
+  });
+
+  it("无 device:control 时隐藏写入口，直接调用写方法也不会发请求", async () => {
+    const view = mountVideo({ canControl: false });
+    const { state, message, confirm } = view;
+    await flushView();
+    expect(state.canControl).toBe(false);
+
+    await state.openCameraDialog(camera);
+    expect(state.cameraDialogVisible).toBe(false);
+    state.cameraForm.name = "越权新增";
+    await state.submitCamera();
+    await state.removeCamera(camera);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(view.deleteCamera).not.toHaveBeenCalled();
+
+    await state.openArcDialog();
+    expect(state.arcDialogVisible).toBe(false);
+    state.arcForm.cameraId = camera.id;
+    state.arcForm.eventAt = "2026-11-10 02:00:00";
+    await state.submitArchive();
+    expect(view.createRecordingArchive).not.toHaveBeenCalled();
+
+    await state.openPtz(camera);
+    expect(state.ptzDialogVisible).toBe(false);
+    state.ptzCamera = camera;
+    await state.ptzAction("LEFT");
+    await state.retryPtzCommand(ptzCommand);
+    state.onTabChange("ai");
+    await flushView();
+    await state.retryAiEvent(aiEvent);
+    expect(view.sendPtz).not.toHaveBeenCalled();
+    expect(view.retryPtz).not.toHaveBeenCalled();
+    expect(view.retryAiEvent).not.toHaveBeenCalled();
+    expect(message.warning).toHaveBeenCalledWith("无设备控制权限");
+  });
+
+  it("新增摄像头后同时刷新监看结果与完整目录", async () => {
+    const { state, videoApi, createCamera } = mountVideo();
+    await flushView();
+    videoApi.getCameras.mockClear();
+    state.openCameraDialog();
+    state.cameraForm.name = "新增摄像机";
+    await state.submitCamera();
+    expect(createCamera).toHaveBeenCalledTimes(1);
+    expect(videoApi.getCameras).toHaveBeenCalledWith(expect.objectContaining({ size: 10 }));
+    expect(videoApi.getCameras).toHaveBeenCalledWith({ page: 1, size: 100 });
+    expect(videoApi.getCameras).toHaveBeenCalledWith({ page: 1, size: 200 });
+  });
+});
+
+describe("播放器异步与 KeepAlive 生命周期", () => {
+  it("动态 import 返回前已销毁时不创建旧播放器，并清空媒体源", async () => {
+    const { state } = mountVideo();
+    await flushView();
+    const video = new FakeVideo();
+    state.videoEls.set("slot-0", video);
+    const pending = state.playStream("slot-0", camera.streamUrl);
+    state.destroyEngine("slot-0");
+    await pending;
+    await flushView();
+    expect(FakeHls.instances).toHaveLength(0);
+    expect(video.pause).toHaveBeenCalled();
+    expect(video.removeAttribute).toHaveBeenCalledWith("src");
+    expect(video.load).toHaveBeenCalled();
+  });
+
+  it("KeepAlive 隐藏停流，激活后按原选择恢复；录像关闭也完整销毁", async () => {
+    const { state } = mountVideo();
+    await flushView();
+    state.slots.value = [camera.id];
+    const liveVideo = new FakeVideo();
+    state.videoEls.set("slot-0", liveVideo);
+
+    state.deactivatePlayback();
+    expect(state.pageActive).toBe(false);
+    expect(state.streamVideos.size).toBe(0);
+    expect(liveVideo.pause).toHaveBeenCalled();
+    await state.activatePlayback();
+    // 纯 Node 渲染桩没有真实 video ref；模拟 DOM 在激活渲染后重新挂载媒体元素。
+    state.videoEls.set("slot-0", liveVideo);
+    await flushView();
+    expect(state.pageActive).toBe(true);
+    expect(state.playState["slot-0"]).toBe("loading");
+
+    // 非模板 key 避免 Node 渲染桩用 TestNode 覆盖手动注入的媒体引用。
+    const engineVideo = new FakeVideo();
+    state.videoEls.set("engine-test", engineVideo);
+    await state.playStream("engine-test", camera.streamUrl);
+    expect(FakeHls.instances).toHaveLength(1);
+    const liveHls = FakeHls.instances[0]!;
+    state.destroyEngine("engine-test");
+    expect(liveHls.destroy).toHaveBeenCalledTimes(1);
+    expect(engineVideo.pause).toHaveBeenCalled();
+
+    const recordingVideo = new FakeVideo();
+    state.videoEls.set("recording", recordingVideo);
+    await state.playStream("recording", recording.playbackUrl);
+    const hls = FakeHls.instances.at(-1)!;
+    state.recordingPlaying = recording;
+    state.recordingDialogVisible = true;
+    state.stopRecordingPlayback();
+    expect(hls.destroy).toHaveBeenCalledTimes(1);
+    expect(recordingVideo.pause).toHaveBeenCalled();
+    expect(recordingVideo.removeAttribute).toHaveBeenCalledWith("src");
+    expect(recordingVideo.load).toHaveBeenCalled();
+    expect(state.recordingDialogVisible).toBe(false);
+    expect(state.recordingPlaying).toBeNull();
   });
 });
 

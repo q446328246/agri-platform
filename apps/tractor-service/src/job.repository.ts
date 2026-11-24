@@ -62,6 +62,7 @@ export interface CreateTractorJobInput {
 }
 
 export interface CreateTractorStageInput {
+  tenantId: string;
   jobId: string;
   stage: TractorStageKind;
   commandType: string;
@@ -72,20 +73,37 @@ export interface CreateTractorStageInput {
 }
 
 export interface TractorJobQuery {
+  tenantId: string;
   plotCode?: string;
   deviceId?: string;
   status?: TractorJobStatus;
   limit?: number;
+  offset?: number;
+}
+
+/** CAS 条件：只有仍处于期望状态的作业/分步才允许推进，避免覆盖并发急停或重复回执。 */
+export interface TractorJobUpdateOptions {
+  expectedStatus?: TractorJobStatus | readonly TractorJobStatus[];
+  /** 执行器写入必须持有当前租约，过期执行者不能覆盖接管者的状态 */
+  owner?: string;
+}
+
+export interface TractorStageUpdateOptions {
+  expectedStatus?: TractorStageStatus | readonly TractorStageStatus[];
+  owner?: string;
 }
 
 export interface TractorJobRepository {
   createJob(tx: Tx | undefined, input: CreateTractorJobInput): Promise<TractorJob>;
   addStage(tx: Tx | undefined, input: CreateTractorStageInput): Promise<TractorJobStage>;
-  listStages(jobId: string): Promise<TractorJobStage[]>;
-  findJob(id: string): Promise<TractorJob | null>;
+  listStages(tenantId: string, jobId: string): Promise<TractorJobStage[]>;
+  findJob(tenantId: string, id: string): Promise<TractorJob | null>;
   listJobs(query: TractorJobQuery): Promise<TractorJob[]>;
-  updateJob(tx: Tx | undefined, id: string, patch: Partial<Omit<TractorJob, "id" | "tenantId">>): Promise<TractorJob | null>;
-  updateStage(tx: Tx | undefined, id: string, patch: Partial<Omit<TractorJobStage, "id" | "jobId">>): Promise<TractorJobStage | null>;
+  updateJob(tenantId: string, id: string, patch: Partial<Omit<TractorJob, "id" | "tenantId">>, options?: TractorJobUpdateOptions): Promise<TractorJob | null>;
+  updateStage(tenantId: string, id: string, patch: Partial<Omit<TractorJobStage, "id" | "jobId">>, options?: TractorStageUpdateOptions): Promise<TractorJobStage | null>;
+  claimJob(tenantId: string, id: string, owner: string, leaseMs: number, expectedStatus?: TractorJobStatus | readonly TractorJobStatus[]): Promise<TractorJob | null>;
+  renewJobClaim(tenantId: string, id: string, owner: string, leaseMs: number): Promise<boolean>;
+  releaseJobClaim(tenantId: string, id: string, owner: string): Promise<void>;
 }
 
 function toJob(row: Record<string, unknown>): TractorJob {
@@ -124,10 +142,15 @@ function toStage(row: Record<string, unknown>): TractorJobStage {
   return stage;
 }
 
+function matchesStatus<T extends string>(status: T, expected: T | readonly T[] | undefined): boolean {
+  return expected === undefined || (Array.isArray(expected) ? expected.includes(status) : status === expected);
+}
+
 /** 内存实现：仅供测试与降级路径，构造默认空库 */
 export class InMemoryTractorJobRepository implements TractorJobRepository {
   private readonly jobs = new Map<string, TractorJob>();
   private readonly stages = new Map<string, TractorJobStage>();
+  private readonly claims = new Map<string, { owner: string; until: number }>();
 
   async createJob(_tx: Tx | undefined, input: CreateTractorJobInput): Promise<TractorJob> {
     const now = new Date().toISOString();
@@ -144,6 +167,7 @@ export class InMemoryTractorJobRepository implements TractorJobRepository {
   }
 
   async addStage(_tx: Tx | undefined, input: CreateTractorStageInput): Promise<TractorJobStage> {
+    if (this.jobs.get(input.jobId)?.tenantId !== input.tenantId) throw new Error("作业不存在或不属于当前租户");
     const now = new Date().toISOString();
     const stage: TractorJobStage = {
       id: ulid(),
@@ -160,39 +184,69 @@ export class InMemoryTractorJobRepository implements TractorJobRepository {
     return structuredClone(stage);
   }
 
-  async listStages(jobId: string): Promise<TractorJobStage[]> {
+  async listStages(tenantId: string, jobId: string): Promise<TractorJobStage[]> {
+    if (this.jobs.get(jobId)?.tenantId !== tenantId) return [];
     return [...this.stages.values()].filter((stage) => stage.jobId === jobId).map((stage) => structuredClone(stage));
   }
 
-  async findJob(id: string): Promise<TractorJob | null> {
+  async findJob(tenantId: string, id: string): Promise<TractorJob | null> {
     const job = this.jobs.get(id);
-    return job ? structuredClone(job) : null;
+    return job?.tenantId === tenantId ? structuredClone(job) : null;
   }
 
   async listJobs(query: TractorJobQuery): Promise<TractorJob[]> {
+    const offset = Math.max(0, query.offset ?? 0);
     return [...this.jobs.values()]
-      .filter((job) => (query.plotCode === undefined || job.plotCode === query.plotCode)
+      .filter((job) => job.tenantId === query.tenantId
+        && (query.plotCode === undefined || job.plotCode === query.plotCode)
         && (query.deviceId === undefined || job.deviceId === query.deviceId)
         && (query.status === undefined || job.status === query.status))
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-      .slice(0, query.limit ?? 50)
+      .slice(offset, offset + (query.limit ?? 50))
       .map((job) => structuredClone(job));
   }
 
-  async updateJob(_tx: Tx | undefined, id: string, patch: Partial<Omit<TractorJob, "id" | "tenantId">>): Promise<TractorJob | null> {
+  private ownsActiveClaim(id: string, owner: string | undefined): boolean {
+    if (owner === undefined) return true;
+    const claim = this.claims.get(id);
+    return claim?.owner === owner && claim.until > Date.now();
+  }
+
+  async updateJob(tenantId: string, id: string, patch: Partial<Omit<TractorJob, "id" | "tenantId">>, options?: TractorJobUpdateOptions): Promise<TractorJob | null> {
     const job = this.jobs.get(id);
-    if (!job) return null;
+    if (!job || job.tenantId !== tenantId || !matchesStatus(job.status, options?.expectedStatus) || !this.ownsActiveClaim(id, options?.owner)) return null;
     const next: TractorJob = { ...job, ...patch, updatedAt: new Date().toISOString() };
     this.jobs.set(id, structuredClone(next));
     return structuredClone(next);
   }
 
-  async updateStage(_tx: Tx | undefined, id: string, patch: Partial<Omit<TractorJobStage, "id" | "jobId">>): Promise<TractorJobStage | null> {
+  async updateStage(tenantId: string, id: string, patch: Partial<Omit<TractorJobStage, "id" | "jobId">>, options?: TractorStageUpdateOptions): Promise<TractorJobStage | null> {
     const stage = this.stages.get(id);
-    if (!stage) return null;
+    if (!stage || this.jobs.get(stage.jobId)?.tenantId !== tenantId || !matchesStatus(stage.status, options?.expectedStatus) || !this.ownsActiveClaim(stage.jobId, options?.owner)) return null;
     const next: TractorJobStage = { ...stage, ...patch, updatedAt: new Date().toISOString() };
     this.stages.set(id, structuredClone(next));
     return structuredClone(next);
+  }
+
+  async claimJob(tenantId: string, id: string, owner: string, leaseMs: number, expectedStatus: TractorJobStatus | readonly TractorJobStatus[] = ["PLANNED", "RUNNING"]): Promise<TractorJob | null> {
+    const job = this.jobs.get(id);
+    const claim = this.claims.get(id);
+    const now = Date.now();
+    if (!job || job.tenantId !== tenantId || !matchesStatus(job.status, expectedStatus) || (claim && claim.until > now && claim.owner !== owner)) return null;
+    this.claims.set(id, { owner, until: now + leaseMs });
+    return structuredClone(job);
+  }
+
+  async renewJobClaim(tenantId: string, id: string, owner: string, leaseMs: number): Promise<boolean> {
+    const job = this.jobs.get(id);
+    const claim = this.claims.get(id);
+    if (!job || job.tenantId !== tenantId || !claim || claim.owner !== owner || claim.until <= Date.now()) return false;
+    claim.until = Date.now() + leaseMs;
+    return true;
+  }
+
+  async releaseJobClaim(tenantId: string, id: string, owner: string): Promise<void> {
+    if (this.jobs.get(id)?.tenantId === tenantId && this.claims.get(id)?.owner === owner) this.claims.delete(id);
   }
 }
 
@@ -217,32 +271,35 @@ export class SqlTractorJobRepository implements TractorJobRepository {
     const now = new Date();
     const rows = await client.$queryRawUnsafe(
       `INSERT INTO tractor_job_stages (id, job_id, stage, command_type, parameters, status, detail, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5::jsonb, 'PENDING', $6::text, $7, $7)
+       SELECT $1, $2, $3, $4, $5::jsonb, 'PENDING', $6::text, $7, $7
+       WHERE EXISTS (SELECT 1 FROM tractor_jobs WHERE id = $2 AND tenant_id = $8)
        RETURNING *`,
-      ulid(), input.jobId, input.stage, input.commandType, JSON.stringify(input.parameters), JSON.stringify({ timeoutMs: input.timeoutMs }), now,
+      ulid(), input.jobId, input.stage, input.commandType, JSON.stringify(input.parameters), JSON.stringify({ timeoutMs: input.timeoutMs }), now, input.tenantId,
     ) as Record<string, unknown>[];
-    return toStage(rows[0]!);
+    if (!rows[0]) throw new Error("作业不存在或不属于当前租户");
+    return toStage(rows[0]);
   }
 
-  async listStages(jobId: string): Promise<TractorJobStage[]> {
+  async listStages(tenantId: string, jobId: string): Promise<TractorJobStage[]> {
     const rows = await this.client.$queryRawUnsafe(
-      `SELECT * FROM tractor_job_stages WHERE job_id = $1 ORDER BY created_at`,
-      jobId,
+      `SELECT s.* FROM tractor_job_stages s JOIN tractor_jobs j ON j.id = s.job_id
+       WHERE s.job_id = $1 AND j.tenant_id = $2 ORDER BY s.created_at`,
+      jobId, tenantId,
     ) as Record<string, unknown>[];
     return rows.map(toStage);
   }
 
-  async findJob(id: string): Promise<TractorJob | null> {
+  async findJob(tenantId: string, id: string): Promise<TractorJob | null> {
     const rows = await this.client.$queryRawUnsafe(
-      `SELECT * FROM tractor_jobs WHERE id = $1 LIMIT 1`,
-      id,
+      `SELECT * FROM tractor_jobs WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+      id, tenantId,
     ) as Record<string, unknown>[];
     return rows[0] ? toJob(rows[0]) : null;
   }
 
   async listJobs(query: TractorJobQuery): Promise<TractorJob[]> {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
+    const conditions: string[] = ["tenant_id = ?"];
+    const params: unknown[] = [query.tenantId];
     const add = (sql: string, value: unknown): void => {
       params.push(value);
       conditions.push(sql.replace("?", `$${params.length}`));
@@ -250,17 +307,17 @@ export class SqlTractorJobRepository implements TractorJobRepository {
     if (query.plotCode !== undefined) add("plot_code = ?", query.plotCode);
     if (query.deviceId !== undefined) add("device_id = ?", query.deviceId);
     if (query.status !== undefined) add("status = ?", query.status);
-    const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+    const where = ` WHERE ${conditions.join(" AND ")}`;
     params.push(Math.min(200, Math.max(1, query.limit ?? 50)));
+    params.push(Math.max(0, Math.trunc(query.offset ?? 0)));
     const rows = await this.client.$queryRawUnsafe(
-      `SELECT * FROM tractor_jobs${where} ORDER BY created_at DESC LIMIT $${params.length}`,
+      `SELECT * FROM tractor_jobs${where} ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       ...params,
     ) as Record<string, unknown>[];
     return rows.map(toJob);
   }
 
-  async updateJob(tx: Tx | undefined, id: string, patch: Partial<Omit<TractorJob, "id" | "tenantId">>): Promise<TractorJob | null> {
-    const client = tx ?? this.client;
+  async updateJob(tenantId: string, id: string, patch: Partial<Omit<TractorJob, "id" | "tenantId">>, options?: TractorJobUpdateOptions): Promise<TractorJob | null> {
     const columns: string[] = [];
     const values: unknown[] = [];
     const map: Array<[keyof TractorJob, string]> = [
@@ -273,23 +330,39 @@ export class SqlTractorJobRepository implements TractorJobRepository {
       columns.push(column);
       const value = patch[key as keyof typeof patch];
       if (column === "parameters" && value !== undefined) values.push(JSON.stringify(value));
-      // 只有时间列转 Date；文本列原样下传，避免空串被 new Date("") 解析成无效时间
       else if (key === "startedAt" || key === "finishedAt") values.push(value === undefined ? null : (value instanceof Date ? value : new Date(String(value))));
       else values.push(value ?? null);
     }
-    if (columns.length === 0) return this.findJob(id);
     columns.push("updated_at");
     values.push(new Date());
-    const placeholders = columns.map((_, index) => `$${index + 1}`).join(", ");
-    const rows = await client.$queryRawUnsafe(
-      `UPDATE tractor_jobs SET ${columns.map((column, index) => `${column} = $${index + 1}`).join(", ")} WHERE id = $${columns.length + 1} RETURNING *`,
-      ...values, id,
+    const queryParams: unknown[] = [];
+    const conditions: string[] = [];
+    const add = (sql: string, value: unknown): void => {
+      queryParams.push(value);
+      conditions.push(sql.replace("?", `$${values.length + queryParams.length}`));
+    };
+    add("tenant_id = ?", tenantId);
+    add("id = ?", id);
+    if (options?.owner !== undefined) {
+      add("execution_owner = ?", options.owner);
+      add("execution_until > ?", new Date());
+    }
+    if (options?.expectedStatus !== undefined) {
+      const expected = Array.isArray(options.expectedStatus) ? options.expectedStatus : [options.expectedStatus];
+      const statuses = expected.map((status) => {
+        add("status = ?", status);
+        return conditions.pop()!;
+      });
+      conditions.push(`(${statuses.join(" OR ")})`);
+    }
+    const rows = await this.client.$queryRawUnsafe(
+      `UPDATE tractor_jobs SET ${columns.map((column, index) => `${column} = $${index + 1}`).join(", ")} WHERE ${conditions.join(" AND ")} RETURNING *`,
+      ...values, ...queryParams,
     ) as Record<string, unknown>[];
     return rows[0] ? toJob(rows[0]) : null;
   }
 
-  async updateStage(tx: Tx | undefined, id: string, patch: Partial<Omit<TractorJobStage, "id" | "jobId">>): Promise<TractorJobStage | null> {
-    const client = tx ?? this.client;
+  async updateStage(tenantId: string, id: string, patch: Partial<Omit<TractorJobStage, "id" | "jobId">>, options?: TractorStageUpdateOptions): Promise<TractorJobStage | null> {
     const columns: string[] = [];
     const values: unknown[] = [];
     const map: Array<[keyof TractorJobStage, string]> = [
@@ -302,16 +375,66 @@ export class SqlTractorJobRepository implements TractorJobRepository {
       if (column === "parameters") values.push(JSON.stringify(patch.parameters ?? {}));
       else values.push(patch[key as keyof typeof patch] ?? null);
     }
-    if (columns.length === 0) {
-      const rows = await client.$queryRawUnsafe(`SELECT * FROM tractor_job_stages WHERE id = $1 LIMIT 1`, id) as Record<string, unknown>[];
-      return rows[0] ? toStage(rows[0]) : null;
-    }
     columns.push("updated_at");
     values.push(new Date());
-    const rows = await client.$queryRawUnsafe(
-      `UPDATE tractor_job_stages SET ${columns.map((column, index) => `${column} = $${index + 1}`).join(", ")} WHERE id = $${columns.length + 1} RETURNING *`,
-      ...values, id,
+    const queryParams: unknown[] = [];
+    const conditions: string[] = [];
+    const add = (sql: string, value: unknown): void => {
+      queryParams.push(value);
+      conditions.push(sql.replace("?", `$${values.length + queryParams.length}`));
+    };
+    add("s.id = ?", id);
+    add("j.tenant_id = ?", tenantId);
+    if (options?.owner !== undefined) {
+      add("j.execution_owner = ?", options.owner);
+      add("j.execution_until > ?", new Date());
+    }
+    if (options?.expectedStatus !== undefined) {
+      const expected = Array.isArray(options.expectedStatus) ? options.expectedStatus : [options.expectedStatus];
+      const statuses = expected.map((status) => {
+        add("s.status = ?", status);
+        return conditions.pop()!;
+      });
+      conditions.push(`(${statuses.join(" OR ")})`);
+    }
+    const rows = await this.client.$queryRawUnsafe(
+      `UPDATE tractor_job_stages s SET ${columns.map((column, index) => `${column} = $${index + 1}`).join(", ")}
+       FROM tractor_jobs j WHERE j.id = s.job_id AND ${conditions.join(" AND ")} RETURNING s.*`,
+      ...values, ...queryParams,
     ) as Record<string, unknown>[];
     return rows[0] ? toStage(rows[0]) : null;
+  }
+
+  async claimJob(tenantId: string, id: string, owner: string, leaseMs: number, expectedStatus: TractorJobStatus | readonly TractorJobStatus[] = ["PLANNED", "RUNNING"]): Promise<TractorJob | null> {
+    const now = new Date();
+    const statuses = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
+    const params: unknown[] = [tenantId, id, owner, now, new Date(now.getTime() + leaseMs), ...statuses];
+    const rows = await this.client.$queryRawUnsafe(
+      `UPDATE tractor_jobs SET execution_owner = $3, execution_until = $5
+       WHERE tenant_id = $1 AND id = $2
+         AND (execution_until IS NULL OR execution_until <= $4 OR execution_owner = $3)
+         AND status IN (${statuses.map((_, index) => `$${index + 6}`).join(", ")})
+       RETURNING *`,
+      ...params,
+    ) as Record<string, unknown>[];
+    return rows[0] ? toJob(rows[0]) : null;
+  }
+
+  async renewJobClaim(tenantId: string, id: string, owner: string, leaseMs: number): Promise<boolean> {
+    const rows = await this.client.$queryRawUnsafe(
+      `UPDATE tractor_jobs SET execution_until = $3
+       WHERE tenant_id = $1 AND id = $2 AND execution_owner = $4 AND execution_until > $5
+       RETURNING id`,
+      new Date(Date.now() + leaseMs), tenantId, id, owner, new Date(),
+    ) as Array<{ id: string }>;
+    return rows.length > 0;
+  }
+
+  async releaseJobClaim(tenantId: string, id: string, owner: string): Promise<void> {
+    await this.client.$executeRawUnsafe(
+      `UPDATE tractor_jobs SET execution_owner = NULL, execution_until = NULL
+       WHERE tenant_id = $1 AND id = $2 AND execution_owner = $3`,
+      tenantId, id, owner,
+    );
   }
 }

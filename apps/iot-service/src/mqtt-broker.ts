@@ -1,22 +1,9 @@
+import { readFileSync } from "node:fs";
+
 import mqtt, { type MqttClient } from "mqtt";
 
-/**
- * MQTT 接入适配器（A2）：订阅设备遥测与执行回执 topic，并把平台指令下发到设备。
- *
- * Topic 规范：
- * - `agri/{tenantId}/{deviceNo}/telemetry` 设备 → 平台：遥测/状态
- * - `agri/{tenantId}/{deviceNo}/command`   平台 → 设备：指令下发
- * - `agri/{tenantId}/{deviceNo}/receipt`   设备 → 平台：执行回执
- *
- * 遥测解析后转发到 telemetry-service `POST /api/v1/telemetry/report`；
- * 回执转发到 control-service `POST /api/v1/control/device/receipt`（复用 ControlChannel 口径）。
- * 适配器只做解析与转发，不落库——落库与告警口径仍由遥测/控制服务统一收口。
- *
- * 鉴权：转发时携带 `DEVICE_CALLBACK_TOKEN`（`x-device-token` 头），与
- * field-gateway 的 HTTP 回调通道同口径；未配置时省略该头，回落用户身份通道。
- *
- * 开关：`IOT_MQTT_ENABLED=1` 时由 main.ts 启动；缺省关闭，保留 HTTP 回调链路。
- */
+import { DEFAULT_TENANT } from "./device.repository.js";
+import { InMemoryMqttDeliveryRepository, type MqttDelivery, type MqttDeliveryRepository } from "./mqtt-delivery.repository.js";
 
 export interface MqttBrokerLogger {
   info(message: string, meta?: Record<string, unknown>): void;
@@ -24,49 +11,65 @@ export interface MqttBrokerLogger {
 }
 
 export interface MqttBrokerOptions {
-  /** Broker 地址，缺省 mqtt://127.0.0.1:1883 */
   url?: string | undefined;
-  /** 遥测服务上报地址，缺省取 TELEMETRY_SERVICE_URL 或 http://127.0.0.1:3004 */
   telemetryUrl?: string | undefined;
-  /** 控制服务地址，缺省取 CONTROL_SERVICE_URL 或 http://127.0.0.1:3008 */
   controlUrl?: string | undefined;
-  /** 租户，缺省取进程 TENANT_ID */
   tenantId?: string | undefined;
-  /** topic 前缀，缺省 agri */
   topicPrefix?: string | undefined;
-  /** 设备回调共享凭证（DEVICE_CALLBACK_TOKEN）；未配置时不发送 x-device-token 头 */
   deviceToken?: string | undefined;
+  username?: string | undefined;
+  password?: string | undefined;
+  clientId?: string | undefined;
+  caPath?: string | undefined;
+  rejectUnauthorized?: boolean | undefined;
+  retryIntervalMs?: number;
+  deliveries?: MqttDeliveryRepository;
+  resolveDeviceId?: (deviceNo: string) => Promise<string | null>;
   logger?: MqttBrokerLogger;
-  /** 连接客户端注入点，测试用 */
   clientFactory?: (url: string, options: mqtt.IClientOptions) => MqttClient;
-  /** HTTP 注入点，测试用 */
   fetchImpl?: typeof fetch;
 }
 
 export interface MqttBroker {
   start(): void;
   stop(): Promise<void>;
-  /** 平台向设备下发指令：发布到 `{prefix}/{tenant}/{deviceNo}/command`（QoS 1），返回是否已入队 */
-  publishCommand(deviceNo: string, payload: unknown): boolean;
+  publishCommand(deviceNo: string, payload: unknown): Promise<boolean>;
 }
 
 const DEFAULT_TELEMETRY_URL = "http://127.0.0.1:3004";
 const DEFAULT_CONTROL_URL = "http://127.0.0.1:3008";
 
+type AckCallback = (error: Error | number, code?: number) => void;
+type InboundPacket = { mid?: number; dup?: boolean };
+
 export function createMqttBroker(options: MqttBrokerOptions = {}): MqttBroker {
-  const tenantId = options.tenantId?.trim() || process.env.TENANT_ID?.trim() || "default";
-  const topicPrefix = options.topicPrefix?.trim() || "agri";
+  const tenantId = options.tenantId?.trim() || process.env.TENANT_ID?.trim() || DEFAULT_TENANT;
+  const topicPrefix = options.topicPrefix?.trim() || process.env.MQTT_TOPIC_PREFIX?.trim() || "agri";
   const telemetryBaseUrl = (options.telemetryUrl?.trim() || process.env.TELEMETRY_SERVICE_URL?.trim() || DEFAULT_TELEMETRY_URL).replace(/\/+$/, "");
   const controlBaseUrl = (options.controlUrl?.trim() || process.env.CONTROL_SERVICE_URL?.trim() || DEFAULT_CONTROL_URL).replace(/\/+$/, "");
   const deviceToken = options.deviceToken?.trim() || process.env.DEVICE_CALLBACK_TOKEN?.trim() || "";
+  const username = options.username?.trim() || process.env.MQTT_USERNAME?.trim() || "";
+  const password = options.password ?? process.env.MQTT_PASSWORD ?? "";
+  const clientId = options.clientId?.trim() || process.env.MQTT_CLIENT_ID?.trim() || `iot-service-${tenantId}`;
+  const caPath = options.caPath?.trim() || process.env.MQTT_CA_PATH?.trim() || "";
+  const deliveries = options.deliveries ?? new InMemoryMqttDeliveryRepository();
+  const resolveDeviceId = options.resolveDeviceId ?? (async (deviceNo: string) => deviceNo);
   const telemetryTopic = `${topicPrefix}/${tenantId}/+/telemetry`;
   const receiptTopic = `${topicPrefix}/${tenantId}/+/receipt`;
+  const retryIntervalMs = Math.max(500, options.retryIntervalMs ?? 2000);
   const logger = options.logger ?? {
     info: (message) => console.log(`[mqtt-broker] ${message}`),
     warn: (message, meta) => console.warn(`[mqtt-broker] ${message}`, meta ?? {}),
   };
   const clientFactory = options.clientFactory ?? ((url, opts) => mqtt.connect(url, opts));
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const pendingAcks = new Map<string, Set<AckCallback>>();
+  const processing = new Map<string, Promise<void>>();
+  // 保留完成标记，防止 processing 清理后迟到的 PENDING 快照再次转发。
+  const completedDeliveryIds = new Set<string>();
+  const active = new Set<Promise<void>>();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let stopping = false;
 
   const headers = (): Record<string, string> => ({
     "content-type": "application/json",
@@ -75,58 +78,148 @@ export function createMqttBroker(options: MqttBrokerOptions = {}): MqttBroker {
   });
 
   const client = clientFactory(options.url?.trim() || process.env.MQTT_URL?.trim() || "mqtt://127.0.0.1:1883", {
-    clientId: `iot-service-mqtt-${process.pid}`,
+    clientId,
+    protocolVersion: 5,
+    clean: false,
+    properties: { sessionExpiryInterval: 86_400 },
     reconnectPeriod: 5000,
+    customHandleAcks: (topic, payload, packet, callback) => {
+      void acceptInbound(topic, payload, packet as InboundPacket, callback).catch((error) => {
+        logger.warn("MQTT 入站消息入队失败", { topic, error: String(error) });
+      });
+    },
+    ...(username ? { username } : {}),
+    ...(password ? { password } : {}),
+    ...(caPath ? { ca: readFileSync(caPath) } : {}),
+    ...(options.rejectUnauthorized === undefined ? {} : { rejectUnauthorized: options.rejectUnauthorized }),
   });
 
-  async function forwardTelemetry(topic: string, payload: Buffer): Promise<void> {
+  function topicDevice(topic: string): { deviceNo: string; kind: "telemetry" | "receipt" } | null {
+    const segments = topic.split("/");
+    if (segments.length !== 4 || segments[0] !== topicPrefix || segments[1] !== tenantId) return null;
+    if (segments[3] !== "telemetry" && segments[3] !== "receipt") return null;
+    if (!segments[2] || /[+#]/.test(segments[2])) return null;
+    return { deviceNo: segments[2], kind: segments[3] };
+  }
+
+  function acknowledge(deliveryId: string): void {
+    const callbacks = pendingAcks.get(deliveryId);
+    pendingAcks.delete(deliveryId);
+    for (const callback of callbacks ?? []) callback(0, 0);
+  }
+
+  function registerAck(deliveryId: string, callback: AckCallback): void {
+    if (completedDeliveryIds.has(deliveryId)) {
+      callback(0, 0);
+      return;
+    }
+    const callbacks = pendingAcks.get(deliveryId) ?? new Set<AckCallback>();
+    callbacks.add(callback);
+    pendingAcks.set(deliveryId, callbacks);
+  }
+
+  async function forward(delivery: MqttDelivery): Promise<void> {
+    if (delivery.direction !== "INBOUND") return;
+    const path = delivery.topic.endsWith("/telemetry") ? "/api/v1/telemetry/report" : "/api/v1/control/device/receipt";
+    const baseUrl = delivery.topic.endsWith("/telemetry") ? telemetryBaseUrl : controlBaseUrl;
+    const response = await fetchImpl(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify(delivery.payload),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new Error(`${path} 返回 ${response.status}`);
+  }
+
+  async function processInbound(delivery: MqttDelivery): Promise<void> {
+    if (completedDeliveryIds.has(delivery.id)) {
+      acknowledge(delivery.id);
+      return;
+    }
+    const running = processing.get(delivery.id);
+    if (running) return running;
+    const task = (async () => {
+      try {
+        await forward(delivery);
+        await deliveries.complete(delivery.id);
+        completedDeliveryIds.add(delivery.id);
+        if (completedDeliveryIds.size > 10_000) completedDeliveryIds.delete(completedDeliveryIds.values().next().value!);
+        acknowledge(delivery.id);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await deliveries.fail(delivery.id, message, Date.now());
+        logger.warn("MQTT 入站投递失败，等待重试", { topic: delivery.topic, error: message });
+      }
+    })();
+    processing.set(delivery.id, task);
+    active.add(task);
     try {
-      const text = payload.toString("utf8").trim();
-      if (!text) return;
-      const body = JSON.parse(text) as Record<string, unknown>;
-      const deviceId = String(body.deviceId ?? "").trim();
-      const metric = String(body.metric ?? "").trim();
-      // 设备自报 deviceId 优先；缺省用 topic 里的设备号兜底（topic 段：agri/tenant/deviceNo/telemetry）
-      const segments = topic.split("/").filter(Boolean);
-      const deviceNo = deviceId || (segments.length >= 2 ? segments[segments.length - 2] : "");
-      if (!deviceNo || !metric) {
-        logger.warn("遥测消息缺少 deviceId/metric，已跳过", { topic });
-        return;
-      }
-      const response = await fetchImpl(`${telemetryBaseUrl}/api/v1/telemetry/report`, {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify({ ...body, deviceId: deviceNo, metric }),
-      });
-      if (!response.ok) {
-        logger.warn("遥测上报失败", { topic, status: response.status });
-      }
-    } catch (error) {
-      logger.warn("遥测消息处理失败", { topic, error: error instanceof Error ? error.message : String(error) });
+      await task;
+    } finally {
+      processing.delete(delivery.id);
+      active.delete(task);
     }
   }
 
-  async function forwardReceipt(topic: string, payload: Buffer): Promise<void> {
+  async function acceptInbound(topic: string, payload: Buffer, packet: InboundPacket, callback: AckCallback): Promise<void> {
+    const parsedTopic = topicDevice(topic);
+    if (!parsedTopic) {
+      logger.warn("MQTT 主题不属于当前接入范围，已丢弃", { topic });
+      callback(0, 0);
+      return;
+    }
+    let body: Record<string, unknown>;
     try {
-      const text = payload.toString("utf8").trim();
-      if (!text) return;
-      const body = JSON.parse(text) as Record<string, unknown>;
-      const commandId = String(body.commandId ?? "").trim();
-      const status = String(body.status ?? "").trim();
-      if (!commandId || !status) {
-        logger.warn("回执消息缺少 commandId/status，已跳过", { topic });
-        return;
-      }
-      const response = await fetchImpl(`${controlBaseUrl}/api/v1/control/device/receipt`, {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify({ ...body, commandId, status }),
-      });
-      if (!response.ok) {
-        logger.warn("回执上报失败", { topic, status: response.status });
-      }
+      const value: unknown = JSON.parse(payload.toString("utf8"));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("消息体必须是 JSON 对象");
+      body = value as Record<string, unknown>;
     } catch (error) {
-      logger.warn("回执消息处理失败", { topic, error: error instanceof Error ? error.message : String(error) });
+      logger.warn("MQTT 消息 JSON 非法，已丢弃", { topic, error: error instanceof Error ? error.message : String(error) });
+      callback(0, 0);
+      return;
+    }
+    const claimedDevice = typeof body.deviceId === "string" ? body.deviceId.trim() : "";
+    if (claimedDevice && claimedDevice !== parsedTopic.deviceNo) {
+      logger.warn("MQTT 消息 deviceId 与主题设备不一致，已丢弃", { topic, deviceId: claimedDevice });
+      callback(0, 0);
+      return;
+    }
+    if (parsedTopic.kind === "telemetry" && !String(body.metric ?? "").trim()) {
+      logger.warn("遥测消息缺少 metric，已丢弃", { topic });
+      callback(0, 0);
+      return;
+    }
+    if (parsedTopic.kind === "receipt" && (!String(body.commandId ?? "").trim() || !String(body.status ?? "").trim())) {
+      logger.warn("回执消息缺少 commandId/status，已丢弃", { topic });
+      callback(0, 0);
+      return;
+    }
+    const deviceId = await resolveDeviceId(parsedTopic.deviceNo);
+    if (!deviceId) {
+      logger.warn("MQTT 主题设备未在台账登记，已丢弃", { topic, deviceNo: parsedTopic.deviceNo });
+      callback(0, 0);
+      return;
+    }
+    const delivery = await deliveries.enqueueInbound({
+      direction: "INBOUND",
+      tenantId,
+      deviceNo: parsedTopic.deviceNo,
+      deviceId,
+      topic,
+      payload: { ...body, deviceId },
+    }, { ...(packet.mid !== undefined ? { packetId: packet.mid } : {}), duplicate: packet.dup === true });
+    if (delivery.status === "DONE" || completedDeliveryIds.has(delivery.id)) {
+      callback(0, 0);
+      return;
+    }
+    registerAck(delivery.id, callback);
+    await processInbound(delivery);
+  }
+
+  async function flushInbound(): Promise<void> {
+    const due = await deliveries.due(Date.now(), 100);
+    for (const delivery of due) {
+      if (delivery.direction === "INBOUND") await processInbound(delivery);
     }
   }
 
@@ -141,27 +234,32 @@ export function createMqttBroker(options: MqttBrokerOptions = {}): MqttBroker {
           if (error) logger.warn("订阅回执 topic 失败", { topic: receiptTopic, error: error.message });
           else logger.info("已订阅回执 topic", { topic: receiptTopic });
         });
+        void flushInbound().catch((error) => logger.warn("MQTT 入站重试扫描失败", { error: String(error) }));
       });
-      client.on("message", (topic, payload) => {
-        if (topic.endsWith("/telemetry")) void forwardTelemetry(topic, payload);
-        else if (topic.endsWith("/receipt")) void forwardReceipt(topic, payload);
-      });
-      client.on("error", (error) => {
-        logger.warn("MQTT 连接错误", { error: error.message });
-      });
+      client.on("error", (error) => logger.warn("MQTT 连接错误", { error: error.message }));
+      timer = setInterval(() => {
+        void flushInbound().catch((error) => logger.warn("MQTT 入站重试扫描失败", { error: String(error) }));
+      }, retryIntervalMs);
     },
     async stop(): Promise<void> {
+      stopping = true;
+      if (timer !== undefined) clearInterval(timer);
+      timer = undefined;
+      await Promise.allSettled([...active]);
       await new Promise<void>((resolve) => client.end(false, {}, () => resolve()));
     },
-    publishCommand(deviceNo: string, payload: unknown): boolean {
+    async publishCommand(deviceNo: string, payload: unknown): Promise<boolean> {
       const device = deviceNo.trim();
-      if (!device) return false;
+      if (!device || stopping || !client.connected) return false;
       const topic = `${topicPrefix}/${tenantId}/${device}/command`;
-      client.publish(topic, JSON.stringify(payload), { qos: 1 }, (error) => {
-        if (error) logger.warn("指令下发 MQTT 发布失败", { topic, error: error.message });
+      return new Promise<boolean>((resolve) => {
+        const timeout = setTimeout(() => resolve(false), 5000);
+        client.publish(topic, JSON.stringify(payload), { qos: 1 }, (error) => {
+          clearTimeout(timeout);
+          if (error) logger.warn("指令下发 MQTT 发布失败", { topic, error: error.message });
+          resolve(!error);
+        });
       });
-      // mqtt.js 的 publish 返回客户端实例本身，实际投递失败由回调告警，这里以调用已受理为准
-      return true;
     },
   };
 }

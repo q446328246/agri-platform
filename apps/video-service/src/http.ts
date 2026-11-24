@@ -15,12 +15,12 @@ import { CAMERA_STATUSES, InMemoryCameraRepository } from "./camera.repository.j
 import type { CameraQuery, CameraRepository, CameraStatus, UpdateCameraInput } from "./camera.repository.js";
 import { UnconfiguredPtzChannel } from "./ptz-channel.js";
 import type { PtzChannel } from "./ptz-channel.js";
-interface Recording { id: string; cameraId: string; startedAt: string; endedAt: string; playbackUrl: string }
+interface Recording { id: string; tenantId: string; cameraId: string; startedAt: string; endedAt: string; playbackUrl: string }
 /** 演示录像索引：回放地址由对象存储签发，这里只给可定位的 key */
 const recordings: Recording[] = [
-  { id: "rec-demo-001", cameraId: "camera-001", startedAt: new Date(Date.now() - 26 * 3600000).toISOString(), endedAt: new Date(Date.now() - 25 * 3600000).toISOString(), playbackUrl: "https://example.invalid/vod/rec-demo-001.m3u8" },
-  { id: "rec-demo-002", cameraId: "camera-002", startedAt: new Date(Date.now() - 50 * 3600000).toISOString(), endedAt: new Date(Date.now() - 48 * 3600000).toISOString(), playbackUrl: "https://example.invalid/vod/rec-demo-002.m3u8" },
-  { id: "rec-demo-003", cameraId: "camera-003", startedAt: new Date(Date.now() - 74 * 3600000).toISOString(), endedAt: new Date(Date.now() - 73 * 3600000).toISOString(), playbackUrl: "https://example.invalid/vod/rec-demo-003.m3u8" },
+  { id: "rec-demo-001", tenantId: "tenant-demo", cameraId: "camera-001", startedAt: new Date(Date.now() - 26 * 3600000).toISOString(), endedAt: new Date(Date.now() - 25 * 3600000).toISOString(), playbackUrl: "https://example.invalid/vod/rec-demo-001.m3u8" },
+  { id: "rec-demo-002", tenantId: "tenant-demo", cameraId: "camera-002", startedAt: new Date(Date.now() - 50 * 3600000).toISOString(), endedAt: new Date(Date.now() - 48 * 3600000).toISOString(), playbackUrl: "https://example.invalid/vod/rec-demo-002.m3u8" },
+  { id: "rec-demo-003", tenantId: "tenant-demo", cameraId: "camera-003", startedAt: new Date(Date.now() - 74 * 3600000).toISOString(), endedAt: new Date(Date.now() - 73 * 3600000).toISOString(), playbackUrl: "https://example.invalid/vod/rec-demo-003.m3u8" },
 ];
 function send<T>(res: ServerResponse, status: number, data: T | null, traceId: string, message = ""): void { const body: ApiResponse<T> = { code: status >= 400 ? `VIDEO-${status}` : "OK", message, data, traceId, timestamp: Date.now() }; res.writeHead(status, { "content-type": "application/json; charset=utf-8" }); res.end(JSON.stringify(body)); }
 function trace(req: IncomingMessage): string { return req.headers["x-request-id"]?.toString() || randomUUID(); }
@@ -44,12 +44,13 @@ function cameraQuery(query: URLSearchParams): CameraQuery {
   return result;
 }
 /** 录像筛选：按摄像头、地块（经由摄像头归属）与开始时间区间过滤 */
-function filterRecordings(query: URLSearchParams, cameraPlotById: Map<string, string>): Recording[] {
+function filterRecordings(query: URLSearchParams, cameraPlotById: Map<string, string>, tenantId: string): Recording[] {
   const cameraId = param(query, "cameraId");
   const plotCode = param(query, "plotCode");
   const from = param(query, "from");
   const to = param(query, "to");
   return recordings.filter((recording) => {
+    if (recording.tenantId !== tenantId) return false;
     if (cameraId !== "" && recording.cameraId !== cameraId) return false;
     if (plotCode !== "" && cameraPlotById.get(recording.cameraId) !== plotCode) return false;
     if (from !== "" && recording.startedAt < from) return false;
@@ -124,6 +125,14 @@ export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
   const cameras = options.cameras ?? new InMemoryCameraRepository();
   const channel = options.channel ?? new UnconfiguredPtzChannel();
   const forward = options.forward ?? forwardAiDetection;
+  const listAllCameras = async (tenantId: string): Promise<Map<string, string>> => {
+    const cameraPlotById = new Map<string, string>();
+    for (let pageNo = 1; ; pageNo += 1) {
+      const result = await cameras.list(tenantId, { page: pageNo, size: 200 });
+      for (const camera of result.items) cameraPlotById.set(camera.id, camera.plotCode);
+      if (pageNo >= result.pages || result.items.length === 0) return cameraPlotById;
+    }
+  };
   /** 云台投递后按通道真实结果落状态：未接入硬件通道时留存 QUEUED，不假装下发成功 */
   const deliverPtz = async (tenantId: string, command: PtzCommand): Promise<{ command: PtzCommand; message: string }> => {
     const delivered = await channel.deliver(command);
@@ -208,8 +217,8 @@ export function createVideoHttpServer(options: VideoHttpOptions = {}): Server {
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/v1/video/recordings") {
-    const cameraPlotById = new Map((await cameras.list(tenantId, { page: 1, size: 200 })).items.map((camera) => [camera.id, camera.plotCode]));
-    send(res, 200, page(filterRecordings(url.searchParams, cameraPlotById), url.searchParams), traceId);
+    const cameraPlotById = await listAllCameras(tenantId);
+    send(res, 200, page(filterRecordings(url.searchParams, cameraPlotById, tenantId), url.searchParams), traceId);
     return;
   }
   // 录像留档（A13）：告警时刻前后窗口的片段档案；切片本体依赖 B 类流媒体，未接入时保持 PENDING

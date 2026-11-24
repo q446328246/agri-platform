@@ -1,3 +1,6 @@
+import type { GeoPolygon } from "@agri/contracts";
+
+import { pathInsidePolygon, polygonRingsOf } from "./safety.js";
 import type { TrajectoryLane, TrajectoryPoint, TrajectorySource } from "./trajectory.repository.js";
 
 /**
@@ -68,6 +71,37 @@ export function trajectoryFromCoverage(plan: CoveragePlanView): TrajectoryDraft 
     totalDistanceM: plan.totalDistanceM,
     durationMin: plan.durationMin,
     warnings: plan.warnings ?? [],
+  };
+}
+
+export interface TrajectoryPlanInput {
+  tenantId: string;
+  plotCode: string;
+  implementWidthM?: number;
+  explicitPath?: TrajectoryPoint[];
+}
+
+export function createTrajectoryPlanner(deps: {
+  getPlot: (input: { tenantId: string; plotCode: string }) => Promise<{ geom: GeoPolygon | null } | null>;
+  coveragePlan: (input: { tenantId: string; plotCode: string; boundary: GeoPolygon; implementWidthM: number }) => Promise<CoveragePlanView | null>;
+}): (input: TrajectoryPlanInput) => Promise<TrajectoryDraft | null> {
+  return async (input) => {
+    if (input.explicitPath) {
+      const plot = await deps.getPlot(input);
+      const rings = plot ? polygonRingsOf(plot.geom) : null;
+      if (!rings) throw new Error(`地块 ${input.plotCode} 没有可用边界，无法校验手工轨迹`);
+      if (!pathInsidePolygon(input.explicitPath, rings)) throw new Error("手工轨迹的路径点或线段超出地块边界，已拒绝作业");
+      return trajectoryFromPoints(input.explicitPath);
+    }
+    if (input.implementWidthM === undefined) return null;
+    const plot = await deps.getPlot(input);
+    const rings = plot ? polygonRingsOf(plot.geom) : null;
+    if (!rings || !plot?.geom) throw new Error(`地块 ${input.plotCode} 没有可用边界，无法自动算作业轨迹`);
+    const plan = await deps.coveragePlan({ tenantId: input.tenantId, plotCode: input.plotCode, boundary: plot.geom, implementWidthM: input.implementWidthM });
+    if (!plan) throw new Error("覆盖规划服务不可达，无法自动算作业轨迹");
+    const draft = trajectoryFromCoverage(plan);
+    if (!pathInsidePolygon(draft.path, rings)) throw new Error("覆盖规划轨迹超出地块边界或内环，已拒绝作业");
+    return draft;
   };
 }
 

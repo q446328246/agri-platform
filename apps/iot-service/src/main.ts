@@ -7,6 +7,7 @@ import { createMqttBroker } from './mqtt-broker.js';
 import { createMqttCommandRelay } from './command-relay.js';
 import { FieldGateway } from './field-gateway.js';
 import { DEFAULT_TENANT, InMemoryDeviceRepository, SqlDeviceRepository, demoDevices } from './device.repository.js';
+import { InMemoryMqttDeliveryRepository, SqlMqttDeliveryRepository } from './mqtt-delivery.repository.js';
 import type { DeviceRepository } from './device.repository.js';
 
 /**
@@ -44,11 +45,21 @@ async function bootstrap(): Promise<void> {
 
   // MQTT 接入（A2）：订阅设备遥测/回执 topic 并转发，同时提供指令下发通道；缺省关闭，保留 HTTP 回调链路
   const mqttEnabled = ['1', 'true'].includes((process.env.IOT_MQTT_ENABLED ?? '').toLowerCase());
+  const mqttDeliveries = mode === 'sql' && client ? new SqlMqttDeliveryRepository(client) : new InMemoryMqttDeliveryRepository();
   const mqttBroker = mqttEnabled
     ? createMqttBroker({
+        // 与指令中继同一个租户口径：不显式传就会各用一份缺省值，topic 两侧静默错开
+        tenantId: process.env.TENANT_ID?.trim() || DEFAULT_TENANT,
         telemetryUrl: process.env.TELEMETRY_SERVICE_URL,
         controlUrl: process.env.CONTROL_SERVICE_URL,
         deviceToken: process.env.DEVICE_CALLBACK_TOKEN,
+        username: process.env.MQTT_USERNAME,
+        password: process.env.MQTT_PASSWORD,
+        clientId: process.env.MQTT_CLIENT_ID,
+        caPath: process.env.MQTT_CA_PATH,
+        rejectUnauthorized: process.env.MQTT_REJECT_UNAUTHORIZED === undefined ? undefined : process.env.MQTT_REJECT_UNAUTHORIZED !== 'false',
+        deliveries: mqttDeliveries,
+        resolveDeviceId: async (deviceNo) => (await devices.findByDeviceNo(process.env.TENANT_ID?.trim() || DEFAULT_TENANT, deviceNo))?.id ?? null,
       })
     : undefined;
   if (mqttBroker) {
@@ -62,6 +73,7 @@ async function bootstrap(): Promise<void> {
   const relay = mqttBroker
     ? createMqttCommandRelay({
         devices,
+        deliveries: mqttDeliveries,
         controlUrl: process.env.CONTROL_SERVICE_URL,
         tenantId: process.env.TENANT_ID?.trim() || DEFAULT_TENANT,
         deviceToken: process.env.DEVICE_CALLBACK_TOKEN,

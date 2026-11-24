@@ -35,8 +35,12 @@ describe("水肥参数规范", () => {
       "搅拌时长需在 1 到 120 分钟之间",
       "搅拌转速需在 0 到 300 转/分之间",
     ]);
-    // 播种、除草类指令参数保持自由，不进入水肥校验
-    expect(validateCommandParameters("SEEDING", { depth: 3 })).toEqual([]);
+    // 作业类不进入水肥校验，但必须带作业面积与时长
+    expect(validateCommandParameters("SEEDING", { areaMu: 1, durationMin: 2 })).toEqual([]);
+    expect(validateCommandParameters("SEEDING", { depth: 3 })).toEqual([
+      "areaMu 必须大于 0",
+      "durationMin 必须大于 0",
+    ]);
     expect(validateCommandParameters("IRRIGATION", { zones: [] })).toHaveLength(1);
   });
 
@@ -117,6 +121,46 @@ describe("控制指令 HTTP 接口", () => {
     expect(plan).toEqual({ totalDurationMin: derived.totalDurationMin, totalWaterVolume: derived.totalWaterVolume });
     // 原参数不因包络而丢失或改写
     expect(stored.zones).toEqual(parameters.zones);
+  });
+
+  it("同一幂等键重试复用指令，不同内容返回 409", async () => {
+    const base = await start(createControlHttpServer());
+    const headers = { "content-type": "application/json", "x-user-id": "user-admin", "x-confirm-action": "CONFIRM" };
+    const body = { deviceId: "tractor-idem", type: "SEEDING", parameters: { areaMu: 2, durationMin: 5 }, idempotencyKey: "tractor:job:stage" };
+    const first = await fetch(`${base}/api/v1/control/commands`, { method: "POST", headers, body: JSON.stringify(body) });
+    expect(first.status).toBe(202);
+    const created = await first.json() as { data: { id: string } };
+    const retry = await fetch(`${base}/api/v1/control/commands`, { method: "POST", headers, body: JSON.stringify(body) });
+    expect(retry.status).toBe(200);
+    expect((await retry.json() as { data: { id: string } }).data.id).toBe(created.data.id);
+    const conflict = await fetch(`${base}/api/v1/control/commands`, {
+      method: "POST", headers, body: JSON.stringify({ ...body, parameters: { areaMu: 3, durationMin: 5 } }),
+    });
+    expect(conflict.status).toBe(409);
+  });
+
+  it("换具与返航参与设备作业联锁，在途查询不受分页影响", async () => {
+    const base = await start(createControlHttpServer());
+    const headers = { "content-type": "application/json", "x-user-id": "user-admin", "x-confirm-action": "CONFIRM" };
+    const query = async (excludeCommandId?: string): Promise<boolean> => {
+      const response = await fetch(`${base}/api/v1/control/device/in-transit?deviceId=tractor-interlock${excludeCommandId ? `&excludeCommandId=${excludeCommandId}` : ""}`);
+      expect(response.status).toBe(200);
+      return (await response.json() as { data: { inTransit: boolean } }).data.inTransit;
+    };
+    expect(await query()).toBe(false);
+    const switchTool = await fetch(`${base}/api/v1/control/commands`, {
+      method: "POST", headers,
+      body: JSON.stringify({ deviceId: "tractor-interlock", type: "TOOL_SWITCH", parameters: { toolCode: "SEEDER" } }),
+    });
+    expect(switchTool.status).toBe(202);
+    const switched = await switchTool.json() as { data: { id: string } };
+    expect(await query()).toBe(true);
+    expect(await query(switched.data.id)).toBe(false);
+    const blocked = await fetch(`${base}/api/v1/control/commands`, {
+      method: "POST", headers,
+      body: JSON.stringify({ deviceId: "tractor-interlock", type: "SEEDING", parameters: { areaMu: 1, durationMin: 2 } }),
+    });
+    expect(blocked.status).toBe(409);
   });
 
   it("灌溉方案预演返回方案但不写指令表", async () => {

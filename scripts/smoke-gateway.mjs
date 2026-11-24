@@ -12,6 +12,8 @@ const services = [
   ["gateway", 8180, "apps/gateway-service/dist/main.js"],
 ];
 const children = [];
+let commandToCancel;
+let cancelHeaders;
 
 // auth 需要回查平台角色权限，冒烟环境端口与默认值不同，统一注入
 const sharedEnv = {
@@ -90,6 +92,9 @@ async function main() {
   const plots = await expectStatus(plotsResponse, 200, "地块查询");
   if (!Array.isArray(plots.data?.items)) throw new Error("地块查询响应缺少 items");
 
+  const adminHeaders = { "content-type": "application/json", authorization: `Bearer ${login.data.token}`, "x-user-id": login.data.user.id };
+  cancelHeaders = adminHeaders;
+
   const rejected = await fetch(`${gateway}/control/commands`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${login.data.token}` },
@@ -100,13 +105,13 @@ async function main() {
   const acceptedResponse = await fetch(`${gateway}/control/commands`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${login.data.token}`, "x-user-id": login.data.user.id, "x-confirm-action": "CONFIRM" },
-    body: JSON.stringify({ deviceId: "device-soil-003", type: "IRRIGATION", parameters: { duration: 5 } }),
+    body: JSON.stringify({ deviceId: "device-soil-003", type: "IRRIGATION", parameters: { duration: 5 }, idempotencyKey: `smoke-gateway:${Date.now()}` }),
   });
   const accepted = await expectStatus(acceptedResponse, 202, "已确认控制指令");
   if (accepted.data?.operatorId !== login.data.user.id || accepted.data?.status !== "QUEUED") throw new Error("控制指令响应未进入队列");
+  commandToCancel = accepted.data.id;
 
   // 系统管理：通过网关新建角色、按角色建用户、停用用户后登录被拒，最后清理
-  const adminHeaders = { "content-type": "application/json", authorization: `Bearer ${login.data.token}`, "x-user-id": login.data.user.id };
   const roleCode = `smoke-role-${Date.now().toString(36)}`;
   const roleResponse = await fetch(`${gateway}/platform/roles`, { method: "POST", headers: adminHeaders, body: JSON.stringify({ name: "冒烟角色", code: roleCode, permissions: ["plot:read", "message:read"] }) });
   const role = await expectStatus(roleResponse, 201, "新建角色");
@@ -148,6 +153,14 @@ async function main() {
 }
 
 async function cleanup() {
+  if (commandToCancel && cancelHeaders) {
+    const response = await fetch(`http://127.0.0.1:8180/api/v1/control/commands/${encodeURIComponent(commandToCancel)}/cancel`, {
+      method: "POST",
+      headers: cancelHeaders,
+      body: JSON.stringify({ reason: "网关冒烟结束，清理测试指令" }),
+    }).catch(() => null);
+    if (!response?.ok) console.warn("网关冒烟指令未能自动取消，请检查该测试指令状态");
+  }
   for (const child of children.reverse()) {
     if (!child.killed) child.kill("SIGTERM");
   }
