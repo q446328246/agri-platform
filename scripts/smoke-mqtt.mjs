@@ -145,7 +145,7 @@ try {
   await database.query(
     `INSERT INTO control_commands (id, tenant_id, device_id, plot_code, operator_id, type, parameters, status, origin, reason, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'QUEUED', 'MANUAL', $8, now())`,
-    [commandId, tenantId, "device-tractor-001", "P-SMOKE-MQTT", "smoke-mqtt", "TOOL_SWITCH", JSON.stringify({ implement: "smoke" }), "MQTT 全链路冒烟"],
+    [commandId, tenantId, deviceId, "P-SMOKE-MQTT", "smoke-mqtt", "PAUSE", JSON.stringify({}), "MQTT 全链路传输冒烟（不启动作业）"],
   );
   const receivedCommand = waitFor(device, "message", 15_000).then(([topic, payload]) => {
     assert(topic === commandTopic, "Command arrived on an unexpected topic");
