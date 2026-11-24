@@ -31,6 +31,7 @@ export type ControlCommandStatus = (typeof CONTROL_STATUSES)[number];
 
 /** 尚未收到最终回执的状态，超时看板只关心这些；暂停不是结单，没人恢复的指令仍要被收口告知 */
 export const PENDING_STATUSES: readonly ControlCommandStatus[] = ["QUEUED", "SENT", "ACKED", "PAUSED"];
+export const TIMEOUT_ESTOP_IDEMPOTENCY_PREFIX = "control-timeout-estop:";
 
 /** 指令来源 */
 export type ControlOrigin = "MANUAL" | "EVENT";
@@ -130,6 +131,11 @@ export interface ControlCommandQuery {
   size: number;
 }
 
+export interface OverdueCursor {
+  createdAt: string;
+  id: string;
+}
+
 export interface ControlCommandRepository {
   /** 写入指令；来源事件已存在时返回 null */
   create(command: ControlCommand): Promise<ControlCommand | null>;
@@ -140,8 +146,8 @@ export interface ControlCommandRepository {
   /** 沿合法跃迁表推进状态；记录不存在、不属于该租户、版本过期或跃迁非法时返回 null。
    *  传入 tx 时读写都走该事务，供「跃迁 + 事件入队」原子提交。 */
   transition(tenantId: string, transition: CommandTransition, tx?: Tx): Promise<ControlCommand | null>;
-  /** 跨租户捞出超时未回执的在途指令，按等待时长从久到新排序；调用方按行内 tenantId 收口 */
-  listOverdue(timeoutMin: number, nowMs: number, limit: number): Promise<ControlCommand[]>;
+  /** 跨租户捞出超时未回执的在途指令，按创建顺序游标翻页，避免阻塞指令饿死后续候选 */
+  listOverdue(timeoutMin: number, nowMs: number, limit: number, cursor?: OverdueCursor): Promise<ControlCommand[]>;
 }
 
 function toPage(items: ControlCommand[], total: number, page: number, size: number): PageResult<ControlCommand> {
@@ -175,9 +181,12 @@ export function pendingMinutesOf(command: ControlCommand, nowMs: number): number
 
 /** 执行包络给出的作业时长优先于通用回执阈值，另留 1 分钟确认缓冲。 */
 export function effectiveTimeoutMin(command: ControlCommand, timeoutMin: number): number {
+  const base = Number.isFinite(timeoutMin) ? Math.max(1, Math.ceil(timeoutMin)) : 1;
   const plan = command.parameters.plan;
-  const duration = plan && typeof plan === "object" ? Number((plan as Record<string, unknown>).totalDurationMin) : NaN;
-  return Number.isFinite(duration) && duration > 0 ? Math.max(timeoutMin, Math.ceil(duration + 1)) : timeoutMin;
+  const duration = plan && typeof plan === "object" ? (plan as Record<string, unknown>).totalDurationMin : undefined;
+  return typeof duration === "number" && Number.isFinite(duration) && duration > 0
+    ? Math.max(base, Math.ceil(duration + 1))
+    : base;
 }
 
 /**
@@ -202,7 +211,7 @@ const COLUMNS =
   "id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, idempotency_key, reason, scheduled_at, sent_at, acked_at, paused_at, resumed_at, finished_at, receipt_message, result_json, version, created_at";
 
 function overdueThresholdSql(param: string): string {
-  return `GREATEST(${param}::int, CEIL(COALESCE(CASE WHEN jsonb_typeof(parameters->'plan'->'totalDurationMin') = 'number' THEN (parameters->'plan'->>'totalDurationMin')::numeric ELSE 0 END, 0) + 1)::int)`;
+  return `GREATEST(CEIL(${param}::numeric), CEIL(COALESCE(CASE WHEN jsonb_typeof(parameters->'plan'->'totalDurationMin') = 'number' THEN (parameters->'plan'->>'totalDurationMin')::numeric ELSE 0 END, 0) + 1), 1)::int`;
 }
 
 function toRecord(row: Record<string, unknown>): ControlCommand {
@@ -379,7 +388,7 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
               sent_at = CASE WHEN $4 = 'SENT' THEN $5::timestamptz ELSE sent_at END,
               acked_at = CASE WHEN $4 = 'ACKED' THEN $5::timestamptz ELSE acked_at END,
               paused_at = CASE WHEN $4 = 'PAUSED' THEN $5::timestamptz ELSE paused_at END,
-              resumed_at = CASE WHEN $4 = 'ACKED' AND status = 'PAUSED' THEN $5::timestamptz ELSE resumed_at END,
+              resumed_at = CASE WHEN $4 = 'PAUSED' THEN NULL WHEN $4 = 'ACKED' AND status = 'PAUSED' THEN $5::timestamptz ELSE resumed_at END,
               finished_at = CASE WHEN $4 IN ('DONE', 'FAILED', 'CANCELLED') THEN $5::timestamptz ELSE finished_at END,
               receipt_message = COALESCE($6::text, receipt_message),
               result_json = COALESCE($7::jsonb, result_json)
@@ -406,18 +415,22 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     return status && (CONTROL_STATUSES as readonly string[]).includes(status) ? (status as ControlCommandStatus) : null;
   }
 
-  async listOverdue(timeoutMin: number, nowMs: number, limit: number): Promise<ControlCommand[]> {
-    // 与列表筛选 overdue=true 同一个 SQL 口径，只是跨租户、且只取本轮要收口的那么几条；
-    // 排序按在途起点（最后一次状态推进时间）从久到新，最该收口的先处理。
+  async listOverdue(timeoutMin: number, nowMs: number, limit: number, cursor?: OverdueCursor): Promise<ControlCommand[]> {
+    // 判定时钟由调用方注入，测试与生产扫都按同一时刻；创建顺序游标保证等待急停的旧指令
+    // 不会每轮占满同一批，后面的超时指令仍能轮到收口。
     const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `SELECT ${COLUMNS}
        FROM control_commands
        WHERE status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED')
-         AND now() - ${overdueSinceSql()} > make_interval(mins => ${overdueThresholdSql("$1")})
-       ORDER BY ${overdueSinceSql()}, id
+         AND $3::timestamptz - ${overdueSinceSql()} > make_interval(mins => ${overdueThresholdSql("$1")})
+         AND ($4::text IS NULL OR (created_at, id) > ($5::timestamptz, $4::text))
+       ORDER BY created_at, id
        LIMIT $2`,
       timeoutMin,
       limit,
+      new Date(nowMs).toISOString(),
+      cursor?.id ?? null,
+      cursor?.createdAt ?? null,
     );
     return rows.map(toRecord);
   }
@@ -520,18 +533,22 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
       row.ackedAt = transition.at;
       if (previousStatus === "PAUSED") row.resumedAt = transition.at;
     }
-    if (transition.status === "PAUSED") row.pausedAt = transition.at;
+    if (transition.status === "PAUSED") {
+      row.pausedAt = transition.at;
+      delete row.resumedAt;
+    }
     if (transition.status === "DONE" || transition.status === "FAILED" || transition.status === "CANCELLED") row.finishedAt = transition.at;
     if (transition.message !== undefined) row.receiptMessage = transition.message;
     if (transition.result !== undefined) row.result = structuredClone(transition.result);
     return structuredClone(row);
   }
 
-  async listOverdue(timeoutMin: number, nowMs: number, limit: number): Promise<ControlCommand[]> {
+  async listOverdue(timeoutMin: number, nowMs: number, limit: number, cursor?: OverdueCursor): Promise<ControlCommand[]> {
     return this.rows
       .filter((row) => PENDING_STATUSES.includes(row.status))
       .filter((row) => isOverdue(row, nowMs, timeoutMin))
-      .sort((a, b) => overdueSinceMs(a) - overdueSinceMs(b) || a.id.localeCompare(b.id))
+      .filter((row) => cursor === undefined || row.createdAt > cursor.createdAt || (row.createdAt === cursor.createdAt && row.id > cursor.id))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
       .slice(0, limit)
       .map((row) => structuredClone(row));
   }

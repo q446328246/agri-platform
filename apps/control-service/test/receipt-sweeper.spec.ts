@@ -239,7 +239,8 @@ describe("ControlReceiptSweeper 超时收口", () => {
         idempotencyKey: "tractor:job-1:stage:stage-1",
       }),
     ]);
-    const sweeper = new ControlReceiptSweeper(repository, { timeoutMin: 15 });
+    const errors: string[] = [];
+    const sweeper = new ControlReceiptSweeper(repository, { timeoutMin: 15, onError: (_id, error) => errors.push(error.message) });
 
     expect(await sweeper.sweepOnce(nowMs)).toBe(0);
     expect((await repository.find("tenant-demo", "tractor-timeout"))?.status).toBe("SENT");
@@ -267,9 +268,11 @@ describe("ControlReceiptSweeper 超时收口", () => {
       status: "DONE",
       at: new Date(nowMs).toISOString(),
       version: ackedEstop!.version,
-      result: { stoppedConfirmed: true },
+      result: { confirmed: true },
     })).not.toBeNull();
-    expect(await sweeper.sweepOnce(nowMs)).toBe(1);
+    const closed = await sweeper.sweepOnce(nowMs);
+    expect(closed, errors.join("; ")).toBe(1);
+    expect(errors).toEqual([]);
     expect((await repository.find("tenant-demo", "tractor-timeout"))?.status).toBe("FAILED");
     expect((await repository.find("tenant-demo", "tractor-timeout"))?.receiptMessage).toContain("已由急停指令");
   });
@@ -300,13 +303,119 @@ describe("ControlReceiptSweeper 超时收口", () => {
     expect((await repository.find("tenant-demo", "tractor-unsafe"))?.status).toBe("ACKED");
     expect((await repository.find("tenant-demo", emergencyStop!.id))?.status).toBe("FAILED");
     const failedEstop = await repository.find("tenant-demo", emergencyStop!.id);
-    const retry = await repository.findByIdempotencyKey("tenant-demo", `control-timeout-estop:tractor-unsafe:retry:${failedEstop!.version}`);
+    const retry = await repository.findByIdempotencyKey("tenant-demo", `control-timeout-estop:tractor-unsafe:retry:${failedEstop!.id}`);
     expect(retry).toMatchObject({ type: "ESTOP", status: "QUEUED" });
     expect(errors).toEqual(["tractor-unsafe"]);
 
     expect(await sweeper.sweepOnce(nowMs + 240 * MINUTE)).toBe(0);
     expect(errors).toEqual(["tractor-unsafe"]);
     expect((await repository.page("tenant-demo", { page: 1, size: 10 })).items.filter((item) => item.type === "ESTOP")).toHaveLength(2);
+  });
+
+  it("失败急停的后续重试按失败指令继续链式编号，最终确认后才收口", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "tractor-chain", type: "SEEDING", status: "SENT",
+        sentAt: new Date(nowMs - 40 * MINUTE).toISOString(),
+        idempotencyKey: "tractor:job-chain:stage:stage-1",
+      }),
+    ]);
+    const sweeper = new ControlReceiptSweeper(repository, { timeoutMin: 15 });
+    expect(await sweeper.sweepOnce(nowMs)).toBe(0);
+    const first = await repository.findByIdempotencyKey("tenant-demo", "control-timeout-estop:tractor-chain");
+    expect(await repository.transition("tenant-demo", {
+      id: first!.id, status: "FAILED", at: new Date(nowMs).toISOString(), version: first!.version, message: "失败",
+    })).not.toBeNull();
+
+    expect(await sweeper.sweepOnce(nowMs + MINUTE)).toBe(0);
+    const secondKey = `control-timeout-estop:tractor-chain:retry:${first!.id}`;
+    const second = await repository.findByIdempotencyKey("tenant-demo", secondKey);
+    expect(second).toMatchObject({ type: "ESTOP", status: "QUEUED" });
+    expect(await repository.transition("tenant-demo", {
+      id: second!.id, status: "CANCELLED", at: new Date(nowMs + MINUTE).toISOString(), version: second!.version,
+    })).not.toBeNull();
+
+    expect(await sweeper.sweepOnce(nowMs + 2 * MINUTE)).toBe(0);
+    const third = await repository.findByIdempotencyKey("tenant-demo", `control-timeout-estop:tractor-chain:retry:${second!.id}`);
+    expect(third).toMatchObject({ type: "ESTOP", status: "QUEUED" });
+    expect(await repository.transition("tenant-demo", {
+      id: third!.id, status: "SENT", at: new Date(nowMs + 2 * MINUTE).toISOString(), version: third!.version,
+    })).not.toBeNull();
+    const sentThird = await repository.find("tenant-demo", third!.id);
+    expect(await repository.transition("tenant-demo", {
+      id: third!.id, status: "DONE", at: new Date(nowMs + 2 * MINUTE).toISOString(), version: sentThird!.version, result: { confirmed: true },
+    })).not.toBeNull();
+
+    expect(await sweeper.sweepOnce(nowMs + 3 * MINUTE)).toBe(1);
+    expect((await repository.find("tenant-demo", "tractor-chain"))?.status).toBe("FAILED");
+    expect((await repository.page("tenant-demo", { page: 1, size: 10 })).items.filter((item) => item.type === "ESTOP")).toHaveLength(3);
+  });
+
+  it.each([
+    ["异设备", { deviceId: "device-other" }],
+    ["错误目标", { parameters: { targetCommandId: "other-job" } }],
+    ["非急停类型", { type: "SEEDING" }],
+    ["人工来源", { origin: "MANUAL", operatorId: "user-admin" }],
+  ] as const)("超时急停幂等键被%s伪造时保持原作业未收口", async (_label, overrides) => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "tractor-spoof", type: "SEEDING", status: "SENT",
+        sentAt: new Date(nowMs - 40 * MINUTE).toISOString(),
+        idempotencyKey: "tractor:job-spoof:stage:stage-1",
+      }),
+      command({
+        id: "fake-estop", type: "ESTOP", status: "QUEUED", origin: "EVENT", operatorId: "system-timeout",
+        parameters: { targetCommandId: "tractor-spoof" },
+        idempotencyKey: "control-timeout-estop:tractor-spoof",
+        createdAt: new Date(nowMs - 39 * MINUTE).toISOString(),
+        ...overrides,
+      }),
+    ]);
+    const errors: string[] = [];
+    const sweeper = new ControlReceiptSweeper(repository, { timeoutMin: 15, onError: (_id, error) => errors.push(error.message) });
+
+    expect(await sweeper.sweepOnce(nowMs)).toBe(0);
+    expect((await repository.find("tenant-demo", "tractor-spoof"))?.status).toBe("SENT");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("非预期指令");
+  });
+
+  it("已结单但未确认停车的急停不会收口原作业，而是创建下一轮急停", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "tractor-unconfirmed", type: "SEEDING", status: "SENT",
+        sentAt: new Date(nowMs - 40 * MINUTE).toISOString(),
+        idempotencyKey: "tractor:job-unconfirmed:stage:stage-1",
+      }),
+      command({
+        id: "unconfirmed-estop", type: "ESTOP", status: "DONE", origin: "EVENT", operatorId: "system-timeout",
+        parameters: { targetCommandId: "tractor-unconfirmed" },
+        idempotencyKey: "control-timeout-estop:tractor-unconfirmed",
+        result: { stoppedConfirmed: true }, finishedAt: new Date(nowMs - MINUTE).toISOString(),
+        createdAt: new Date(nowMs - 39 * MINUTE).toISOString(),
+      }),
+    ]);
+    const sweeper = new ControlReceiptSweeper(repository, { timeoutMin: 15 });
+
+    expect(await sweeper.sweepOnce(nowMs)).toBe(0);
+    expect((await repository.find("tenant-demo", "tractor-unconfirmed"))?.status).toBe("SENT");
+    expect(await repository.findByIdempotencyKey("tenant-demo", `control-timeout-estop:tractor-unconfirmed:retry:unconfirmed-estop`))
+      .toMatchObject({ type: "ESTOP", status: "QUEUED" });
+  });
+
+  it("等待急停的旧拖拉机指令不会饿死后续普通超时候选", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "a-tractor", type: "SEEDING", createdAt: new Date(nowMs - 40 * MINUTE).toISOString(), idempotencyKey: "tractor:job-a:stage:1" }),
+      command({ id: "b-tractor", type: "SEEDING", createdAt: new Date(nowMs - 40 * MINUTE).toISOString(), idempotencyKey: "tractor:job-b:stage:1" }),
+      command({ id: "z-normal", type: "IRRIGATION", createdAt: new Date(nowMs - 40 * MINUTE).toISOString() }),
+    ]);
+    const sweeper = new ControlReceiptSweeper(repository, { timeoutMin: 15, batchSize: 2 });
+
+    expect(await sweeper.sweepOnce(nowMs)).toBe(0);
+    expect(await sweeper.sweepOnce(nowMs)).toBe(1);
+    expect((await repository.find("tenant-demo", "z-normal"))?.status).toBe("FAILED");
+    expect((await repository.find("tenant-demo", "a-tractor"))?.status).toBe("QUEUED");
+    expect((await repository.find("tenant-demo", "b-tractor"))?.status).toBe("QUEUED");
   });
 
   it("人工拖拉机安全急停按普通指令收口，不再创建指向急停的急停", async () => {

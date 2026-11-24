@@ -1,10 +1,12 @@
+import { randomUUID } from "node:crypto";
+
 import type { EventTopicValue } from "@agri/contracts";
 
 import type { TractorJob, TractorJobRepository, TractorJobStatus } from "./job.repository.js";
 import type { TractorSafetyEventRepository } from "./safety-event.repository.js";
 import type { TrajectoryRepository } from "./trajectory.repository.js";
 import type { ControlDispatchInput, JobActionLock } from "./executor.js";
-import { recordSafetyEvent, TractorCommandError } from "./executor.js";
+import { pendingResumeOf, recordSafetyEvent, TractorCommandError } from "./executor.js";
 import { distanceToPolylineM } from "./trajectory.js";
 
 /** 最新 RTK 定位采样：经纬度、水平精度、定位状态与上报时刻 */
@@ -27,6 +29,8 @@ export interface TractorMonitorDeps {
   insideGeofence: (plotCode: string, lng: number, lat: number) => Promise<boolean | null>;
   /** 向控制服务下发处置指令（PAUSE/ESTOP） */
   dispatch: (input: ControlDispatchInput) => Promise<{ commandId: string } | null>;
+  /** 对账未确认恢复；装配执行器后由其重新读取状态并在作业锁内处置 */
+  reconcileSafetyUnknown?: (job: TractorJob) => Promise<unknown>;
   /** 等待处置指令设备侧 DONE 确认；PAUSED 等其他状态均不算处置完成 */
   waitCommand: (tenantId: string, deviceId: string, commandId: string, timeoutMs: number) => Promise<"DONE" | "FAILED" | "PAUSED" | "TIMEOUT" | "UNAVAILABLE">;
   safetyCommandTimeoutMs?: number;
@@ -70,6 +74,7 @@ export function createTractorMonitor(deps: TractorMonitorDeps): TractorMonitor {
   const deviationCounts = new Map<string, number>();
   const deviationWatch = new Set<string>();
   const safetyAttempts = new Map<string, { attempt: number; rejected: boolean }>();
+  const safetyRunId = randomUUID();
   const trajectoryDeviationMaxM = deps.trajectoryDeviationMaxM ?? 5;
   let running: Promise<void> | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -78,9 +83,16 @@ export function createTractorMonitor(deps: TractorMonitorDeps): TractorMonitor {
     job: TractorJob,
     type: "PAUSE" | "ESTOP",
     expectedStatus: TractorJobStatus,
-    patch: { status: "PAUSED" | "ESTOPPED"; reason: string; finishedAt?: string },
+    patch: { status: "PAUSED" | "ESTOPPED" | "SAFETY_UNKNOWN"; reason: string; finishedAt?: string },
+    stillCurrent?: (job: TractorJob) => boolean,
   ): Promise<string> => {
     const confirm = async (): Promise<string> => {
+      const current = await deps.jobs.findJob(deps.tenantId, job.id);
+      if (!current || current.status !== job.status || (stillCurrent && !stillCurrent(current))) {
+        throw new TractorCommandError("作业状态在安全处置前已变化，本次监测不再下发");
+      }
+      job = current;
+      const expectedRunRevision = current.runRevision;
       let targetCommandId: string | null = null;
       if (type === "PAUSE") {
         const stages = await deps.jobs.listStages(deps.tenantId, job.id);
@@ -96,8 +108,11 @@ export function createTractorMonitor(deps: TractorMonitorDeps): TractorMonitor {
         type,
         parameters: targetCommandId === null ? {} : { targetCommandId },
         operator: job.operator,
-        idempotencyKey: `tractor:${job.id}:monitor:${type}:${targetCommandId ?? "device"}:${attempt.attempt}`,
-      }).catch(() => null);
+        idempotencyKey: `tractor:${job.id}:monitor:${type}:${targetCommandId ?? "device"}:${safetyRunId}:${attempt.attempt}`,
+      }).catch(() => {
+        safetyAttempts.set(attemptKey, { attempt: attempt.attempt, rejected: false });
+        throw new TractorCommandError(`${type} 指令下发结果未知，保留同一幂等键等待重试`, 503);
+      });
       if (!dispatched) {
         safetyAttempts.set(attemptKey, attempt.rejected
           ? { attempt: attempt.attempt + 1, rejected: false }
@@ -105,14 +120,14 @@ export function createTractorMonitor(deps: TractorMonitorDeps): TractorMonitor {
         throw new TractorCommandError(`${type} 指令下发被控制侧拒绝，作业状态未变更`);
       }
       const result = await deps.waitCommand(deps.tenantId, job.deviceId, dispatched.commandId, deps.safetyCommandTimeoutMs ?? 30_000);
-      if (result === "DONE") safetyAttempts.delete(attemptKey);
+      if (result === "DONE") safetyAttempts.set(attemptKey, { attempt: attempt.attempt + 1, rejected: false });
       else if (result === "FAILED") safetyAttempts.set(attemptKey, { attempt: attempt.attempt + 1, rejected: false });
       else safetyAttempts.set(attemptKey, { attempt: attempt.attempt, rejected: false });
       if (result !== "DONE") {
         const detail = result === "TIMEOUT" ? "确认超时" : result === "UNAVAILABLE" ? "确认服务不可用" : "执行失败";
         throw new TractorCommandError(`${type} 指令${detail}，作业状态未变更`);
       }
-      const updated = await deps.jobs.updateJob(deps.tenantId, job.id, patch, { expectedStatus });
+      const updated = await deps.jobs.updateJob(deps.tenantId, job.id, patch, { expectedStatus, expectedRunRevision });
       if (!updated) throw new TractorCommandError("等待控制确认期间作业状态已变化，本次监测不再改写");
       return dispatched.commandId;
     };
@@ -135,21 +150,53 @@ export function createTractorMonitor(deps: TractorMonitorDeps): TractorMonitor {
       }
       const watched = await Promise.all([...breachWatch].map((jobId) => deps.jobs.findJob(deps.tenantId, jobId)));
       const deviated = await Promise.all([...deviationWatch].map((jobId) => deps.jobs.findJob(deps.tenantId, jobId)));
+      const resuming: TractorJob[] = [];
+      const pausedSize = 200;
+      for (let offset = 0; ; offset += pausedSize) {
+        const records = await deps.jobs.listJobs({ tenantId: deps.tenantId, status: "PAUSED", limit: pausedSize, offset });
+        resuming.push(...records.filter((job) => pendingResumeOf(job) !== null));
+        if (records.length < pausedSize) break;
+      }
       // 去重：同一作业可能同时在越界与偏离观察集，避免同一 tick 内重复处置。
       const seen = new Set<string>();
       const jobs = [
         ...active,
         ...watched.filter((job): job is NonNullable<typeof job> => job !== null && job.status === "PAUSED"),
         ...deviated.filter((job): job is NonNullable<typeof job> => job !== null && job.status === "PAUSED"),
+        ...resuming,
       ].filter((job) => (seen.has(job.id) ? false : (seen.add(job.id), true)));
       for (const job of jobs) {
         try {
-          if (job.status === "SAFETY_UNKNOWN") {
-            await confirmAndUpdate(job, "ESTOP", "SAFETY_UNKNOWN", { status: "ESTOPPED", reason: "恢复结果未知，急停确认后收口", finishedAt: now().toISOString() });
+          const hasPendingResume = pendingResumeOf(job) !== null;
+          if ((hasPendingResume || job.status === "SAFETY_UNKNOWN") && deps.reconcileSafetyUnknown) {
+            try {
+              await deps.reconcileSafetyUnknown(job);
+            } catch (error) {
+              if (!(error instanceof TractorCommandError)) throw error;
+            }
+            continue;
+          }
+          if (hasPendingResume) {
+            await confirmAndUpdate(job, "ESTOP", job.status, {
+              status: "SAFETY_UNKNOWN",
+              reason: "存在未确认的恢复意图，已急停并保持 SAFETY_UNKNOWN 等待对账",
+            }, (current) => pendingResumeOf(current) !== null);
             await recordSafetyEvent(deps, {
               tenantId: job.tenantId, jobId: job.id, plotCode: job.plotCode, deviceId: job.deviceId,
               kind: "ESTOP", level: "CRITICAL",
-              message: "恢复指令结果未知，已重新急停并确认设备停车",
+              message: "发现未确认的 RESUME 持久化意图，已再次急停，作业保持 SAFETY_UNKNOWN 等待人工核实",
+            });
+            continue;
+          }
+          if (job.status === "SAFETY_UNKNOWN") {
+            await confirmAndUpdate(job, "ESTOP", "SAFETY_UNKNOWN", {
+              status: "SAFETY_UNKNOWN",
+              reason: "恢复结果未知，急停已再次确认，仍需人工核实 RESUME 是否已取消",
+            });
+            await recordSafetyEvent(deps, {
+              tenantId: job.tenantId, jobId: job.id, plotCode: job.plotCode, deviceId: job.deviceId,
+              kind: "ESTOP", level: "CRITICAL",
+              message: "恢复指令结果未知，已再次确认急停，作业保持 SAFETY_UNKNOWN 等待人工核实",
             });
             continue;
           }

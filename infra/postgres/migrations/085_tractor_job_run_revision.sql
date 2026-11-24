@@ -1,0 +1,2 @@
+ALTER TABLE tractor_jobs
+  ADD COLUMN IF NOT EXISTS run_revision BIGINT NOT NULL DEFAULT 0;

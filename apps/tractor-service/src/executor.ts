@@ -48,6 +48,8 @@ export interface JobExecutorDeps {
   beforeStage?: (job: TractorJob, stage: TractorJobStage) => Promise<{ passed: boolean; commandId?: string; commandStatus?: string }>;
   /** 安全处置前核对控制侧真实状态；QUEUED 指令只能取消，SENT/ACKED 才能暂停 */
   commandOf?: (tenantId: string, commandId: string) => Promise<{ status: string } | null>;
+  /** 按幂等键核对控制侧指令，用于下发响应丢失后找回 RESUME */
+  commandByIdempotencyKey?: (tenantId: string, idempotencyKey: string) => Promise<{ id: string; status: string } | null>;
   /** 原子取消尚未被网关领取的 QUEUED 指令；与网关领取共用版本 CAS */
   cancelCommand?: (tenantId: string, commandId: string, reason: string) => Promise<boolean>;
   /** 安全处置指令的确认超时（毫秒），缺省 30 秒 */
@@ -122,6 +124,37 @@ export function tractorStageIdempotencyKey(jobId: string, stageId: string): stri
   return `tractor:${jobId}:stage:${stageId}`;
 }
 
+interface PendingResume {
+  idempotencyKey: string;
+  targetCommandId: string;
+  requestedAt: string;
+}
+
+export function pendingResumeOf(job: TractorJob): PendingResume | null {
+  const value = job.parameters.pendingResume;
+  if (!value || typeof value !== "object") return null;
+  const pending = value as Record<string, unknown>;
+  return typeof pending.idempotencyKey === "string" && pending.idempotencyKey !== ""
+    && typeof pending.targetCommandId === "string" && pending.targetCommandId !== ""
+    && typeof pending.requestedAt === "string"
+    ? { idempotencyKey: pending.idempotencyKey, targetCommandId: pending.targetCommandId, requestedAt: pending.requestedAt }
+    : null;
+}
+
+function parametersWithoutPendingResume(job: TractorJob): Record<string, unknown> {
+  const parameters = { ...job.parameters };
+  delete parameters.pendingResume;
+  return parameters;
+}
+
+async function clearPendingResume(deps: JobExecutorDeps, job: TractorJob): Promise<TractorJob> {
+  const updated = await deps.jobs.updateJob(job.tenantId, job.id, {
+    parameters: parametersWithoutPendingResume(job),
+  }, { expectedStatus: "PAUSED", expectedRevision: job.revision });
+  if (!updated) throw new TractorCommandError("等待控制确认期间作业状态已变化，请刷新后重试");
+  return updated;
+}
+
 export async function recoveryCommand(
   stage: TractorJobStage,
   findByIdempotencyKey: (key: string) => Promise<{ id: string; status: string } | null>,
@@ -141,6 +174,7 @@ async function confirmSafetyCommand(
   job: TractorJob,
   type: "PAUSE" | "RESUME" | "ESTOP",
   targetCommandId: string | null,
+  idempotencyKey = `tractor:${job.id}:safety:${type}:${randomUUID()}`,
 ): Promise<string> {
   const dispatched = await deps.dispatch({
     tenantId: job.tenantId,
@@ -149,10 +183,15 @@ async function confirmSafetyCommand(
     type,
     parameters: targetCommandId === null ? {} : { targetCommandId },
     operator: job.operator,
-    idempotencyKey: `tractor:${job.id}:safety:${type}:${randomUUID()}`,
-  }).catch(() => null);
+    idempotencyKey,
+  }).catch(() => {
+    throw new TractorCommandError(`${type} 指令下发结果未知，作业状态未变更`, 503);
+  });
   if (!dispatched) throw new TractorCommandError(`${type} 指令下发被控制侧拒绝，作业状态未变更`);
-  const result = await deps.waitCommand(job.tenantId, job.deviceId, dispatched.commandId, deps.safetyCommandTimeoutMs ?? 30_000);
+  const result = await deps.waitCommand(job.tenantId, job.deviceId, dispatched.commandId, deps.safetyCommandTimeoutMs ?? 30_000)
+    .catch(() => {
+      throw new TractorCommandError(`${type} 指令确认结果未知，作业状态未变更`, 503, dispatched.commandId);
+    });
   if (result !== "DONE") {
     const detail = result === "TIMEOUT" ? "确认超时" : result === "UNAVAILABLE" ? "确认服务不可用" : "执行失败";
     throw new TractorCommandError(`${type} 指令${detail}，作业状态未变更`, 409, dispatched.commandId);
@@ -197,11 +236,11 @@ export async function recoverUnfinishedJobs(
   },
 ): Promise<void> {
   const recoverable: TractorJob[] = [];
-  for (const status of ["PLANNED", "RUNNING"] as const) {
+  for (const status of ["PLANNED", "RUNNING", "PAUSED", "SAFETY_UNKNOWN"] as const) {
     const size = 200;
     for (let offset = 0; ; offset += size) {
       const records = await deps.jobs.listJobs({ tenantId: deps.tenantId, status, limit: size, offset });
-      recoverable.push(...records);
+      recoverable.push(...records.filter((job) => status !== "PAUSED" || pendingResumeOf(job) !== null));
       if (records.length < size) break;
     }
   }
@@ -218,7 +257,8 @@ export async function recoverUnfinishedJobs(
       const queue = queues[nextQueue++]!;
       for (const job of queue) {
         try {
-          await deps.executor.run(job, job.status === "RUNNING" ? { started: true } : undefined);
+          if (job.status === "PAUSED" || job.status === "SAFETY_UNKNOWN") await deps.executor.resume(job.tenantId, job.id);
+          else await deps.executor.run(job, job.status === "RUNNING" ? { started: true } : undefined);
         } catch (error) {
           deps.onError?.(error instanceof Error ? error : new Error(String(error)), job.id);
         }
@@ -262,6 +302,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
         if (!started) return;
         job = started;
       }
+      const runRevision = job.runRevision;
       const stages = await deps.jobs.listStages(job.tenantId, job.id);
       let completed = job.currentStage;
       const completeStage = async (index: number, stage: TractorJobStage, commandId: string, detail: string): Promise<boolean> => {
@@ -270,7 +311,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
         }, { expectedStatus: ["PENDING", "SENT"], owner });
         if (!done) return false;
         completed = index + 1;
-        const advanced = await deps.jobs.updateJob(job.tenantId, job.id, { currentStage: completed }, { expectedStatus: "RUNNING", owner });
+        const advanced = await deps.jobs.updateJob(job.tenantId, job.id, { currentStage: completed }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
         if (!advanced) return false;
         job = advanced;
         return true;
@@ -281,7 +322,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
         }, { expectedStatus: ["PENDING", "SENT"], owner });
         await deps.jobs.updateJob(job.tenantId, job.id, {
           status: "FAILED", finishedAt: new Date().toISOString(), reason,
-        }, { expectedStatus: "RUNNING", owner });
+        }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
       };
       for (let index = job.currentStage; index < stages.length; index += 1) {
         if (!ownsLease) return;
@@ -301,7 +342,17 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
             }
             return { kind: "STOP" };
           }
-          const guard = deps.beforeStage ? await deps.beforeStage(job, stage) : { passed: true };
+          const guard = deps.beforeStage ? await deps.beforeStage(current, stage) : { passed: true };
+          const latest = await deps.jobs.findJob(job.tenantId, job.id);
+          if (!latest || latest.status !== "RUNNING" || latest.runRevision !== current.runRevision || latest.revision !== current.revision) {
+            if (ownsLease) {
+              await deps.jobs.updateStage(job.tenantId, stage.id, {
+                detail: `分步 ${stage.stage} 预检后作业状态或版本已变化，本步不再下发`,
+              }, { owner });
+            }
+            return { kind: "STOP" };
+          }
+          job = latest;
           const recoveredCommandId = guard.commandId;
           if (recoveredCommandId && guard.commandStatus === "DONE") {
             return { kind: "DONE", commandId: recoveredCommandId };
@@ -331,7 +382,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
             }, { owner });
             await deps.jobs.updateJob(job.tenantId, job.id, {
               status: "PAUSED", reason: `分步 ${stage.stage} 安全预检未通过`,
-            }, { expectedStatus: "RUNNING", owner });
+            }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
             return { kind: "STOP" };
           }
           let commandId = stage.commandId;
@@ -340,7 +391,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
           }
           if (stage.status !== "PENDING") {
             if (!ownsLease) return { kind: "STOP" };
-            await deps.jobs.updateJob(job.tenantId, job.id, { status: "FAILED", finishedAt: new Date().toISOString(), reason: `分步 ${stage.stage} 状态不可执行` }, { expectedStatus: "RUNNING", owner });
+            await deps.jobs.updateJob(job.tenantId, job.id, { status: "FAILED", finishedAt: new Date().toISOString(), reason: `分步 ${stage.stage} 状态不可执行` }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
             return { kind: "STOP" };
           }
           if (recoveredCommandId) {
@@ -361,7 +412,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
             if (!ownsLease) return { kind: "STOP" };
             if (!dispatched) {
               await deps.jobs.updateStage(job.tenantId, stage.id, { status: "FAILED", detail: "指令下发被控制侧拒绝" }, { expectedStatus: "PENDING", owner });
-              await deps.jobs.updateJob(job.tenantId, job.id, { status: "FAILED", finishedAt: new Date().toISOString(), reason: `分步 ${stage.stage} 下发被拒` }, { expectedStatus: "RUNNING", owner });
+              await deps.jobs.updateJob(job.tenantId, job.id, { status: "FAILED", finishedAt: new Date().toISOString(), reason: `分步 ${stage.stage} 下发被拒` }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
               return { kind: "STOP" };
             }
             commandId = dispatched.commandId;
@@ -384,7 +435,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
           }, { expectedStatus: "SENT", owner });
           await deps.jobs.updateJob(job.tenantId, job.id, {
             status: "PAUSED", reason: `分步 ${stage.stage} 已由设备暂停`,
-          }, { expectedStatus: "RUNNING", owner });
+          }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
           return;
         }
         if (result === "UNAVAILABLE") {
@@ -415,10 +466,10 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
         }, { expectedStatus: "SENT", owner });
         await deps.jobs.updateJob(job.tenantId, job.id, {
           status: "PAUSED", reason: `分步 ${stage.stage} 收口超时，已确认暂停`,
-        }, { expectedStatus: "RUNNING", owner });
+        }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
       }
       if (ownsLease) {
-        await deps.jobs.updateJob(job.tenantId, job.id, { status: "COMPLETED", currentStage: completed, finishedAt: new Date().toISOString(), reason: "全部分步完成" }, { expectedStatus: "RUNNING", owner });
+        await deps.jobs.updateJob(job.tenantId, job.id, { status: "COMPLETED", currentStage: completed, finishedAt: new Date().toISOString(), reason: "全部分步完成" }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
       }
     } catch (error) {
       onError(error instanceof Error ? error : new Error(String(error)), `run:${job.id}`);
@@ -436,9 +487,11 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
     if (!emergency && !targetCommandId) throw new TractorCommandError("当前没有可暂停的在途分步指令");
     const commandId = await confirmSafetyCommand(deps, job, commandType, targetCommandId);
     const updated = await deps.jobs.updateJob(tenantId, jobId, {
-      status: emergency ? "ESTOPPED" : "PAUSED",
-      reason: emergency ? "人工急停" : "人工暂停",
-    }, { expectedStatus: job.status });
+      status: emergency && job.status === "SAFETY_UNKNOWN" ? "SAFETY_UNKNOWN" : emergency ? "ESTOPPED" : "PAUSED",
+      reason: emergency && job.status === "SAFETY_UNKNOWN"
+        ? "人工急停已确认，仍需人工核实未知 RESUME 是否已取消"
+        : emergency ? "人工急停" : "人工暂停",
+    }, { expectedStatus: job.status, expectedRunRevision: job.runRevision });
     if (!updated) throw new TractorCommandError("等待控制确认期间作业状态已变化，请刷新后重试");
     if (emergency) {
       await recordSafetyEvent(deps, {
@@ -457,43 +510,72 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
   const resume = async (tenantId: string, jobId: string): Promise<TractorJob> => withJobAction(`${tenantId}:${jobId}`, async () => {
     const job = await deps.jobs.findJob(tenantId, jobId);
     if (!job) throw new TractorCommandError("作业不存在", 404);
-    if (job.status !== "PAUSED") throw new TractorCommandError("只有 PAUSED 作业可以恢复");
-    const stages = await deps.jobs.listStages(tenantId, job.id);
-    const stage = stages[job.currentStage];
-    if (!stage) throw new TractorCommandError("当前没有可恢复的分步");
-    if (stage.status === "FAILED" || stage.status === "SKIPPED") throw new TractorCommandError("当前分步不可恢复");
-    const unknownResume = async (resumeCommandId?: string): Promise<never> => {
-      const unknown = await deps.jobs.updateJob(tenantId, job.id, {
-        status: "SAFETY_UNKNOWN",
-        reason: "RESUME 指令结果未知，等待急停确认",
-      }, { expectedStatus: "PAUSED" });
-      if (!unknown) throw new TractorCommandError("等待控制确认期间作业状态已变化，请刷新后重试");
-      if (resumeCommandId && deps.commandOf && deps.cancelCommand) {
-        const resumeCommand = await deps.commandOf(tenantId, resumeCommandId).catch(() => null);
-        if (resumeCommand?.status === "QUEUED") {
-          await deps.cancelCommand(tenantId, resumeCommandId, "RESUME 确认结果未知，撤销排队恢复并急停").catch(() => false);
-        }
+    const pendingResume = pendingResumeOf(job);
+    if (job.status !== "PAUSED" && job.status !== "SAFETY_UNKNOWN") {
+      throw new TractorCommandError("只有 PAUSED 或 SAFETY_UNKNOWN 作业可以恢复");
+    }
+    const unknownResume = async (resumeCommandId?: string, resumeKey?: string, sourceJob: TractorJob = job): Promise<never> => {
+      let unknownJob = sourceJob;
+      if (job.status === "PAUSED") {
+        const unknown = await deps.jobs.updateJob(tenantId, job.id, {
+          status: "SAFETY_UNKNOWN",
+          reason: "RESUME 指令结果未知，等待急停确认",
+        }, { expectedStatus: "PAUSED", expectedRevision: sourceJob.revision });
+        if (!unknown) throw new TractorCommandError("等待控制确认期间作业状态已变化，请刷新后重试");
+        unknownJob = unknown;
       }
       await recordSafetyEvent(deps, {
         tenantId: job.tenantId, jobId: job.id, plotCode: job.plotCode, deviceId: job.deviceId,
         kind: "ESTOP", level: "CRITICAL",
-        message: "RESUME 指令未确认完成，设备可能仍在运行，作业转入 SAFETY_UNKNOWN 并尝试急停",
+        message: job.status === "SAFETY_UNKNOWN" ? "RESUME 指令仍未确认完成，持续对账并尝试急停" : "RESUME 指令未确认完成，设备可能仍在运行，作业转入 SAFETY_UNKNOWN 并尝试急停",
       });
+      let commandId = resumeCommandId;
+      const findResume = async (): Promise<void> => {
+        if (!commandId && resumeKey && deps.commandByIdempotencyKey) {
+          commandId = (await deps.commandByIdempotencyKey(tenantId, resumeKey).catch(() => null))?.id;
+        }
+      };
+      const inspectAndCancel = async (): Promise<string | undefined> => {
+        await findResume();
+        if (!commandId || !deps.commandOf) return undefined;
+        const before = await deps.commandOf(tenantId, commandId).catch(() => null);
+        if (before?.status !== "QUEUED") return before?.status;
+        if (!deps.cancelCommand) return "QUEUED";
+        await deps.cancelCommand(tenantId, commandId, "RESUME 确认结果未知，撤销排队恢复并急停").catch(() => false);
+        return (await deps.commandOf(tenantId, commandId).catch(() => null))?.status;
+      };
+      await inspectAndCancel();
       try {
         await confirmSafetyCommand(deps, job, "ESTOP", null);
       } catch {
         throw new TractorCommandError("恢复结果未知且急停尚未确认，作业保持 SAFETY_UNKNOWN，请人工核实设备");
       }
+      const resumeStatus = await inspectAndCancel();
+      const nonDispatchable = resumeStatus !== undefined && ["ACKED", "PAUSED", "DONE", "FAILED", "CANCELLED"].includes(resumeStatus);
+      if (!nonDispatchable) {
+        throw new TractorCommandError("恢复结果未知且 RESUME 尚未证实不可再下发，作业保持 SAFETY_UNKNOWN，请人工核实设备", 503, commandId);
+      }
       const stopped = await deps.jobs.updateJob(tenantId, job.id, {
         status: "ESTOPPED",
-        reason: "恢复结果未知，急停已确认",
+        reason: "恢复结果未知，RESUME 已不可再下发且急停已确认",
         finishedAt: new Date().toISOString(),
-      }, { expectedStatus: "SAFETY_UNKNOWN" });
+        parameters: parametersWithoutPendingResume(unknownJob),
+      }, { expectedStatus: "SAFETY_UNKNOWN", expectedRevision: unknownJob.revision });
       if (!stopped) throw new TractorCommandError("急停确认期间作业状态已变化，请刷新后重试");
-      throw new TractorCommandError("恢复结果未知，已急停确认并将作业收口为 ESTOPPED");
+      throw new TractorCommandError("恢复结果未知，RESUME 已不可再下发，急停确认后将作业收口为 ESTOPPED");
     };
+    if (pendingResume || job.status === "SAFETY_UNKNOWN") {
+      return unknownResume(undefined, pendingResume?.idempotencyKey);
+    }
+    const stages = await deps.jobs.listStages(tenantId, job.id);
+    const stage = stages[job.currentStage];
+    if (!stage) throw new TractorCommandError("当前没有可恢复的分步");
+    if (stage.status === "FAILED" || stage.status === "SKIPPED") throw new TractorCommandError("当前分步不可恢复");
+    let resumable = job;
     const start = async (currentStage = job.currentStage): Promise<TractorJob> => {
-      const updated = await deps.jobs.updateJob(tenantId, job.id, { status: "RUNNING", currentStage, reason: "" }, { expectedStatus: "PAUSED" });
+      const updated = await deps.jobs.updateJob(tenantId, job.id, {
+        status: "RUNNING", currentStage, reason: "", parameters: parametersWithoutPendingResume(resumable),
+      }, { expectedStatus: "PAUSED", expectedRevision: resumable.revision });
       if (!updated) throw new TractorCommandError("等待控制确认期间作业状态已变化，请刷新后重试");
       void run(updated, { started: true });
       return updated;
@@ -505,7 +587,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       const failed = await deps.jobs.updateJob(tenantId, job.id, {
         status: "FAILED", finishedAt: new Date().toISOString(),
         reason: `分步 ${stage.stage} 控制侧${status === "CANCELLED" ? "已取消" : "执行失败"}`,
-      }, { expectedStatus: "PAUSED" });
+      }, { expectedStatus: "PAUSED", expectedRevision: resumable.revision });
       if (!failed) throw new TractorCommandError("等待控制确认期间作业状态已变化，请刷新后重试");
       throw new TractorCommandError(`当前分步控制侧${status === "CANCELLED" ? "已取消" : "执行失败"}，作业已收口为 FAILED`);
     };
@@ -542,10 +624,23 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       if (outcome === "FAILED" || outcome === "CANCELLED") return failRecovered(targetCommandId, outcome);
     }
     if (targetCommandId && (commandStatus === "PAUSED" || (stage.status === "SENT" && commandStatus === "UNKNOWN"))) {
+      const resumeKey = `tractor:${job.id}:safety:RESUME:${randomUUID()}`;
+      const intent = await deps.jobs.updateJob(tenantId, job.id, {
+        parameters: {
+          ...job.parameters,
+          pendingResume: { idempotencyKey: resumeKey, targetCommandId, requestedAt: new Date().toISOString() },
+        },
+      }, { expectedStatus: "PAUSED", expectedRevision: job.revision });
+      if (!intent) throw new TractorCommandError("恢复意图持久化前作业状态已变化，请刷新后重试");
+      resumable = intent;
       try {
-        await confirmSafetyCommand(deps, job, "RESUME", targetCommandId);
+        await confirmSafetyCommand(deps, job, "RESUME", targetCommandId, resumeKey);
       } catch (error) {
-        return unknownResume(error instanceof TractorCommandError ? error.commandId : undefined);
+        if (error instanceof TractorCommandError && error.commandId === undefined && error.status < 500) {
+          await clearPendingResume(deps, intent);
+          throw error;
+        }
+        return unknownResume(error instanceof TractorCommandError ? error.commandId : undefined, resumeKey, intent);
       }
     }
     return start();

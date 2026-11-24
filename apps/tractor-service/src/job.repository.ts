@@ -25,6 +25,10 @@ export interface TractorJob {
   operationType: TractorOperationType;
   parameters: Record<string, unknown>;
   status: TractorJobStatus;
+  /** 单调递增版本：跨实例等待控制确认期间用 CAS 拒绝过期写入 */
+  revision: number;
+  /** 执行周期版本：仅从非 RUNNING 进入 RUNNING 时递增，用于安全结果 fencing */
+  runRevision: number;
   /** 已完成分步数，执行器据此断点续跑 */
   currentStage: number;
   operator: string;
@@ -84,6 +88,8 @@ export interface TractorJobQuery {
 /** CAS 条件：只有仍处于期望状态的作业/分步才允许推进，避免覆盖并发急停或重复回执。 */
 export interface TractorJobUpdateOptions {
   expectedStatus?: TractorJobStatus | readonly TractorJobStatus[];
+  expectedRevision?: number;
+  expectedRunRevision?: number;
   /** 执行器写入必须持有当前租约，过期执行者不能覆盖接管者的状态 */
   owner?: string;
 }
@@ -104,6 +110,7 @@ export interface TractorJobRepository {
   claimJob(tenantId: string, id: string, owner: string, leaseMs: number, expectedStatus?: TractorJobStatus | readonly TractorJobStatus[]): Promise<TractorJob | null>;
   renewJobClaim(tenantId: string, id: string, owner: string, leaseMs: number): Promise<boolean>;
   releaseJobClaim(tenantId: string, id: string, owner: string): Promise<void>;
+  withJobLock<T>(tenantId: string, id: string, action: () => Promise<T>): Promise<T>;
 }
 
 function toJob(row: Record<string, unknown>): TractorJob {
@@ -115,6 +122,8 @@ function toJob(row: Record<string, unknown>): TractorJob {
     operationType: String(row.operation_type) as TractorOperationType,
     parameters: (row.parameters ?? {}) as Record<string, unknown>,
     status: String(row.status) as TractorJobStatus,
+    revision: Number(row.revision ?? 0),
+    runRevision: Number(row.run_revision ?? 0),
     currentStage: Number(row.current_stage),
     operator: String(row.operator ?? ""),
     reason: String(row.reason ?? ""),
@@ -158,6 +167,8 @@ export class InMemoryTractorJobRepository implements TractorJobRepository {
       id: ulid(),
       ...input,
       status: "PLANNED",
+      revision: 0,
+      runRevision: 0,
       currentStage: 0,
       createdAt: now,
       updatedAt: now,
@@ -214,8 +225,15 @@ export class InMemoryTractorJobRepository implements TractorJobRepository {
 
   async updateJob(tenantId: string, id: string, patch: Partial<Omit<TractorJob, "id" | "tenantId">>, options?: TractorJobUpdateOptions): Promise<TractorJob | null> {
     const job = this.jobs.get(id);
-    if (!job || job.tenantId !== tenantId || !matchesStatus(job.status, options?.expectedStatus) || !this.ownsActiveClaim(id, options?.owner)) return null;
-    const next: TractorJob = { ...job, ...patch, updatedAt: new Date().toISOString() };
+    if (!job || job.tenantId !== tenantId || !matchesStatus(job.status, options?.expectedStatus)
+      || (options?.expectedRevision !== undefined && job.revision !== options.expectedRevision)
+      || (options?.expectedRunRevision !== undefined && job.runRevision !== options.expectedRunRevision)
+      || !this.ownsActiveClaim(id, options?.owner)) return null;
+    const next: TractorJob = {
+      ...job, ...patch, revision: job.revision + 1,
+      runRevision: job.runRevision + (patch.status === "RUNNING" && job.status !== "RUNNING" ? 1 : 0),
+      updatedAt: new Date().toISOString(),
+    };
     this.jobs.set(id, structuredClone(next));
     return structuredClone(next);
   }
@@ -248,11 +266,15 @@ export class InMemoryTractorJobRepository implements TractorJobRepository {
   async releaseJobClaim(tenantId: string, id: string, owner: string): Promise<void> {
     if (this.jobs.get(id)?.tenantId === tenantId && this.claims.get(id)?.owner === owner) this.claims.delete(id);
   }
+
+  async withJobLock<T>(_tenantId: string, _id: string, action: () => Promise<T>): Promise<T> {
+    return action();
+  }
 }
 
 /** SQL 实现：迁移 065 的 tractor_jobs / tractor_job_stages */
 export class SqlTractorJobRepository implements TractorJobRepository {
-  constructor(private readonly client: PrismaClientLike) {}
+  constructor(private readonly client: PrismaClientLike, private readonly jobLockTimeoutMs = 60_000) {}
 
   async createJob(tx: Tx | undefined, input: CreateTractorJobInput): Promise<TractorJob> {
     const client = tx ?? this.client;
@@ -355,8 +377,11 @@ export class SqlTractorJobRepository implements TractorJobRepository {
       });
       conditions.push(`(${statuses.join(" OR ")})`);
     }
+    if (options?.expectedRevision !== undefined) add("revision = ?", options.expectedRevision);
+    if (options?.expectedRunRevision !== undefined) add("run_revision = ?", options.expectedRunRevision);
+    const runRevisionSet = patch.status === "RUNNING" ? ", run_revision = run_revision + CASE WHEN status <> 'RUNNING' THEN 1 ELSE 0 END" : "";
     const rows = await this.client.$queryRawUnsafe(
-      `UPDATE tractor_jobs SET ${columns.map((column, index) => `${column} = $${index + 1}`).join(", ")} WHERE ${conditions.join(" AND ")} RETURNING *`,
+      `UPDATE tractor_jobs SET revision = revision + 1${runRevisionSet}, ${columns.map((column, index) => `${column} = $${index + 1}`).join(", ")} WHERE ${conditions.join(" AND ")} RETURNING *`,
       ...values, ...queryParams,
     ) as Record<string, unknown>[];
     return rows[0] ? toJob(rows[0]) : null;
@@ -425,7 +450,7 @@ export class SqlTractorJobRepository implements TractorJobRepository {
       `UPDATE tractor_jobs SET execution_until = $3
        WHERE tenant_id = $1 AND id = $2 AND execution_owner = $4 AND execution_until > $5
        RETURNING id`,
-      new Date(Date.now() + leaseMs), tenantId, id, owner, new Date(),
+      tenantId, id, new Date(Date.now() + leaseMs), owner, new Date(),
     ) as Array<{ id: string }>;
     return rows.length > 0;
   }
@@ -436,5 +461,25 @@ export class SqlTractorJobRepository implements TractorJobRepository {
        WHERE tenant_id = $1 AND id = $2 AND execution_owner = $3`,
       tenantId, id, owner,
     );
+  }
+
+  async withJobLock<T>(tenantId: string, id: string, action: () => Promise<T>): Promise<T> {
+    const key = `tractor-job:${tenantId}:${id}`;
+    const deadline = Date.now() + this.jobLockTimeoutMs;
+    let locked = false;
+    try {
+      while (!locked) {
+        const rows = await this.client.$queryRawUnsafe<Array<{ locked: boolean }>>(
+          "SELECT pg_try_advisory_lock(hashtext($1)) AS locked", key,
+        );
+        locked = rows[0]?.locked === true;
+        if (locked) break;
+        if (Date.now() >= deadline) throw new Error(`等待作业 ${id} 分布式锁超时`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return await action();
+    } finally {
+      if (locked) await this.client.$queryRawUnsafe("SELECT pg_advisory_unlock(hashtext($1))", key);
+    }
   }
 }

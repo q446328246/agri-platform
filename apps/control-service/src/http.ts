@@ -12,7 +12,7 @@ import { buildFinishedEvent, DEFAULT_FERTILIZER_DENSITY_KG_PER_L } from "./comma
 import { buildIrrigationPlan, executionPlanOf, validateCommandParameters } from "./command-spec.js";
 import type { IrrigationPlanInput } from "./command-spec.js";
 import type { ControlAuthorization, ControlAuthorizationRepository } from "./authorization.repository.js";
-import { CONTROL_STATUSES, canTransition, isCommandOverdue, pendingMinutesOf } from "./control.repository.js";
+import { CONTROL_STATUSES, TIMEOUT_ESTOP_IDEMPOTENCY_PREFIX, canTransition, isCommandOverdue, pendingMinutesOf } from "./control.repository.js";
 import { InMemoryControlCommandRepository } from "./control.repository.js";
 import type { ControlCommand, ControlCommandRepository, ControlCommandStatus, ControlCommandType, ControlOrigin } from "./control.repository.js";
 
@@ -108,9 +108,13 @@ function requiredText(value: unknown, field: string): string {
   return value.trim();
 }
 
-/** 回执时间：缺省取当前时间，给了就必须可解析 */
+function hasExplicitReceiptAt(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== "";
+}
+
+/** 回执时间：普通回执缺省取当前时间；可能解除暂停的回执必须显式带时刻 */
 function receiptAt(value: unknown): string {
-  if (value === undefined || value === null || value === "") return new Date().toISOString();
+  if (!hasExplicitReceiptAt(value)) return new Date().toISOString();
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new Error("at 需为 ISO 时间字符串");
   return new Date(value).toISOString();
 }
@@ -276,7 +280,7 @@ export function createControlHttpServer(
           send(res, 400, null, traceId, "控制指令类型非法");
           return;
         }
-        const parameters = body.parameters && typeof body.parameters === "object" ? (body.parameters as Record<string, unknown>) : {};
+        const parameters = body.parameters && typeof body.parameters === "object" ? { ...body.parameters as Record<string, unknown> } : {};
         let idempotencyKey: string | undefined;
         if (body.idempotencyKey !== undefined) {
           if (typeof body.idempotencyKey !== "string" || body.idempotencyKey.trim() === "" || body.idempotencyKey.trim().length > 200) {
@@ -284,6 +288,10 @@ export function createControlHttpServer(
             return;
           }
           idempotencyKey = body.idempotencyKey.trim();
+          if (idempotencyKey.startsWith(TIMEOUT_ESTOP_IDEMPOTENCY_PREFIX)) {
+            send(res, 400, null, traceId, "idempotencyKey 使用系统保留前缀");
+            return;
+          }
         }
         // 水肥类指令的参数会直接决定用水量与配比，下发前必须校验，避免脏参数进入执行队列
         const parameterErrors = validateCommandParameters(type, parameters);
@@ -353,6 +361,7 @@ export function createControlHttpServer(
             send(res, 400, null, traceId, `${type} 指令需要 parameters.targetCommandId 指向目标指令`);
             return;
           }
+          parameters.targetCommandId = targetId;
           const linkedTarget = await repository.find(command.tenantId, targetId);
           if (!linkedTarget) { send(res, 404, null, traceId, "目标指令不存在"); return; }
           if (linkedTarget.deviceId !== command.deviceId) {
@@ -491,6 +500,7 @@ export function createControlHttpServer(
         const message = receiptText(body.message, "message");
         const result = receiptResult(body.result);
         // 报文本身先验完再查状态机：`at` 不合法属于请求体错误，不该因为指令恰好在别的状态被报成 409
+        const explicitAt = hasExplicitReceiptAt(body.at);
         const at = receiptAt(body.at);
         if (status === "FAILED" && message === undefined) throw new Error("FAILED 回执必须说明失败原因（message）");
         const target = await repository.find(tenantId, requiredText(body.commandId, "commandId"));
@@ -500,6 +510,21 @@ export function createControlHttpServer(
         // 急停/断电的 DONE 必须有到位确认，否则等于「没人确认设备真的停了」就结单
         if (CONFIRM_REQUIRED_TYPES.includes(target.type) && status === "DONE" && result?.confirmed !== true) {
           send(res, 400, null, traceId, `${target.type === "ESTOP" ? "急停" : "断电"}指令的执行完成回执必须带到位确认（result.confirmed=true）`);
+          return;
+        }
+        if (status === "ACKED" && target.status === "PAUSED") {
+          if (!explicitAt) {
+            send(res, 400, null, traceId, "解除暂停的 ACKED 回执必须显式提供 at，不能把迟到回执当作新恢复");
+            return;
+          }
+          if (target.pausedAt !== undefined && Date.parse(at) <= Date.parse(target.pausedAt)) {
+            send(res, 409, null, traceId, "解除暂停的 ACKED 回执时刻必须晚于最近一次暂停，拒绝跨周期陈旧回执");
+            return;
+          }
+        }
+        if (status === "PAUSED" && target.status === "ACKED" && target.resumedAt !== undefined
+          && Date.parse(at) <= Date.parse(target.resumedAt)) {
+          send(res, 409, null, traceId, "暂停回执时刻必须晚于目标最近一次恢复，拒绝跨周期陈旧回执");
           return;
         }
         // 同态回执幂等返回先于联动校验：重复投递的 DONE 不该因目标状态已推进而被误报 409
@@ -512,9 +537,13 @@ export function createControlHttpServer(
           const linkedTarget = targetId ? await repository.find(tenantId, targetId) : null;
           if (!linkedTarget) { send(res, 409, null, traceId, "目标指令不存在，无法联动结单，请核实后改报 FAILED"); return; }
           const desired: ControlCommandStatus = target.type === "PAUSE" ? "PAUSED" : "ACKED";
+          if (target.type === "RESUME" && linkedTarget.status === "PAUSED" && !explicitAt) {
+            send(res, 400, null, traceId, "解除暂停的 RESUME 结单回执必须显式提供 at，不能把迟到回执当作新恢复");
+            return;
+          }
           const staleBefore = target.type === "PAUSE" ? linkedTarget.resumedAt : linkedTarget.pausedAt;
-          if (staleBefore !== undefined && Date.parse(at) < Date.parse(staleBefore)) {
-            send(res, 409, null, traceId, `${target.type} 指令结单时刻早于目标最近一次${target.type === "PAUSE" ? "恢复" : "暂停"}，拒绝陈旧联动`);
+          if (staleBefore !== undefined && Date.parse(at) <= Date.parse(staleBefore)) {
+            send(res, 409, null, traceId, `${target.type} 指令结单时刻必须晚于目标最近一次${target.type === "PAUSE" ? "恢复" : "暂停"}，拒绝陈旧联动`);
             return;
           }
           try {

@@ -4,7 +4,7 @@ import type { Server } from "node:http";
 import { PgClientAdapter } from "@agri/db";
 
 import { createControlHttpServer } from "../src/http.js";
-import { InMemoryControlCommandRepository, SqlControlCommandRepository, canTransition, pendingMinutesOf } from "../src/control.repository.js";
+import { InMemoryControlCommandRepository, SqlControlCommandRepository, canTransition, effectiveTimeoutMin, pendingMinutesOf } from "../src/control.repository.js";
 import type { ControlCommand } from "../src/control.repository.js";
 
 /**
@@ -71,6 +71,14 @@ async function dataOf(response: Response): Promise<any> {
 }
 
 describe("指令生命周期跃迁表", () => {
+  it("动态超时只接受数值作业时长，基础阈值向上取整且至少一分钟", () => {
+    expect(effectiveTimeoutMin(command({ parameters: { plan: { totalDurationMin: "120" } } }), 15.2)).toBe(16);
+    expect(effectiveTimeoutMin(command({ parameters: { plan: { totalDurationMin: true } } }), 15.2)).toBe(16);
+    expect(effectiveTimeoutMin(command({ parameters: { plan: { totalDurationMin: 120.2 } } }), 15.2)).toBe(122);
+    expect(effectiveTimeoutMin(command(), 0)).toBe(1);
+    expect(effectiveTimeoutMin(command(), Number.NaN)).toBe(1);
+  });
+
   it("只允许沿 入队→下发→接收→到位 推进，任一在途状态可失败收口", () => {
     expect(canTransition("QUEUED", "SENT")).toBe(true);
     expect(canTransition("SENT", "ACKED")).toBe(true);
@@ -264,8 +272,25 @@ describe("设备通道：下发确认与执行回执", () => {
       status: "PAUSED",
       at: "2026-11-12T00:04:00.000Z",
     });
-    expect(stale.status).toBe(400);
-    expect((await stale.json() as { message: string }).message).toContain("早于上一次状态推进");
+    expect(stale.status).toBe(409);
+    expect((await stale.json() as { message: string }).message).toContain("拒绝跨周期陈旧回执");
+    expect((await repository.find(TENANT, "cmd-resumed"))?.status).toBe("ACKED");
+  });
+
+  it("直接 PAUSED 回执时刻等于最近恢复时刻时拒绝跨周期暂停", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "cmd-resumed", status: "ACKED", version: 5,
+        sentAt: "2026-11-12T00:01:00.000Z", ackedAt: "2026-11-12T00:02:00.000Z",
+        pausedAt: "2026-11-12T00:03:00.000Z", resumedAt: "2026-11-12T00:05:00.000Z",
+      }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+    const response = await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "cmd-resumed", status: "PAUSED", at: "2026-11-12T00:05:00.000Z",
+    });
+    expect(response.status).toBe(409);
+    expect((await response.json() as { message: string }).message).toContain("必须晚于目标最近一次恢复");
     expect((await repository.find(TENANT, "cmd-resumed"))?.status).toBe("ACKED");
   });
 
@@ -298,6 +323,91 @@ describe("设备通道：下发确认与执行回执", () => {
     expect(staleResume.status).toBe(409);
     expect((await staleResume.json() as { message: string }).message).toContain("拒绝陈旧联动");
     expect((await repository.find(TENANT, "job"))?.status).toBe("PAUSED");
+    const equalResume = await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "stale-resume", status: "DONE", at: "2026-11-12T00:06:00.000Z",
+    });
+    expect(equalResume.status).toBe(409);
+    expect((await repository.find(TENANT, "job"))?.status).toBe("PAUSED");
+  });
+
+  it("创建暂停指令时归一化目标编号，结单联动使用存储后的目标", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "cmd-target", status: "SENT", version: 2, sentAt: "2026-11-12T00:01:00.000Z" }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+    const created = await dataOf(await postJson(base, "/api/v1/control/commands", {
+      deviceId: "device-fert-001", plotCode: "P-1", type: "PAUSE",
+      parameters: { targetCommandId: "  cmd-target  " },
+    }, CONFIRM));
+    expect(created.parameters).toEqual({ targetCommandId: "cmd-target" });
+
+    const queued = await repository.find(TENANT, created.id);
+    expect(await repository.transition(TENANT, {
+      id: created.id, status: "SENT", at: "2026-11-12T00:02:00.000Z", version: queued!.version,
+    })).not.toBeNull();
+    expect((await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: created.id, status: "DONE", at: "2026-11-12T00:03:00.000Z",
+    })).status).toBe(200);
+    expect((await repository.find(TENANT, "cmd-target"))?.status).toBe("PAUSED");
+  });
+
+  it("人工接口拒绝占用系统超时急停幂等键", async () => {
+    const base = await start(createControlHttpServer());
+    const response = await postJson(base, "/api/v1/control/commands", {
+      deviceId: "device-fert-001", plotCode: "P-1", type: "ESTOP",
+      idempotencyKey: "control-timeout-estop:forged",
+    }, CONFIRM);
+    expect(response.status).toBe(400);
+    expect((await response.json() as { message: string }).message).toContain("系统保留前缀");
+  });
+
+  it("迟到 ACKED 未显式带时刻时不能解除暂停", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "cmd-paused", status: "PAUSED", version: 4,
+        sentAt: "2026-11-12T00:01:00.000Z", ackedAt: "2026-11-12T00:02:00.000Z",
+        pausedAt: "2026-11-12T00:03:00.000Z",
+      }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+    const response = await postJson(base, "/api/v1/control/device/receipt", { commandId: "cmd-paused", status: "ACKED" });
+    expect(response.status).toBe(400);
+    expect((await response.json() as { message: string }).message).toContain("必须显式提供 at");
+    expect((await repository.find(TENANT, "cmd-paused"))).toMatchObject({ status: "PAUSED", version: 4 });
+  });
+
+  it("解除暂停的 ACKED 时刻等于暂停时刻时仍拒绝跨周期回执", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "cmd-paused", status: "PAUSED", version: 4,
+        sentAt: "2026-11-12T00:01:00.000Z", ackedAt: "2026-11-12T00:02:00.000Z",
+        pausedAt: "2026-11-12T00:03:00.000Z",
+      }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+    const response = await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "cmd-paused", status: "ACKED", at: "2026-11-12T00:03:00.000Z",
+    });
+    expect(response.status).toBe(409);
+    expect((await response.json() as { message: string }).message).toContain("必须晚于最近一次暂停");
+    expect((await repository.find(TENANT, "cmd-paused"))?.status).toBe("PAUSED");
+  });
+
+  it("迟到 RESUME 结单未显式带时刻时不能解除暂停", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "cmd-paused", status: "PAUSED", version: 4,
+        sentAt: "2026-11-12T00:01:00.000Z", ackedAt: "2026-11-12T00:02:00.000Z",
+        pausedAt: "2026-11-12T00:03:00.000Z",
+      }),
+      command({ id: "cmd-resume", type: "RESUME", status: "SENT", version: 2, sentAt: "2026-11-12T00:04:00.000Z", parameters: { targetCommandId: "cmd-paused" } }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+    const response = await postJson(base, "/api/v1/control/device/receipt", { commandId: "cmd-resume", status: "DONE" });
+    expect(response.status).toBe(400);
+    expect((await response.json() as { message: string }).message).toContain("必须显式提供 at");
+    expect((await repository.find(TENANT, "cmd-paused"))?.status).toBe("PAUSED");
+    expect((await repository.find(TENANT, "cmd-resume"))?.status).toBe("SENT");
   });
 
   it("联动暂停按目标完整生命周期校验时刻，不能把较晚的接收状态倒写为暂停", async () => {

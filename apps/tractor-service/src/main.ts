@@ -96,7 +96,8 @@ function createControlClient(baseUrl: string) {
         if (!response.ok) throw new Error(`控制服务返回 ${response.status}`);
         const payload = (await response.json()) as { data?: { id?: string } };
         const commandId = payload.data?.id;
-        return commandId ? { commandId } : null;
+        if (!commandId) throw new Error("控制服务未返回指令标识，下发结果未知");
+        return { commandId };
       } catch (error) {
         throw new Error(`控制服务不可用：${error instanceof Error ? error.message : String(error)}`);
       }
@@ -292,7 +293,7 @@ async function bootstrap(): Promise<void> {
   if (mode === "sql") {
     client = PgClientAdapter.fromUrl(resolveDatabaseUrl(process.env.DB_URL));
     await client.$connect();
-    jobs = new SqlTractorJobRepository(client);
+    jobs = new SqlTractorJobRepository(client, envNumber("TRACTOR_JOB_LOCK_TIMEOUT_MS", 60_000));
     safetyEvents = new SqlTractorSafetyEventRepository(client);
     trajectories = new SqlTrajectoryRepository(client);
     const store: EventLogStore = new PgEventLogStore(client);
@@ -319,7 +320,11 @@ async function bootstrap(): Promise<void> {
     return reachable ? "TIMEOUT" : "UNAVAILABLE";
   };
 
-  const withJobAction = createJobActionLock();
+  const localJobActionLock = createJobActionLock();
+  const withJobAction: typeof localJobActionLock = (key, action) => localJobActionLock(key, () => {
+    const separator = key.indexOf(":");
+    return jobs.withJobLock(key.slice(0, separator), key.slice(separator + 1), action);
+  });
   const executor = createJobExecutor({
     withJobAction,
     jobs,
@@ -350,6 +355,7 @@ async function bootstrap(): Promise<void> {
       };
     },
     commandOf: (tenant, commandId) => control.commandOf(tenant, commandId),
+    commandByIdempotencyKey: (tenant, key) => control.commandByIdempotencyKey(tenant, key),
     cancelCommand: (tenant, commandId, reason) => control.cancelCommand(tenant, commandId, reason),
     safetyCommandTimeoutMs: envNumber("TRACTOR_SAFETY_COMMAND_TIMEOUT_MS", 30_000),
     ...(publish ? { publish } : {}),
@@ -364,6 +370,7 @@ async function bootstrap(): Promise<void> {
     fetchRtk: (deviceId) => telemetry.fetchRtk(tenantId, deviceId),
     insideGeofence: (plotCode, lng, lat) => insideGeofence(tenantId, plotCode, lng, lat),
     dispatch: control.dispatch,
+    reconcileSafetyUnknown: (job) => executor.resume(job.tenantId, job.id),
     waitCommand,
     safetyCommandTimeoutMs: envNumber("TRACTOR_SAFETY_COMMAND_TIMEOUT_MS", 30_000),
     ...(publish ? { publish } : {}),

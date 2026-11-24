@@ -6,6 +6,7 @@ import { SqlControlCommandRepository } from "../src/control.repository.js";
 import type { ControlCommand } from "../src/control.repository.js";
 
 const databaseUrl = process.env.DB_URL;
+const MINUTE = 60_000;
 
 function command(id: string, tenantId: string, overrides: Partial<ControlCommand> = {}): ControlCommand {
   return {
@@ -45,6 +46,77 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 互锁与动态超时�
       const overdue = await repository.listOverdue(15, Date.now(), 50);
       expect(overdue.map((item) => item.id)).toContain(short.id);
       expect(overdue.map((item) => item.id)).not.toContain(long.id);
+    } finally {
+      await client.$executeRawUnsafe("DELETE FROM control_commands WHERE tenant_id = $1", tenantId);
+      await client.$disconnect();
+    }
+  });
+
+  it("SQL 超时扫描使用注入时钟、数值类型与向上取整阈值", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const repository = new SqlControlCommandRepository(client);
+    const tenantId = "tenant-smoke-control-clock";
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const nowMs = Date.now();
+    try {
+      const injectedDue = command(`injected-due-${suffix}`, tenantId, {
+        deviceId: `device-clock-due-${suffix}`, createdAt: new Date(nowMs - 10 * MINUTE).toISOString(),
+      });
+      const notDue = command(`fractional-not-due-${suffix}`, tenantId, {
+        deviceId: `device-clock-not-due-${suffix}`, createdAt: new Date(nowMs - 9.5 * MINUTE).toISOString(),
+      });
+      const stringPlan = command(`string-plan-${suffix}`, tenantId, {
+        deviceId: `device-clock-string-${suffix}`, createdAt: new Date(nowMs - 20 * MINUTE).toISOString(),
+        parameters: { plan: { totalDurationMin: "120" } },
+      });
+      expect(await repository.create(injectedDue)).not.toBeNull();
+      expect(await repository.create(notDue)).not.toBeNull();
+      expect(await repository.create(stringPlan)).not.toBeNull();
+
+      const overdue = await repository.listOverdue(15, nowMs, 50);
+      expect(overdue.map((item) => item.id)).not.toContain(injectedDue.id);
+      expect(overdue.map((item) => item.id)).not.toContain(notDue.id);
+      expect(overdue.map((item) => item.id)).toContain(stringPlan.id);
+
+      const future = await repository.listOverdue(15.2, nowMs + 6 * MINUTE + 30_000, 50);
+      expect(future.map((item) => item.id)).toContain(injectedDue.id);
+      expect(future.map((item) => item.id)).not.toContain(notDue.id);
+    } finally {
+      await client.$executeRawUnsafe("DELETE FROM control_commands WHERE tenant_id = $1", tenantId);
+      await client.$disconnect();
+    }
+  });
+
+  it("连续两轮暂停恢复符合迁移约束，新暂停清空旧恢复时刻", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const repository = new SqlControlCommandRepository(client);
+    const tenantId = "tenant-smoke-control-pause";
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const id = `pause-cycle-${suffix}`;
+    try {
+      expect(await repository.create(command(id, tenantId, { deviceId: `device-pause-${suffix}` }))).not.toBeNull();
+      let current = await repository.find(tenantId, id);
+      const transitions = [
+        { status: "SENT" as const, at: "2026-11-12T00:01:00.000Z" },
+        { status: "ACKED" as const, at: "2026-11-12T00:02:00.000Z" },
+        { status: "PAUSED" as const, at: "2026-11-12T00:03:00.000Z" },
+        { status: "ACKED" as const, at: "2026-11-12T00:04:00.000Z" },
+        { status: "PAUSED" as const, at: "2026-11-12T00:05:00.000Z" },
+        { status: "ACKED" as const, at: "2026-11-12T00:06:00.000Z" },
+      ];
+      for (const transition of transitions) {
+        current = await repository.transition(tenantId, { id, version: current!.version, ...transition });
+        expect(current).not.toBeNull();
+        if (transition.status === "PAUSED") expect(current?.resumedAt).toBeUndefined();
+        if (transition.status === "ACKED" && Date.parse(transition.at) >= Date.parse("2026-11-12T00:04:00.000Z")) {
+          expect(current?.resumedAt).toBe(transition.at);
+        }
+      }
+      expect(current).toMatchObject({
+        status: "ACKED", pausedAt: "2026-11-12T00:05:00.000Z", resumedAt: "2026-11-12T00:06:00.000Z",
+      });
     } finally {
       await client.$executeRawUnsafe("DELETE FROM control_commands WHERE tenant_id = $1", tenantId);
       await client.$disconnect();

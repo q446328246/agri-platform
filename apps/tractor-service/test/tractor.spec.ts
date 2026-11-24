@@ -8,7 +8,7 @@ import { createTractorHttpServer } from "../src/http.js";
 import { InMemoryTractorJobRepository, SqlTractorJobRepository } from "../src/job.repository.js";
 import { InMemoryTractorSafetyEventRepository, SqlTractorSafetyEventRepository } from "../src/safety-event.repository.js";
 import { createJobActionLock, createJobExecutor, recoverUnfinishedJobs, recoveryCommand } from "../src/executor.js";
-import type { ControlDispatchInput } from "../src/executor.js";
+import type { ControlDispatchInput, JobExecutorDeps } from "../src/executor.js";
 import { createTractorMonitor } from "../src/monitor.js";
 import type { RtkSample } from "../src/monitor.js";
 import { buildValidRtkSample, evaluatePrecheck, pathInsidePolygon, pathInsideRing, pointInPolygon, pointInRing, pointInsidePolygonWithBuffer, pointInsideWithBuffer, polygonRingsOf } from "../src/safety.js";
@@ -299,7 +299,7 @@ describe("仓储租户隔离与 CAS", () => {
 });
 
 describe("作业执行器（B2）", () => {
-  function setup() {
+  function setup(overrides: Partial<JobExecutorDeps> = {}) {
     const jobs = new InMemoryTractorJobRepository();
     const safetyEvents = new InMemoryTractorSafetyEventRepository();
     const dispatched: ControlDispatchInput[] = [];
@@ -309,7 +309,7 @@ describe("作业执行器（B2）", () => {
     });
     const waitCommand = vi.fn(async (): Promise<"DONE" | "FAILED" | "PAUSED" | "TIMEOUT" | "UNAVAILABLE"> => "DONE");
     const publish = vi.fn(async () => {});
-    const executor = createJobExecutor({ jobs, safetyEvents, dispatch, waitCommand, publish });
+    const executor = createJobExecutor({ jobs, safetyEvents, dispatch, waitCommand, publish, ...overrides });
     return { jobs, safetyEvents, dispatched, dispatch, waitCommand, publish, executor };
   }
 
@@ -331,6 +331,69 @@ describe("作业执行器（B2）", () => {
     expect(dispatched[1]!.parameters).toMatchObject({ areaMu: 10, durationMin: 20 });
     expect(dispatched[0]!.parameters).toEqual({ toolCode: "SEEDER" });
     expect(dispatched[2]!.parameters).toEqual({});
+  });
+
+  it("旧执行周期收到迟到 PAUSED 时不能覆盖已恢复的新周期", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    let releaseResult!: () => void;
+    let markWaiting!: () => void;
+    const waiting = new Promise<void>((resolve) => { markWaiting = resolve; });
+    const blocked = new Promise<void>((resolve) => { releaseResult = resolve; });
+    const executor = createJobExecutor({
+      jobs,
+      safetyEvents,
+      dispatch: async () => ({ commandId: "cmd-stage" }),
+      waitCommand: async () => {
+        markWaiting();
+        await blocked;
+        return "PAUSED";
+      },
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+
+    const running = executor.run(job);
+    await waiting;
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+    const resumed = await jobs.updateJob("tenant-demo", job.id, { status: "RUNNING" });
+    expect(resumed?.runRevision).toBe(2);
+    releaseResult();
+    await running;
+
+    expect(await jobs.findJob("tenant-demo", job.id)).toMatchObject({ status: "RUNNING", runRevision: 2 });
+  });
+
+  it("预检返回后作业已被急停，不再下发分步指令", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const dispatch = vi.fn(async () => ({ commandId: "cmd-stage" }));
+    const executor = createJobExecutor({
+      jobs, safetyEvents, dispatch,
+      waitCommand: async () => "DONE",
+      beforeStage: async () => {
+        await jobs.updateJob("tenant-demo", job.id, { status: "ESTOPPED", reason: "预检期间并发急停" });
+        return { passed: true };
+      },
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "RUNNING" });
+    await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+
+    await executor.run(job, { started: true });
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("ESTOPPED");
   });
 
   it("每个分步下发前重新预检，作业步位置门失败时不下发作业或返航", async () => {
@@ -841,7 +904,9 @@ describe("作业执行器（B2）", () => {
   });
 
   it("RESUME 确认超时但随后急停确认时收口为 ESTOPPED", async () => {
-    const { jobs, executor, dispatched, waitCommand } = setup();
+    const { jobs, executor, dispatched, waitCommand } = setup({
+      commandOf: async (_tenant, commandId) => ({ status: commandId === "cmd-active" ? "PAUSED" : "ACKED" }),
+    });
     const job = await jobs.createJob(undefined, {
       tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
       parameters: { areaMu: 10, durationMin: 20 }, operator: "user-1", reason: "",
@@ -862,16 +927,23 @@ describe("作业执行器（B2）", () => {
     const jobs = new InMemoryTractorJobRepository();
     const safetyEvents = new InMemoryTractorSafetyEventRepository();
     const dispatched: ControlDispatchInput[] = [];
-    const cancelCommand = vi.fn(async () => true);
+    const actions: string[] = [];
+    let resumeStatus = "QUEUED";
+    const cancelCommand = vi.fn(async () => {
+      actions.push("cancel");
+      resumeStatus = "CANCELLED";
+      return true;
+    });
     const executor = createJobExecutor({
       jobs,
       safetyEvents,
       dispatch: async (input) => {
+        actions.push(`dispatch:${input.type}`);
         dispatched.push(input);
         return { commandId: input.type === "RESUME" ? "cmd-resume" : "cmd-estop" };
       },
       waitCommand: async (_tenant, _device, commandId): Promise<"DONE" | "TIMEOUT"> => commandId === "cmd-resume" ? "TIMEOUT" : "DONE",
-      commandOf: async (_tenant, commandId) => ({ status: commandId === "cmd-active" ? "PAUSED" : "QUEUED" }),
+      commandOf: async (_tenant, commandId) => ({ status: commandId === "cmd-active" ? "PAUSED" : resumeStatus }),
       cancelCommand,
     });
     const job = await jobs.createJob(undefined, {
@@ -887,7 +959,271 @@ describe("作业执行器（B2）", () => {
     await expect(executor.resume("tenant-demo", job.id)).rejects.toThrow("ESTOPPED");
     expect(dispatched.map((input) => input.type)).toEqual(["RESUME", "ESTOP"]);
     expect(cancelCommand).toHaveBeenCalledWith("tenant-demo", "cmd-resume", expect.stringContaining("撤销排队恢复"));
+    expect(actions.indexOf("cancel")).toBeLessThan(actions.indexOf("dispatch:ESTOP"));
     expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("ESTOPPED");
+  });
+
+  it("RESUME 明确被控制侧拒绝时保持 PAUSED，不升级急停", async () => {
+    const { jobs, executor, dispatch } = setup();
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+    const stage = await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "SENT", commandId: "cmd-active" }, { expectedStatus: "PENDING" });
+    dispatch.mockResolvedValueOnce(null);
+
+    await expect(executor.resume("tenant-demo", job.id)).rejects.toThrow("下发被控制侧拒绝");
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch.mock.calls[0]?.[0].type).toBe("RESUME");
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("PAUSED");
+  });
+
+  it.each(["false", "throw", "still-queued"] as const)("RESUME 取消结果%s时不收口为 ESTOPPED", async (mode) => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const dispatched: ControlDispatchInput[] = [];
+    let resumeStatus = "QUEUED";
+    const cancelCommand = vi.fn(async () => {
+      if (mode === "throw") throw new Error("cancel unavailable");
+      if (mode === "false") return false;
+      if (mode === "still-queued") return true;
+      resumeStatus = "CANCELLED";
+      return true;
+    });
+    const executor = createJobExecutor({
+      jobs, safetyEvents,
+      dispatch: async (input) => {
+        dispatched.push(input);
+        return { commandId: input.type === "RESUME" ? "cmd-resume" : "cmd-estop" };
+      },
+      waitCommand: async (_tenant, _device, commandId): Promise<"DONE" | "TIMEOUT"> => commandId === "cmd-resume" ? "TIMEOUT" : "DONE",
+      commandOf: async (_tenant, commandId) => ({ status: commandId === "cmd-active" ? "PAUSED" : resumeStatus }),
+      cancelCommand,
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+    const stage = await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "SENT", commandId: "cmd-active" }, { expectedStatus: "PENDING" });
+
+    await expect(executor.resume("tenant-demo", job.id)).rejects.toThrow("SAFETY_UNKNOWN");
+    expect(dispatched.map((input) => input.type)).toEqual(["RESUME", "ESTOP"]);
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("SAFETY_UNKNOWN");
+  });
+
+  it("RESUME 下发响应丢失后按幂等键找回，证实设备已接收才急停收口", async () => {
+    const commandByIdempotencyKey = vi.fn(async () => ({ id: "cmd-resume", status: "ACKED" }));
+    const { jobs, executor, dispatched, dispatch } = setup({
+      commandByIdempotencyKey,
+      commandOf: async (_tenant, commandId) => ({ status: commandId === "cmd-active" ? "PAUSED" : "ACKED" }),
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+    const stage = await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "SENT", commandId: "cmd-active" }, { expectedStatus: "PENDING" });
+    let resumeKey = "";
+    dispatch.mockImplementationOnce(async (input) => {
+      resumeKey = input.idempotencyKey!;
+      throw new Error("response lost");
+    });
+
+    await expect(executor.resume("tenant-demo", job.id)).rejects.toThrow("ESTOPPED");
+    expect(commandByIdempotencyKey).toHaveBeenCalledWith("tenant-demo", resumeKey);
+    expect(dispatched.map((input) => input.type)).toEqual(["ESTOP"]);
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("ESTOPPED");
+  });
+
+  it("RESUME 仍为 SENT 时不能证明不会补发，急停后保持 SAFETY_UNKNOWN", async () => {
+    const { jobs, executor, dispatched, waitCommand } = setup({
+      commandByIdempotencyKey: async () => ({ id: "cmd-resume", status: "SENT" }),
+      commandOf: async (_tenant, commandId) => ({ status: commandId === "cmd-active" ? "PAUSED" : "SENT" }),
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+    const stage = await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "SENT", commandId: "cmd-active" }, { expectedStatus: "PENDING" });
+    waitCommand.mockResolvedValueOnce("TIMEOUT").mockResolvedValueOnce("DONE");
+
+    await expect(executor.resume("tenant-demo", job.id)).rejects.toThrow("SAFETY_UNKNOWN");
+    expect(dispatched.map((input) => input.type)).toEqual(["RESUME", "ESTOP"]);
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("SAFETY_UNKNOWN");
+  });
+
+  it("RESUME 下发前先持久化恢复意图，成功后清除", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const updateSpy = vi.spyOn(jobs, "updateJob");
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    let persistedBeforeDispatch = false;
+    let jobId = "";
+    const executor = createJobExecutor({
+      jobs, safetyEvents,
+      dispatch: async () => {
+        const current = await jobs.findJob("tenant-demo", jobId);
+        persistedBeforeDispatch = current?.parameters.pendingResume !== undefined;
+        return { commandId: "cmd-resume" };
+      },
+      waitCommand: async () => "DONE",
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    jobId = job.id;
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+    const stage = await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "SENT", commandId: "cmd-active" }, { expectedStatus: "PENDING" });
+
+    await executor.resume("tenant-demo", job.id);
+
+    expect(persistedBeforeDispatch).toBe(true);
+    const runningWrite = updateSpy.mock.calls.find((call) => call[2]?.status === "RUNNING");
+    expect(runningWrite?.[2].parameters?.pendingResume).toBeUndefined();
+    expect((await jobs.findJob("tenant-demo", job.id))?.parameters.pendingResume).toBeUndefined();
+  });
+
+  it("两个实例并发恢复时只有一个能持久化并下发 RESUME", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const dispatched: ControlDispatchInput[] = [];
+    let entered = 0;
+    let release!: () => void;
+    const bothEntered = new Promise<void>((resolve) => { release = resolve; });
+    const beforeStage = vi.fn(async () => {
+      entered += 1;
+      if (entered === 2) release();
+      await bothEntered;
+      return { passed: true };
+    });
+    const makeExecutor = () => createJobExecutor({
+      jobs, safetyEvents, beforeStage,
+      dispatch: async (input) => { dispatched.push(input); return { commandId: `cmd-resume-${dispatched.length}` }; },
+      waitCommand: async () => "DONE",
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+    const stage = await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "SENT", commandId: "cmd-active" }, { expectedStatus: "PENDING" });
+
+    const results = await Promise.allSettled([makeExecutor().resume("tenant-demo", job.id), makeExecutor().resume("tenant-demo", job.id)]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(dispatched.map((input) => input.type)).toEqual(["RESUME"]);
+    expect((await jobs.findJob("tenant-demo", job.id))?.parameters.pendingResume).toBeUndefined();
+  });
+
+  it("重启恢复对账带恢复意图的 PAUSED 作业并急停", async () => {
+    const { jobs, executor, dispatched, waitCommand } = setup({
+      commandByIdempotencyKey: async () => ({ id: "cmd-resume", status: "ACKED" }),
+      commandOf: async (_tenant, commandId) => ({ status: commandId === "cmd-active" ? "PAUSED" : "ACKED" }),
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1, pendingResume: { idempotencyKey: "tractor:job-crash:safety:RESUME:key", targetCommandId: "cmd-active", requestedAt: new Date().toISOString() } },
+      operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+    const stage = await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "SENT", commandId: "cmd-active" }, { expectedStatus: "PENDING" });
+    waitCommand.mockResolvedValue("DONE");
+
+    await recoverUnfinishedJobs({ tenantId: "tenant-demo", jobs, executor });
+
+    expect(dispatched.map((input) => input.type)).toEqual(["ESTOP"]);
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("ESTOPPED");
+  });
+
+  it("重启恢复持续对账 SAFETY_UNKNOWN，RESUME 证实不可下发后才收口", async () => {
+    let resumeStatus = "SENT";
+    const { jobs, executor, dispatched } = setup({
+      commandByIdempotencyKey: async () => ({ id: "cmd-resume", status: resumeStatus }),
+      commandOf: async (_tenant, commandId) => ({ status: commandId === "cmd-active" ? "PAUSED" : resumeStatus }),
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1, pendingResume: { idempotencyKey: "tractor:job-unknown:safety:RESUME:key", targetCommandId: "cmd-active", requestedAt: new Date().toISOString() } },
+      operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "SAFETY_UNKNOWN" });
+    const stage = await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "SENT", commandId: "cmd-active" }, { expectedStatus: "PENDING" });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "FAILED", detail: "并发收口失败" }, { expectedStatus: "SENT" });
+
+    await recoverUnfinishedJobs({ tenantId: "tenant-demo", jobs, executor });
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("SAFETY_UNKNOWN");
+
+    resumeStatus = "ACKED";
+    await recoverUnfinishedJobs({ tenantId: "tenant-demo", jobs, executor });
+    expect(dispatched.map((input) => input.type)).toEqual(["ESTOP", "ESTOP"]);
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("ESTOPPED");
+    expect((await jobs.findJob("tenant-demo", job.id))?.parameters.pendingResume).toBeUndefined();
+  });
+
+  it("重启恢复对账无恢复意图的旧 SAFETY_UNKNOWN 作业并持续急停", async () => {
+    const { jobs, executor, dispatched } = setup();
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "SAFETY_UNKNOWN", reason: "旧版恢复结果未知" });
+
+    await recoverUnfinishedJobs({ tenantId: "tenant-demo", jobs, executor });
+    await recoverUnfinishedJobs({ tenantId: "tenant-demo", jobs, executor });
+
+    expect(dispatched.map((input) => input.type)).toEqual(["ESTOP", "ESTOP"]);
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("SAFETY_UNKNOWN");
+  });
+
+  it("RESUME 下发响应丢失且无法找回时保持 SAFETY_UNKNOWN", async () => {
+    const { jobs, executor, dispatch } = setup({
+      commandByIdempotencyKey: async () => null,
+      commandOf: async (_tenant, commandId) => {
+        if (commandId === "cmd-active") return { status: "PAUSED" };
+        throw new Error("control unavailable");
+      },
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+    const stage = await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    await jobs.updateStage("tenant-demo", stage.id, { status: "SENT", commandId: "cmd-active" }, { expectedStatus: "PENDING" });
+    dispatch.mockRejectedValueOnce(new Error("response lost"));
+
+    await expect(executor.resume("tenant-demo", job.id)).rejects.toThrow("SAFETY_UNKNOWN");
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("SAFETY_UNKNOWN");
   });
 
   it("暂停确认期间发生并发急停，CAS 不把 ESTOPPED 覆盖回 PAUSED", async () => {
@@ -1329,8 +1665,133 @@ describe("作业期安全监测（B2）", () => {
 
     expect((await jobs.findJob("tenant-demo", jobId))?.status).toBe("PAUSED");
     expect(dispatched).toHaveLength(2);
-    expect(dispatched[0]?.idempotencyKey).toMatch(/^tractor:.+:monitor:PAUSE:cmd-active:0$/);
+    expect(dispatched[0]?.idempotencyKey).toMatch(/^tractor:.+:monitor:PAUSE:cmd-active:[^:]+:0$/);
     expect(dispatched[1]?.idempotencyKey).toBe(dispatched[0]?.idempotencyKey);
+  });
+
+  it("监测下发连续歧义失败时复用同一幂等键，第三次成功才暂停", async () => {
+    const { jobs, dispatch, monitor } = setup({ hasFix: true, lng: 107.5, lat: 30.9, hdop: 3.5, recordedAt: "2026-11-20T00:00:00.000Z" });
+    const jobId = await runningJob(jobs);
+    const keys: string[] = [];
+    dispatch.mockImplementation(async (input) => {
+      keys.push(input.idempotencyKey!);
+      if (keys.length < 3) throw new Error("response lost");
+      return { commandId: "cmd-pause" };
+    });
+
+    await monitor.tick();
+    await monitor.tick();
+    expect((await jobs.findJob("tenant-demo", jobId))?.status).toBe("RUNNING");
+    await monitor.tick();
+
+    expect(keys).toHaveLength(3);
+    expect(new Set(keys).size).toBe(1);
+    expect((await jobs.findJob("tenant-demo", jobId))?.status).toBe("PAUSED");
+  });
+
+  it("监测只有连续两次明确拒绝后才推进安全指令尝试编号", async () => {
+    const { jobs, dispatch, monitor } = setup({ hasFix: true, lng: 107.5, lat: 30.9, hdop: 3.5, recordedAt: "2026-11-20T00:00:00.000Z" });
+    const jobId = await runningJob(jobs);
+    const keys: string[] = [];
+    dispatch.mockImplementation(async (input) => {
+      keys.push(input.idempotencyKey!);
+      return keys.length <= 2 ? null : { commandId: "cmd-pause" };
+    });
+
+    await monitor.tick();
+    await monitor.tick();
+    await monitor.tick();
+
+    expect(keys[0]).toBe(keys[1]);
+    expect(keys[0]).toMatch(/:0$/);
+    expect(keys[2]).toMatch(/:1$/);
+    expect((await jobs.findJob("tenant-demo", jobId))?.status).toBe("PAUSED");
+  });
+
+  it("人工急停 SAFETY_UNKNOWN 只确认停车，不把未知 RESUME 收口为 ESTOPPED", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const dispatched: ControlDispatchInput[] = [];
+    const executor = createJobExecutor({
+      jobs, safetyEvents,
+      dispatch: async (input) => { dispatched.push(input); return { commandId: "cmd-estop" }; },
+      waitCommand: async () => "DONE",
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "SAFETY_UNKNOWN", reason: "RESUME 结果未知" });
+
+    const stopped = await executor.stop("tenant-demo", job.id, true);
+
+    expect(dispatched.map((input) => input.type)).toEqual(["ESTOP"]);
+    expect(stopped).toMatchObject({ status: "SAFETY_UNKNOWN" });
+    expect(stopped?.reason).toContain("仍需人工核实");
+    expect(stopped?.finishedAt).toBeUndefined();
+  });
+
+  it("监测发现未确认恢复意图时急停并保持 SAFETY_UNKNOWN", async () => {
+    const { jobs, dispatched, monitor } = setup(null);
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1, pendingResume: { idempotencyKey: "tractor:job-pending:safety:RESUME:key", targetCommandId: "cmd-active", requestedAt: new Date().toISOString() } },
+      operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+
+    await monitor.tick();
+
+    expect(dispatched.map((input) => input.type)).toEqual(["ESTOP"]);
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("SAFETY_UNKNOWN");
+  });
+
+  it("SAFETY_UNKNOWN 再次急停确认后仍保持未知，等待人工核实 RESUME", async () => {
+    const { jobs, safetyEvents, dispatched, monitor } = setup(null);
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "SAFETY_UNKNOWN", reason: "RESUME 结果未知" });
+
+    await monitor.tick();
+    await monitor.tick();
+
+    expect(dispatched.map((input) => input.type)).toEqual(["ESTOP", "ESTOP"]);
+    expect(dispatched[0]?.idempotencyKey).toMatch(/:0$/);
+    expect(dispatched[1]?.idempotencyKey).toMatch(/:1$/);
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("SAFETY_UNKNOWN");
+    expect((await safetyEvents.list({ tenantId: "tenant-demo", jobId: job.id }))[0]?.message).toContain("保持 SAFETY_UNKNOWN");
+  });
+
+  it("生产对账入口持续急停无意图的旧 SAFETY_UNKNOWN 作业", async () => {
+    const jobs = new InMemoryTractorJobRepository();
+    const safetyEvents = new InMemoryTractorSafetyEventRepository();
+    const dispatched: ControlDispatchInput[] = [];
+    const executor = createJobExecutor({
+      jobs, safetyEvents,
+      dispatch: async (input) => { dispatched.push(input); return { commandId: `cmd-estop-${dispatched.length}` }; },
+      waitCommand: async () => "DONE",
+    });
+    const monitor = createTractorMonitor({
+      tenantId: "tenant-demo", jobs, safetyEvents,
+      fetchRtk: async () => null,
+      insideGeofence: async () => true,
+      dispatch: async (input) => { dispatched.push(input); return { commandId: "cmd-estop" }; },
+      waitCommand: async () => "DONE",
+      reconcileSafetyUnknown: (job) => executor.resume(job.tenantId, job.id),
+    });
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.updateJob("tenant-demo", job.id, { status: "SAFETY_UNKNOWN", reason: "旧版恢复结果未知" });
+
+    await monitor.tick();
+    await monitor.tick();
+
+    expect(dispatched.map((input) => input.type)).toEqual(["ESTOP", "ESTOP"]);
+    expect((await jobs.findJob("tenant-demo", job.id))?.status).toBe("SAFETY_UNKNOWN");
   });
 
   it("等待控制侧 DONE 期间保持 RUNNING，确认后才暂停并携带目标指令", async () => {
@@ -1354,6 +1815,35 @@ describe("作业期安全监测（B2）", () => {
     await monitor.tick();
     expect(dispatched[0]?.type).toBe("PAUSE");
     expect((await jobs.findJob("tenant-demo", jobId))?.status).toBe("PAUSED");
+  });
+
+  it("安全确认期间正常推进分步不阻断已确认的暂停", async () => {
+    const { jobs, waitCommand, monitor } = setup({ hasFix: true, lng: 107.5, lat: 30.9, hdop: 3.5, recordedAt: "2026-11-20T00:00:00.000Z" });
+    const jobId = await runningJob(jobs);
+    waitCommand.mockImplementationOnce(async () => {
+      await jobs.updateJob("tenant-demo", jobId, { currentStage: 1 });
+      return "DONE" as const;
+    });
+
+    await monitor.tick();
+
+    expect((await jobs.findJob("tenant-demo", jobId))).toMatchObject({ status: "PAUSED", currentStage: 1 });
+  });
+
+  it("监测确认期间作业暂停后恢复，陈旧安全结果不能覆盖新执行周期", async () => {
+    const { jobs, waitCommand, monitor } = setup({ hasFix: true, lng: 107.5, lat: 30.9, hdop: 3.5, recordedAt: "2026-11-20T00:00:00.000Z" });
+    const jobId = await runningJob(jobs);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    waitCommand.mockImplementationOnce(async () => {
+      await jobs.updateJob("tenant-demo", jobId, { status: "PAUSED", reason: "另一实例暂停" });
+      await jobs.updateJob("tenant-demo", jobId, { status: "RUNNING", reason: "另一实例恢复" });
+      return "DONE" as const;
+    });
+
+    await monitor.tick();
+
+    expect((await jobs.findJob("tenant-demo", jobId))?.status).toBe("RUNNING");
+    expect((await jobs.findJob("tenant-demo", jobId))?.reason).toBe("另一实例恢复");
   });
 
   it("监测暂停确认期间发生并发急停，不把 ESTOPPED 覆盖回 PAUSED", async () => {
