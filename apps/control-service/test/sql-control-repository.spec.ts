@@ -124,43 +124,42 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 互锁与动态超时�
   });
 
   it("设备互锁迁移取消重复待执行指令，并拒绝多条已执行中指令", async () => {
-    const client = PgClientAdapter.fromUrl(databaseUrl as string);
-    await client.$connect();
+    const adapter = PgClientAdapter.fromUrl(databaseUrl as string);
+    const client = await adapter.native.connect();
     const schema = `migration_079_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const migration = readFileSync(new URL("../../../infra/postgres/migrations/079_control_active_device_job.sql", import.meta.url), "utf8");
     try {
-      await client.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      await client.$executeRawUnsafe(`SET search_path TO "${schema}"`);
-      await client.$executeRawUnsafe(`CREATE TABLE control_commands (
+      await client.query(`CREATE SCHEMA "${schema}"`);
+      await client.query(`SET search_path TO "${schema}"`);
+      await client.query(`CREATE TABLE control_commands (
         id text PRIMARY KEY, tenant_id text NOT NULL, device_id text NOT NULL, type text NOT NULL,
         status text NOT NULL, created_at timestamptz NOT NULL, version integer NOT NULL,
         finished_at timestamptz, receipt_message text
       )`);
-      await client.$executeRawUnsafe(`INSERT INTO control_commands (id, tenant_id, device_id, type, status, created_at, version)
+      await client.query(`INSERT INTO control_commands (id, tenant_id, device_id, type, status, created_at, version)
         VALUES ('old', 'tenant', 'device-a', 'IRRIGATION', 'QUEUED', now() - interval '2 minutes', 1),
                ('new', 'tenant', 'device-a', 'IRRIGATION', 'QUEUED', now(), 1),
                ('sent', 'tenant', 'device-b', 'SEEDING', 'SENT', now() - interval '1 minute', 1),
                ('queued', 'tenant', 'device-b', 'SEEDING', 'QUEUED', now(), 1)`);
-      await client.$executeRawUnsafe(migration);
-      const rows = await client.$queryRawUnsafe<Array<{ id: string; status: string }>>(
-        "SELECT id, status FROM control_commands ORDER BY id",
-      );
+      await client.query(migration);
+      const rows = (await client.query("SELECT id, status FROM control_commands ORDER BY id")).rows as Array<{ id: string; status: string }>;
       expect(rows).toEqual([
         { id: "new", status: "QUEUED" },
         { id: "old", status: "CANCELLED" },
         { id: "queued", status: "CANCELLED" },
         { id: "sent", status: "SENT" },
       ]);
-      await expect(client.$executeRawUnsafe(`INSERT INTO control_commands (id, tenant_id, device_id, type, status, created_at, version)
+      await expect(client.query(`INSERT INTO control_commands (id, tenant_id, device_id, type, status, created_at, version)
         VALUES ('duplicate', 'tenant', 'device-b', 'SEEDING', 'ACKED', now(), 1)`)).rejects.toThrow();
-      await client.$executeRawUnsafe("DROP INDEX uq_control_commands_active_device_job");
-      await client.$executeRawUnsafe(`INSERT INTO control_commands (id, tenant_id, device_id, type, status, created_at, version)
+      await client.query("DROP INDEX uq_control_commands_active_device_job");
+      await client.query(`INSERT INTO control_commands (id, tenant_id, device_id, type, status, created_at, version)
         VALUES ('duplicate', 'tenant', 'device-b', 'SEEDING', 'ACKED', now(), 1)`);
-      await expect(client.$executeRawUnsafe(migration)).rejects.toThrow("多条已执行中的作业指令");
+      await expect(client.query(migration)).rejects.toThrow("多条已执行中的作业指令");
     } finally {
-      await client.$executeRawUnsafe("SET search_path TO public").catch(() => undefined);
-      await client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => undefined);
-      await client.$disconnect();
+      await client.query("SET search_path TO public").catch(() => undefined);
+      await client.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => undefined);
+      client.release();
+      await adapter.$disconnect();
     }
   });
 });

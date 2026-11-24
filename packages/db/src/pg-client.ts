@@ -27,18 +27,18 @@ export interface PgClientOptions {
   poolSize?: number;
 }
 
-/** 从连接串创建 pg 原生客户端（不自动连接） */
-export function createPgClient(options: PgClientOptions): pg.Client {
-  return new pg.Client({ connectionString: options.url });
+/** 从连接串创建 pg 连接池（不自动连接） */
+export function createPgClient(options: PgClientOptions): pg.Pool {
+  return new pg.Pool({ connectionString: options.url, max: options.poolSize ?? 5 });
 }
 
 export class PgClientAdapter implements PrismaClientLike {
-  private readonly client: pg.Client;
+  private readonly client: pg.Pool;
 
   /** ORM 风格的模型访问在本示例不使用，显式标注为未知以对齐契约索引签名 */
   [key: string]: unknown;
 
-  constructor(client: pg.Client) {
+  constructor(client: pg.Pool) {
     this.client = client;
   }
 
@@ -46,13 +46,14 @@ export class PgClientAdapter implements PrismaClientLike {
     return new PgClientAdapter(createPgClient({ url }));
   }
 
-  /** 暴露 pg 原生客户端，供需要流式查询、COPY 等高级特性的场景使用 */
-  get native(): pg.Client {
+  /** 暴露 pg 原生连接池，供需要流式查询、COPY 等高级特性的场景使用 */
+  get native(): pg.Pool {
     return this.client;
   }
 
   async $connect(): Promise<void> {
-    await this.client.connect();
+    const client = await this.client.connect();
+    client.release();
   }
 
   async $disconnect(): Promise<void> {
@@ -67,18 +68,27 @@ export class PgClientAdapter implements PrismaClientLike {
    * 这些方法缺失。
    */
   async $transaction<R>(handler: (tx: Tx) => Promise<R>): Promise<R> {
-    await this.client.query("BEGIN");
+    const client = await this.client.connect();
     try {
+      await client.query("BEGIN");
       const tx: Tx = {
-        $queryRawUnsafe: this.$queryRawUnsafe.bind(this),
-        $executeRawUnsafe: this.$executeRawUnsafe.bind(this),
+        $queryRawUnsafe: async <T = unknown>(query: string, ...values: unknown[]): Promise<T> => {
+          const result = await client.query(query, values.map(toDriverValue));
+          return result.rows as T;
+        },
+        $executeRawUnsafe: async (query: string, ...values: unknown[]): Promise<number> => {
+          const result = await client.query(query, values.map(toDriverValue));
+          return result.rowCount ?? 0;
+        },
       };
       const result = await handler(tx);
-      await this.client.query("COMMIT");
+      await client.query("COMMIT");
       return result;
     } catch (error) {
-      await this.client.query("ROLLBACK").catch(() => undefined);
+      await client.query("ROLLBACK").catch(() => undefined);
       throw error;
+    } finally {
+      client.release();
     }
   }
 

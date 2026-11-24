@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { EventTopic } from "@agri/contracts";
 import type { CommandTimeoutPayload } from "@agri/contracts";
@@ -207,6 +207,32 @@ describe("ControlReceiptSweeper 超时收口", () => {
     expect(await sweeper.sweepOnce(nowMs)).toBe(0);
     expect(store.all()).toHaveLength(0);
     expect((await repository.find("tenant-demo", "cmd-race"))?.status).toBe("DONE");
+  });
+
+  it("拖拉机候选已被现场回执收口时不再创建超时急停", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({
+        id: "tractor-stale", type: "SEEDING", status: "SENT",
+        sentAt: new Date(nowMs - 40 * MINUTE).toISOString(),
+        idempotencyKey: "tractor:job-stale:stage:stage-1",
+      }),
+    ]);
+    const stale = (await repository.listOverdue(15, nowMs, 10))[0]!;
+    expect(await repository.transition("tenant-demo", {
+      id: stale.id, status: "DONE", at: new Date(nowMs).toISOString(), version: stale.version,
+    })).not.toBeNull();
+    const create = vi.fn(async (value: ControlCommand) => repository.create(value));
+    const stub = {
+      listOverdue: async () => [stale],
+      find: repository.find.bind(repository),
+      findByIdempotencyKey: repository.findByIdempotencyKey.bind(repository),
+      create,
+    } as unknown as ControlCommandRepository;
+    const sweeper = new ControlReceiptSweeper(stub, { timeoutMin: 15 });
+
+    expect(await sweeper.sweepOnce(nowMs)).toBe(0);
+    expect(create).not.toHaveBeenCalled();
+    expect((await repository.page("tenant-demo", { page: 1, size: 10 })).items.filter((item) => item.type === "ESTOP")).toHaveLength(0);
   });
 
   it("单条收口抛错只影响自己，其余指令照常收口并回调 onError", async () => {

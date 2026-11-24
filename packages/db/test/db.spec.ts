@@ -88,9 +88,14 @@ describe("事务封装", () => {
   it("pg 适配器事务回调拿到带原生方法的 Tx", async () => {
     const statements: string[] = [];
     const adapter = new PgClientAdapter({
-      async query(sql: string) {
-        statements.push(sql);
-        return { rows: [{ ok: 1 }], rowCount: 1 };
+      async connect() {
+        return {
+          async query(sql: string) {
+            statements.push(sql);
+            return { rows: [{ ok: 1 }], rowCount: 1 };
+          },
+          release() {},
+        };
       },
       async end() {},
     } as never);
@@ -103,6 +108,50 @@ describe("事务封装", () => {
 
     expect(result).toEqual({ ok: 1, affected: 1 });
     expect(statements).toEqual(["BEGIN", "SELECT 1", "UPDATE plot_records SET parcel_name = $1", "COMMIT"]);
+  });
+
+  it("并发事务使用不同连接，各自提交或回滚", async () => {
+    const statements: string[][] = [];
+    let releaseFirst!: () => void;
+    let firstQueryStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { firstQueryStarted = resolve; });
+    const blocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const adapter = new PgClientAdapter({
+      async connect() {
+        const session: string[] = [];
+        statements.push(session);
+        return {
+          async query(sql: string) {
+            session.push(sql);
+            if (sql === "SELECT first" && statements.length === 1) {
+              firstQueryStarted();
+              await blocked;
+            }
+            return { rows: [{ ok: 1 }], rowCount: 1 };
+          },
+          release() {},
+        };
+      },
+      async end() {},
+    } as never);
+
+    const first = adapter.$transaction(async (tx) => {
+      await tx.$queryRawUnsafe("SELECT first");
+      return "first";
+    });
+    await firstStarted;
+    const second = await adapter.$transaction(async (tx) => {
+      await tx.$queryRawUnsafe("SELECT second");
+      return "second";
+    });
+    releaseFirst();
+    await expect(first).resolves.toBe("first");
+
+    expect(second).toBe("second");
+    expect(statements).toEqual([
+      ["BEGIN", "SELECT first", "COMMIT"],
+      ["BEGIN", "SELECT second", "COMMIT"],
+    ]);
   });
 
   it("异常时回滚并把原始异常上抛", async () => {

@@ -138,14 +138,23 @@ export interface OverdueCursor {
 
 export interface ControlCommandRepository {
   /** 写入指令；来源事件已存在时返回 null */
-  create(command: ControlCommand): Promise<ControlCommand | null>;
-  findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<ControlCommand | null>;
+  create(command: ControlCommand, tx?: Tx): Promise<ControlCommand | null>;
+  findByIdempotencyKey(tenantId: string, idempotencyKey: string, tx?: Tx): Promise<ControlCommand | null>;
   hasActiveJob(tenantId: string, deviceId: string, excludeId?: string): Promise<boolean>;
   page(tenantId: string, query: ControlCommandQuery): Promise<PageResult<ControlCommand>>;
-  find(tenantId: string, id: string): Promise<ControlCommand | null>;
+  find(tenantId: string, id: string, tx?: Tx, options?: { forUpdate?: boolean }): Promise<ControlCommand | null>;
   /** 沿合法跃迁表推进状态；记录不存在、不属于该租户、版本过期或跃迁非法时返回 null。
    *  传入 tx 时读写都走该事务，供「跃迁 + 事件入队」原子提交。 */
   transition(tenantId: string, transition: CommandTransition, tx?: Tx): Promise<ControlCommand | null>;
+  /** 无显式事务时原子推进本体与联动目标；SQL 实现自行开启事务，内存实现先校验再同步提交 */
+  transitionPair?(
+    tenantId: string,
+    transition: CommandTransition,
+    linked?: { id: string; status: ControlCommandStatus; version: number; at: string; message?: string },
+    tx?: Tx,
+  ): Promise<{ command: ControlCommand; linkedCommand?: ControlCommand } | null>;
+  /** 急停确认后收口同设备仍活跃的作业指令，释放设备互锁并拒绝旧指令继续推进 */
+  failActiveJobs(tenantId: string, deviceId: string, emergencyStopId: string, at: string, message: string, tx?: Tx): Promise<ControlCommand[]>;
   /** 跨租户捞出超时未回执的在途指令，按创建顺序游标翻页，避免阻塞指令饿死后续候选 */
   listOverdue(timeoutMin: number, nowMs: number, limit: number, cursor?: OverdueCursor): Promise<ControlCommand[]>;
 }
@@ -251,9 +260,10 @@ function toRecord(row: Record<string, unknown>): ControlCommand {
 export class SqlControlCommandRepository implements ControlCommandRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
-  async create(command: ControlCommand): Promise<ControlCommand | null> {
+  async create(command: ControlCommand, tx?: Tx): Promise<ControlCommand | null> {
     // 唯一索引冲突说明同一来源事件对该设备已生成指令，返回空表示无需重复写入
-    const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
+    const executor = tx ?? this.client;
+    const rows = await executor.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `INSERT INTO control_commands (id, tenant_id, device_id, plot_code, operator_id, confirmed_at, type, parameters, status, origin, source_event_id, idempotency_key, reason, scheduled_at, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
        ON CONFLICT DO NOTHING
@@ -339,17 +349,19 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     return toPage(rows.map(toRecord), total, query.page, query.size);
   }
 
-  async find(tenantId: string, id: string): Promise<ControlCommand | null> {
-    const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `SELECT ${COLUMNS} FROM control_commands WHERE tenant_id = $1 AND id = $2`,
+  async find(tenantId: string, id: string, tx?: Tx, options?: { forUpdate?: boolean }): Promise<ControlCommand | null> {
+    const executor = tx ?? this.client;
+    const rows = await executor.$queryRawUnsafe<Array<Record<string, unknown>>>(
+      `SELECT ${COLUMNS} FROM control_commands WHERE tenant_id = $1 AND id = $2${options?.forUpdate ? " FOR UPDATE" : ""}`,
       tenantId,
       id,
     );
     return rows[0] ? toRecord(rows[0]) : null;
   }
 
-  async findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<ControlCommand | null> {
-    const rows = await this.client.$queryRawUnsafe<Array<Record<string, unknown>>>(
+  async findByIdempotencyKey(tenantId: string, idempotencyKey: string, tx?: Tx): Promise<ControlCommand | null> {
+    const executor = tx ?? this.client;
+    const rows = await executor.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `SELECT ${COLUMNS} FROM control_commands WHERE tenant_id = $1 AND idempotency_key = $2 LIMIT 1`,
       tenantId,
       idempotencyKey,
@@ -360,11 +372,22 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
   async hasActiveJob(tenantId: string, deviceId: string, excludeId?: string): Promise<boolean> {
     const rows = await this.client.$queryRawUnsafe<Array<{ exists: boolean }>>(
       `SELECT EXISTS (
-         SELECT 1 FROM control_commands
-          WHERE tenant_id = $1 AND device_id = $2
-            AND type IN ('SEEDING', 'IRRIGATION', 'WEEDING', 'FERTILIZATION', 'TOOL_SWITCH', 'RETURN_HOME', 'TILLAGE')
-            AND status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED')
-            AND ($3::text IS NULL OR id <> $3)
+         SELECT 1 FROM control_commands AS command
+          WHERE command.tenant_id = $1 AND command.device_id = $2
+            AND (
+              (command.type IN ('SEEDING', 'IRRIGATION', 'WEEDING', 'FERTILIZATION', 'TOOL_SWITCH', 'RETURN_HOME', 'TILLAGE')
+                AND command.status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED')
+                AND ($3::text IS NULL OR command.id <> $3))
+              OR command.id = (
+                SELECT latest.id FROM control_commands AS latest
+                 WHERE latest.tenant_id = command.tenant_id AND latest.device_id = command.device_id
+                   AND latest.type IN ('ESTOP', 'POWER_OFF') AND latest.status <> 'CANCELLED'
+                 ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1
+              ) AND (
+                command.status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED', 'FAILED')
+                OR (command.status = 'DONE' AND COALESCE(command.result_json->>'confirmed', 'false') <> 'true')
+              )
+            )
        ) AS exists`,
       tenantId,
       deviceId,
@@ -379,8 +402,22 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     // 三种失败都收敛成 null（HTTP 侧分别回 409 / 409 / 404）。
     // 带 tx 时读写都走同一事务，状态与 outbox 事件要么同时成功要么同时回滚。
     const executor = tx ?? this.client;
-    const current = await this.statusOf(tenantId, transition.id, executor);
-    if (current === null || !canTransition(current, transition.status)) return null;
+    const current = await this.transitionMetadataOf(tenantId, transition.id, executor);
+    if (current === null || !canTransition(current.status, transition.status)) return null;
+    const fencedType = isJobCommandType(current.type) || current.type === "PAUSE" || current.type === "RESUME";
+    const emergencyFence = fencedType && transition.status !== "FAILED" && transition.status !== "CANCELLED"
+      ? `AND NOT EXISTS (
+           SELECT 1 FROM control_commands AS safety
+            WHERE safety.id = (
+              SELECT latest.id FROM control_commands AS latest
+               WHERE latest.tenant_id = control_commands.tenant_id AND latest.device_id = control_commands.device_id
+                 AND latest.type IN ('ESTOP', 'POWER_OFF') AND latest.status <> 'CANCELLED'
+               ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1
+            )
+              AND (safety.finished_at IS NULL OR control_commands.created_at <= safety.finished_at
+                OR (safety.status = 'DONE' AND COALESCE(safety.result_json->>'confirmed', 'false') <> 'true'))
+         )`
+      : "";
     const rows = await executor.$queryRawUnsafe<Array<Record<string, unknown>>>(
       `UPDATE control_commands
           SET status = $4,
@@ -393,6 +430,7 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
               receipt_message = COALESCE($6::text, receipt_message),
               result_json = COALESCE($7::jsonb, result_json)
         WHERE tenant_id = $1 AND id = $2 AND version = $3
+        ${emergencyFence}
         RETURNING ${COLUMNS}`,
       tenantId,
       transition.id,
@@ -405,14 +443,64 @@ export class SqlControlCommandRepository implements ControlCommandRepository {
     return rows[0] ? toRecord(rows[0]) : null;
   }
 
-  private async statusOf(tenantId: string, id: string, executor: PrismaClientLike | Tx = this.client): Promise<ControlCommandStatus | null> {
-    const rows = await executor.$queryRawUnsafe<Array<{ status: string }>>(
-      "SELECT status FROM control_commands WHERE tenant_id = $1 AND id = $2",
+  async transitionPair(
+    tenantId: string,
+    transition: CommandTransition,
+    linked?: { id: string; status: ControlCommandStatus; version: number; at: string; message?: string },
+    tx?: Tx,
+  ): Promise<{ command: ControlCommand; linkedCommand?: ControlCommand } | null> {
+    const apply = async (inner: Tx): Promise<{ command: ControlCommand; linkedCommand?: ControlCommand } | null> => {
+      const command = await this.transition(tenantId, transition, inner);
+      if (!command) return null;
+      if (!linked) return { command };
+      const linkedCommand = await this.transition(tenantId, linked, inner);
+      if (!linkedCommand) throw new Error("联动指令状态已被其它回执推进，本次结单整体回滚");
+      return { command, linkedCommand };
+    };
+    return tx ? apply(tx) : this.client.$transaction(apply);
+  }
+
+  private async transitionMetadataOf(
+    tenantId: string,
+    id: string,
+    executor: PrismaClientLike | Tx = this.client,
+  ): Promise<{ id: string; status: ControlCommandStatus; type: ControlCommandType; deviceId: string; createdAt: string } | null> {
+    const rows = await executor.$queryRawUnsafe<Array<Record<string, unknown>>>(
+      "SELECT id, status, type, device_id, created_at FROM control_commands WHERE tenant_id = $1 AND id = $2",
       tenantId,
       id,
     );
-    const status = rows[0]?.status;
-    return status && (CONTROL_STATUSES as readonly string[]).includes(status) ? (status as ControlCommandStatus) : null;
+    const row = rows[0];
+    if (!row) return null;
+    const status = String(row.status);
+    return (CONTROL_STATUSES as readonly string[]).includes(status)
+      ? { id: String(row.id), status: status as ControlCommandStatus, type: row.type as ControlCommandType, deviceId: String(row.device_id), createdAt: toIsoTimestamp(row.created_at) }
+      : null;
+  }
+
+  async failActiveJobs(
+    tenantId: string,
+    deviceId: string,
+    emergencyStopId: string,
+    at: string,
+    message: string,
+    tx?: Tx,
+  ): Promise<ControlCommand[]> {
+    const executor = tx ?? this.client;
+    const rows = await executor.$queryRawUnsafe<Array<Record<string, unknown>>>(
+      `UPDATE control_commands
+          SET status = 'FAILED', version = version + 1, finished_at = $4::timestamptz, receipt_message = $5::text
+        WHERE tenant_id = $1 AND device_id = $2 AND id <> $3
+          AND type IN ('SEEDING', 'IRRIGATION', 'WEEDING', 'FERTILIZATION', 'TOOL_SWITCH', 'RETURN_HOME', 'TILLAGE')
+          AND status IN ('QUEUED', 'SENT', 'ACKED', 'PAUSED')
+        RETURNING ${COLUMNS}`,
+      tenantId,
+      deviceId,
+      emergencyStopId,
+      at,
+      message,
+    );
+    return rows.map(toRecord);
   }
 
   async listOverdue(timeoutMin: number, nowMs: number, limit: number, cursor?: OverdueCursor): Promise<ControlCommand[]> {
@@ -444,7 +532,7 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     this.rows.push(...seed);
   }
 
-  async create(command: ControlCommand): Promise<ControlCommand | null> {
+  async create(command: ControlCommand, _tx?: Tx): Promise<ControlCommand | null> {
     if (this.rows.some((row) => row.id === command.id)) return null;
     if (command.idempotencyKey !== undefined && this.rows.some((row) => row.tenantId === command.tenantId && row.idempotencyKey === command.idempotencyKey)) {
       return null;
@@ -504,27 +592,58 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     return toPage(filtered.slice(start, start + query.size), filtered.length, query.page, query.size);
   }
 
-  async find(tenantId: string, id: string): Promise<ControlCommand | null> {
+  async find(tenantId: string, id: string, _tx?: Tx, _options?: { forUpdate?: boolean }): Promise<ControlCommand | null> {
     const row = this.rows.find((item) => item.tenantId === tenantId && item.id === id);
     return row ? structuredClone(row) : null;
   }
 
-  async findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<ControlCommand | null> {
+  async findByIdempotencyKey(tenantId: string, idempotencyKey: string, _tx?: Tx): Promise<ControlCommand | null> {
     const row = this.rows.find((item) => item.tenantId === tenantId && item.idempotencyKey === idempotencyKey);
     return row ? structuredClone(row) : null;
   }
 
   async hasActiveJob(tenantId: string, deviceId: string, excludeId?: string): Promise<boolean> {
-    return this.rows.some((row) => row.tenantId === tenantId
+    const activeJob = this.rows.some((row) => row.tenantId === tenantId
       && row.deviceId === deviceId
       && row.id !== excludeId
       && isJobCommandType(row.type)
       && PENDING_STATUSES.includes(row.status));
+    if (activeJob) return true;
+    const latestSafetyStop = this.rows
+      .filter((row) => row.tenantId === tenantId && row.deviceId === deviceId
+        && (row.type === "ESTOP" || row.type === "POWER_OFF")
+        && row.status !== "CANCELLED")
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+      .at(-1);
+    return latestSafetyStop !== undefined
+      && (PENDING_STATUSES.includes(latestSafetyStop.status)
+        || latestSafetyStop.status === "FAILED"
+        || (latestSafetyStop.status === "DONE" && latestSafetyStop.result?.confirmed !== true));
   }
 
-  async transition(tenantId: string, transition: CommandTransition, _tx?: Tx): Promise<ControlCommand | null> {
-    const row = this.rows.find((item) => item.tenantId === tenantId && item.id === transition.id);
-    if (!row || row.version !== transition.version || !canTransition(row.status, transition.status)) return null;
+  private emergencyOverlaps(row: ControlCommand): boolean {
+    const createdAt = Date.parse(row.createdAt);
+    const latestSafetyStop = this.rows
+      .filter((safety) => safety.tenantId === row.tenantId
+        && safety.deviceId === row.deviceId
+        && safety.id !== row.id
+        && (safety.type === "ESTOP" || safety.type === "POWER_OFF")
+        && safety.status !== "CANCELLED")
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+      .at(-1);
+    return latestSafetyStop !== undefined
+      && (latestSafetyStop.finishedAt === undefined
+        || createdAt <= Date.parse(latestSafetyStop.finishedAt)
+        || (latestSafetyStop.status === "DONE" && latestSafetyStop.result?.confirmed !== true));
+  }
+
+  private transitionAllowed(row: ControlCommand | undefined, transition: CommandTransition): row is ControlCommand {
+    if (!row || row.version !== transition.version || !canTransition(row.status, transition.status)) return false;
+    const fencedType = isJobCommandType(row.type) || row.type === "PAUSE" || row.type === "RESUME";
+    return !fencedType || transition.status === "FAILED" || transition.status === "CANCELLED" || !this.emergencyOverlaps(row);
+  }
+
+  private applyTransition(row: ControlCommand, transition: CommandTransition): ControlCommand {
     const previousStatus = row.status;
     row.status = transition.status;
     row.version += 1;
@@ -541,6 +660,48 @@ export class InMemoryControlCommandRepository implements ControlCommandRepositor
     if (transition.message !== undefined) row.receiptMessage = transition.message;
     if (transition.result !== undefined) row.result = structuredClone(transition.result);
     return structuredClone(row);
+  }
+
+  async transition(tenantId: string, transition: CommandTransition, _tx?: Tx): Promise<ControlCommand | null> {
+    const row = this.rows.find((item) => item.tenantId === tenantId && item.id === transition.id);
+    return this.transitionAllowed(row, transition) ? this.applyTransition(row, transition) : null;
+  }
+
+  async transitionPair(
+    tenantId: string,
+    transition: CommandTransition,
+    linked?: { id: string; status: ControlCommandStatus; version: number; at: string; message?: string },
+    _tx?: Tx,
+  ): Promise<{ command: ControlCommand; linkedCommand?: ControlCommand } | null> {
+    const row = this.rows.find((item) => item.tenantId === tenantId && item.id === transition.id);
+    const linkedRow = linked ? this.rows.find((item) => item.tenantId === tenantId && item.id === linked.id) : undefined;
+    if (!this.transitionAllowed(row, transition)) return null;
+    if (linked && !this.transitionAllowed(linkedRow, linked)) return null;
+    const command = this.applyTransition(row, transition);
+    const linkedCommand = linked && linkedRow ? this.applyTransition(linkedRow, linked) : undefined;
+    return { command, ...(linkedCommand ? { linkedCommand } : {}) };
+  }
+
+  async failActiveJobs(
+    tenantId: string,
+    deviceId: string,
+    emergencyStopId: string,
+    at: string,
+    message: string,
+    _tx?: Tx,
+  ): Promise<ControlCommand[]> {
+    const failed = this.rows.filter((row) => row.tenantId === tenantId
+      && row.deviceId === deviceId
+      && row.id !== emergencyStopId
+      && isJobCommandType(row.type)
+      && PENDING_STATUSES.includes(row.status));
+    for (const row of failed) {
+      row.status = "FAILED";
+      row.version += 1;
+      row.finishedAt = at;
+      row.receiptMessage = message;
+    }
+    return failed.map((row) => structuredClone(row));
   }
 
   async listOverdue(timeoutMin: number, nowMs: number, limit: number, cursor?: OverdueCursor): Promise<ControlCommand[]> {

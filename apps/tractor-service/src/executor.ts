@@ -451,22 +451,29 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
           await failStage(stage, commandId, `指令 ${commandId} 设备回报失败`, `分步 ${stage.stage} 执行失败`);
           return;
         }
-        const stopped = await confirmCommandStopped(deps, job, commandId);
-        if (!ownsLease) return;
-        if (stopped === "DONE") {
-          if (!await completeStage(index, stage, commandId, `指令 ${commandId} 在超时核对时已确认完成`)) return;
-          continue;
-        }
-        if (stopped === "FAILED" || stopped === "CANCELLED") {
-          await failStage(stage, commandId, `指令 ${commandId} 等待超时，控制侧已收口为 ${stopped}`, `分步 ${stage.stage} ${stopped === "CANCELLED" ? "排队指令已取消" : "执行失败"}`);
-          return;
-        }
-        await deps.jobs.updateStage(job.tenantId, stage.id, {
-          detail: `指令 ${commandId} 等待收口超时，已确认暂停，可安全恢复`,
-        }, { expectedStatus: "SENT", owner });
-        await deps.jobs.updateJob(job.tenantId, job.id, {
-          status: "PAUSED", reason: `分步 ${stage.stage} 收口超时，已确认暂停`,
-        }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
+        let completedAfterTimeout = false;
+        await withJobAction(`${job.tenantId}:${job.id}`, async () => {
+          const current = await deps.jobs.findJob(job.tenantId, job.id);
+          if (!ownsLease || !current || current.status !== "RUNNING" || current.runRevision !== runRevision || current.currentStage !== index) return;
+          const stopped = await confirmCommandStopped(deps, current, commandId);
+          if (!ownsLease) return;
+          if (stopped === "DONE") {
+            completedAfterTimeout = await completeStage(index, stage, commandId, `指令 ${commandId} 在超时核对时已确认完成`);
+            return;
+          }
+          if (stopped === "FAILED" || stopped === "CANCELLED") {
+            await failStage(stage, commandId, `指令 ${commandId} 等待超时，控制侧已收口为 ${stopped}`, `分步 ${stage.stage} ${stopped === "CANCELLED" ? "排队指令已取消" : "执行失败"}`);
+            return;
+          }
+          await deps.jobs.updateStage(job.tenantId, stage.id, {
+            detail: `指令 ${commandId} 等待收口超时，已确认暂停，可安全恢复`,
+          }, { expectedStatus: "SENT", owner });
+          await deps.jobs.updateJob(job.tenantId, job.id, {
+            status: "PAUSED", reason: `分步 ${stage.stage} 收口超时，已确认暂停`,
+          }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });
+        });
+        if (completedAfterTimeout) continue;
+        return;
       }
       if (ownsLease) {
         await deps.jobs.updateJob(job.tenantId, job.id, { status: "COMPLETED", currentStage: completed, finishedAt: new Date().toISOString(), reason: "全部分步完成" }, { expectedStatus: "RUNNING", expectedRunRevision: runRevision, owner });

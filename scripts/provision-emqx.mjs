@@ -1,3 +1,5 @@
+import { setTimeout as delay } from "node:timers/promises";
+
 const apiUrl = (process.env.EMQX_API_URL ?? "http://127.0.0.1:18083").replace(/\/$/, "");
 const dashboardUsername = process.env.EMQX_DASHBOARD_USERNAME?.trim();
 const dashboardPassword = process.env.EMQX_DASHBOARD_PASSWORD;
@@ -23,6 +25,13 @@ for (const [name, value] of Object.entries({ MQTT_USERNAME: serviceUsername, MQT
   if (/[+/#\s]/.test(value)) throw new Error(`${name} must not contain whitespace, /, + or #`);
 }
 
+class EmqxApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function request(path, { token, method = "GET", body } = {}) {
   const response = await fetch(`${apiUrl}/api/v5${path}`, {
     method,
@@ -34,29 +43,55 @@ async function request(path, { token, method = "GET", body } = {}) {
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(`${method} ${path} failed (${response.status}): ${payload?.message ?? response.statusText}`);
+    throw new EmqxApiError(`${method} ${path} failed (${response.status}): ${payload?.message ?? response.statusText}`, response.status);
   }
   if (response.status === 204) return null;
   return response.json();
 }
 
-const login = await request("/login", {
-  method: "POST",
-  body: { username: dashboardUsername, password: dashboardLoginPassword },
-});
-if (!login.token) throw new Error("EMQX login did not return a token");
-let token = login.token;
+async function login(password) {
+  return request("/login", {
+    method: "POST",
+    body: { username: dashboardUsername, password },
+  });
+}
 
-if (dashboardLoginPassword !== dashboardPassword) {
+async function waitForDashboardLogin() {
+  const deadline = Date.now() + 30_000;
+  let lastError;
+  while (true) {
+    try {
+      const result = await login(dashboardLoginPassword);
+      return { ...result, loginPassword: dashboardLoginPassword };
+    } catch (error) {
+      lastError = error;
+      // 首次启动使用出厂管理员口令，登录成功后立即轮换为本地配置。
+      if (error instanceof EmqxApiError && error.status === 401 && dashboardUsername === "admin" && !process.env.EMQX_DASHBOARD_LOGIN_PASSWORD) {
+        try {
+          const result = await login("public");
+          return { ...result, loginPassword: "public" };
+        } catch (fallbackError) {
+          lastError = fallbackError;
+        }
+      }
+      if (lastError instanceof EmqxApiError && [401, 403].includes(lastError.status)) throw lastError;
+      if (Date.now() >= deadline) throw new Error(`EMQX Dashboard 未在 30 秒内就绪: ${lastError.message}`);
+      await delay(250);
+    }
+  }
+}
+
+const loginResult = await waitForDashboardLogin();
+if (!loginResult.token) throw new Error("EMQX login did not return a token");
+let token = loginResult.token;
+
+if (loginResult.loginPassword !== dashboardPassword) {
   await request(`/users/${encodeURIComponent(dashboardUsername)}/change_pwd`, {
     token,
     method: "POST",
-    body: { old_pwd: dashboardLoginPassword, new_pwd: dashboardPassword },
+    body: { old_pwd: loginResult.loginPassword, new_pwd: dashboardPassword },
   });
-  const rotatedLogin = await request("/login", {
-    method: "POST",
-    body: { username: dashboardUsername, password: dashboardPassword },
-  });
+  const rotatedLogin = await login(dashboardPassword);
   if (!rotatedLogin.token) throw new Error("EMQX login after password rotation did not return a token");
   token = rotatedLogin.token;
 }

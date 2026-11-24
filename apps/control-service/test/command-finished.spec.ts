@@ -281,7 +281,7 @@ describe("DONE 回执结单时回流作业完成事件", () => {
   it("急停与播种的 DONE 不推任何结单事件", async () => {
     const repository = new InMemoryControlCommandRepository([
       command({ id: "cmd-estop", type: "ESTOP", parameters: {} }),
-      command({ id: "cmd-seed", type: "SEEDING", parameters: {} }),
+      command({ id: "cmd-seed", type: "SEEDING", deviceId: "device-seed-001", parameters: {} }),
     ]);
     const { store, outbox, withTransaction } = makeRelay();
     const base = await start(createControlHttpServer(repository, { outbox, withTransaction }));

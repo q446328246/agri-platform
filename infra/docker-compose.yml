@@ -41,10 +41,11 @@ services:
   # MQTT Broker（A2）：承载设备高频遥测与指令下发
   emqx:
     image: emqx/emqx:5.8
-    ports:
-      - "8883:8883"    # 设备只经 MQTT over TLS 接入
-      - "127.0.0.1:18083:18083"  # 管理台仅本机访问
+    # EMQX 以节点名作为 Mnesia 数据目录；固定 FQDN，避免容器 IP 变化后认证与 ACL 换库。
+    hostname: agri-emqx.local
     environment:
+      EMQX_NAME: emqx
+      EMQX_HOST: agri-emqx.local
       EMQX_AUTHENTICATION: '[{"mechanism":"password_based","backend":"built_in_database","password_hash_algorithm":{"name":"sha256","salt_position":"suffix"},"user_id_type":"username","enable":true}]'
       EMQX_AUTHORIZATION__NO_MATCH: deny
       EMQX_AUTHORIZATION__DENY_ACTION: disconnect
@@ -55,6 +56,9 @@ services:
       EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CERTFILE: /opt/emqx/etc/certs/cert.pem
       EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__KEYFILE: /opt/emqx/etc/certs/key.pem
       EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE: /opt/emqx/etc/certs/cacert.pem
+    ports:
+      - "8883:8883"    # 设备只经 MQTT over TLS 接入
+      - "127.0.0.1:18083:18083"  # 管理台仅本机访问
     volumes:
       - agri-emqx:/opt/emqx/data
       - ./emqx/certs/server.crt:/opt/emqx/etc/certs/cert.pem:ro
@@ -117,12 +121,9 @@ services:
       # Broker 地址必须写容器内服务名：app 容器里的 127.0.0.1 指向容器自身，不是 EMQX。
       IOT_MQTT_ENABLED: "true"
       MQTT_URL: mqtts://emqx:8883
-      MQTT_USERNAME: ${MQTT_USERNAME:-tenant-demo-iot}
-      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
-      MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-iot-service-tenant-demo}
       MQTT_CA_PATH: /run/secrets/mqtt-ca.crt
-      MQTT_TOPIC_PREFIX: ${MQTT_TOPIC_PREFIX:-agri}
-      IOT_MQTT_RELAY_INTERVAL_MS: ${IOT_MQTT_RELAY_INTERVAL_MS:-2000}
+      # 账号、口令、clientId、topic 与轮询间隔只从 env_file 注入，避免 Compose 的空插值覆盖 .env。
+      EMQX_API_URL: http://emqx:18083
       # 和风天气可插拔接入：上面 `env_file: ../.env` 会自动将本地 QWEATHER_KEY / QWEATHER_KEY_ID / QWEATHER_DEVELOPER_ID / QWEATHER_PROJECT_ID 等写入容器。
       # 不在 `environment:` 里重新展开 ${QWEATHER_KEY:-}，否则 compose 插值会用 shell 变量（通常为空）覆盖 env_file。
       # 留空时 sync.ts 中 buildQWeatherFromEnv 返回 undefined，服务行为与接入前完全一致。

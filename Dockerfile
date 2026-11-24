@@ -58,8 +58,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8080
-# 迁移与 bucket 初始化都是幂等的，容器启动时先补齐基础设施再拉起服务
-CMD ["sh", "-c", "node scripts/migrate-postgres.mjs && node scripts/init-minio.mjs && node scripts/start-services.mjs"]
+# MQTT 启用时先幂等恢复 EMQX 用户与 ACL，再执行迁移、bucket 初始化并拉起服务。
+CMD ["sh", "-c", "if [ \"$IOT_MQTT_ENABLED\" = \"true\" ] || [ \"$IOT_MQTT_ENABLED\" = \"1\" ]; then node scripts/provision-emqx.mjs || exit 1; fi; node scripts/migrate-postgres.mjs && node scripts/init-minio.mjs && node scripts/start-services.mjs"]
 
 FROM nginx:1.27-alpine AS edge
 # 默认生成自签证书，保证 compose 开箱可访问；生产把正式证书挂到 /etc/nginx/tls 覆盖

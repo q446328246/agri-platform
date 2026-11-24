@@ -577,20 +577,32 @@ export function createControlHttpServer(
         // 水肥类指令结单回流一条完成事件：灌溉记用水量，施肥记配方总投肥量，
         // 口径分主题——把施肥的肥料量算进灌溉用水会虚报，两类各说各的账。
         const finished = status === "DONE" ? buildFinishedEvent(target, at, result, fertilizerDensityKgPerL) : undefined;
+        const linkedTransition = linked ? {
+          id: linked.id,
+          status: linked.status,
+          at,
+          version: linked.version,
+          message: `由 ${target.type} 指令 ${target.id} 结单联动${linked.status === "PAUSED" ? "暂停" : "恢复"}`,
+        } : undefined;
         const apply = async (tx?: Tx): Promise<ControlCommand | null> => {
           // 先跃迁再入队：跃迁被版本拦住时不留一条没人结单的事件
           const updated = await repository.transition(tenantId, transition, tx);
           if (!updated) return null;
           // 联动跃迁失败（目标被其它回执抢先推进）时整体回滚，本体结单也不落，设备重试回执即可
-          if (linked) {
-            const linkedUpdated = await repository.transition(tenantId, {
-              id: linked.id,
-              status: linked.status,
+          if (linkedTransition) {
+            const linkedUpdated = await repository.transition(tenantId, linkedTransition, tx);
+            if (!linkedUpdated) throw new Error("联动指令状态已被其它回执推进，本次结单整体回滚");
+          }
+          if (status === "DONE" && result?.confirmed === true && CONFIRM_REQUIRED_TYPES.includes(target.type)
+            && target.idempotencyKey?.startsWith(TIMEOUT_ESTOP_IDEMPOTENCY_PREFIX) !== true) {
+            await repository.failActiveJobs(
+              tenantId,
+              target.deviceId,
+              target.id,
               at,
-              version: linked.version,
-              message: `由 ${target.type} 指令 ${target.id} 结单联动${linked.status === "PAUSED" ? "暂停" : "恢复"}`,
-            }, tx);
-            if (!linkedUpdated) return null;
+              `设备已由${target.type === "ESTOP" ? "急停" : "断电"}指令 ${target.id} 确认停车，原作业指令收口为失败`,
+              tx,
+            );
           }
           if (finished && outbox) {
             await outbox.enqueue(tx, finished.topic, finished.payload, {
@@ -601,7 +613,11 @@ export function createControlHttpServer(
           }
           return updated;
         };
-        const updated = withTransaction ? await withTransaction(apply) : await apply(undefined);
+        const updated = withTransaction
+          ? await withTransaction(apply)
+          : linkedTransition && repository.transitionPair
+            ? (await repository.transitionPair(tenantId, transition, linkedTransition))?.command ?? null
+            : await apply(undefined);
         if (!updated) { send(res, 409, null, traceId, "指令状态已被其它回执推进，请刷新后重试"); return; }
         send(res, 200, toView(updated, timeoutMin, Date.now()), traceId);
         return;

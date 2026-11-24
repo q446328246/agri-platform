@@ -369,6 +369,28 @@ describe("作业执行器（B2）", () => {
     expect(await jobs.findJob("tenant-demo", job.id)).toMatchObject({ status: "RUNNING", runRevision: 2 });
   });
 
+  it("旧执行周期超时核对前已恢复时不再向设备发暂停", async () => {
+    const { jobs, executor, dispatched, waitCommand } = setup();
+    const job = await jobs.createJob(undefined, {
+      tenantId: "tenant-demo", plotCode: "P-1", deviceId: "tractor-001", operationType: "SEEDING",
+      parameters: { areaMu: 1, durationMin: 1 }, operator: "u", reason: "",
+    });
+    await jobs.addStage(undefined, {
+      tenantId: "tenant-demo", jobId: job.id, stage: "OPERATION", commandType: "SEEDING", parameters: {}, timeoutMs: 1000,
+    });
+    waitCommand.mockImplementationOnce(async () => {
+      await jobs.updateJob("tenant-demo", job.id, { status: "PAUSED" });
+      await jobs.updateJob("tenant-demo", job.id, { status: "RUNNING" });
+      return "TIMEOUT";
+    });
+
+    await executor.run(job);
+
+    expect(dispatched.map((input) => input.type)).toEqual(["SEEDING"]);
+    expect(await jobs.findJob("tenant-demo", job.id)).toMatchObject({ status: "RUNNING", runRevision: 2 });
+    expect((await jobs.listStages("tenant-demo", job.id))[0]).toMatchObject({ status: "SENT", commandId: "cmd-1" });
+  });
+
   it("预检返回后作业已被急停，不再下发分步指令", async () => {
     const jobs = new InMemoryTractorJobRepository();
     const safetyEvents = new InMemoryTractorSafetyEventRepository();

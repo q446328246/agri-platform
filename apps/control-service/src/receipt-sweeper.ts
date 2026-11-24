@@ -5,7 +5,7 @@ import { EventTopic } from "@agri/contracts";
 import type { PrismaClientLike, Tx } from "@agri/db";
 import type { OutboxService } from "@agri/mq";
 
-import { effectiveTimeoutMin, pendingMinutesOf, TIMEOUT_ESTOP_IDEMPOTENCY_PREFIX } from "./control.repository.js";
+import { effectiveTimeoutMin, isCommandOverdue, pendingMinutesOf, TIMEOUT_ESTOP_IDEMPOTENCY_PREFIX } from "./control.repository.js";
 import type { ControlCommand, ControlCommandRepository, OverdueCursor } from "./control.repository.js";
 
 const TIMEOUT_ESTOP_PREFIX = TIMEOUT_ESTOP_IDEMPOTENCY_PREFIX;
@@ -140,25 +140,40 @@ export class ControlReceiptSweeper {
    */
   private async failAfterEmergencyStop(command: ControlCommand, nowMs: number): Promise<boolean> {
     const idempotencyKey = `${TIMEOUT_ESTOP_PREFIX}${command.id}`;
-    let emergencyStop = await this.commands.findByIdempotencyKey(command.tenantId, idempotencyKey);
-    if (!emergencyStop) {
-      emergencyStop = await this.commands.create({
-        id: randomUUID(),
-        tenantId: command.tenantId,
-        deviceId: command.deviceId,
-        plotCode: command.plotCode,
-        operatorId: "system-timeout",
-        type: "ESTOP",
-        parameters: { targetCommandId: command.id },
-        status: "QUEUED",
-        version: 1,
-        origin: "EVENT",
-        idempotencyKey,
-        reason: `拖拉机指令 ${command.id} 回执超时，先急停并等待设备确认`,
-        createdAt: new Date(nowMs).toISOString(),
-      });
-      emergencyStop ??= await this.commands.findByIdempotencyKey(command.tenantId, idempotencyKey);
-    }
+    let candidateExpired = false;
+    const withTransaction = this.options.withTransaction;
+    const emergencyCommand = (key: string): ControlCommand => ({
+      id: randomUUID(),
+      tenantId: command.tenantId,
+      deviceId: command.deviceId,
+      plotCode: command.plotCode,
+      operatorId: "system-timeout",
+      type: "ESTOP",
+      parameters: { targetCommandId: command.id },
+      status: "QUEUED",
+      version: 1,
+      origin: "EVENT",
+      idempotencyKey: key,
+      reason: `拖拉机指令 ${command.id} 回执超时，先急停并等待设备确认`,
+      createdAt: new Date(nowMs).toISOString(),
+    });
+    const ensureEmergencyStop = async (key: string, tx?: Tx): Promise<{ stop: ControlCommand | null; created: boolean }> => {
+      const latest = await this.commands.find(command.tenantId, command.id, tx, tx ? { forUpdate: true } : undefined);
+      if (!latest || !isCommandOverdue(latest, nowMs, this.options.timeoutMin)) {
+        candidateExpired = true;
+        return { stop: null, created: false };
+      }
+      const existing = await this.commands.findByIdempotencyKey(command.tenantId, key, tx);
+      if (existing) return { stop: existing, created: false };
+      const created = await this.commands.create(emergencyCommand(key), tx);
+      return { stop: created ?? await this.commands.findByIdempotencyKey(command.tenantId, key, tx), created: created !== null };
+    };
+    const initial = withTransaction
+      ? await withTransaction((tx) => ensureEmergencyStop(idempotencyKey, tx))
+      : await ensureEmergencyStop(idempotencyKey);
+    let emergencyStop = initial.stop;
+    if (!emergencyStop && !candidateExpired) throw new Error("超时急停指令创建失败，原作业指令保持未收口");
+    if (candidateExpired) return false;
     let failedAttempt: string | undefined;
     let retryCreated = false;
     const visited = new Set<string>();
@@ -173,27 +188,13 @@ export class ControlReceiptSweeper {
       if (emergencyStop.status !== "FAILED" && emergencyStop.status !== "CANCELLED" && !unconfirmed) break;
       failedAttempt ??= `超时急停指令已${emergencyStop.status === "CANCELLED" ? "取消" : emergencyStop.status === "DONE" ? "结单但未确认停车" : "失败"}，原作业指令保持未收口`;
       const retryKey = `${idempotencyKey}:retry:${emergencyStop.id}`;
-      const retry = await this.commands.findByIdempotencyKey(command.tenantId, retryKey);
-      if (retry) {
-        emergencyStop = retry;
-        continue;
-      }
-      emergencyStop = await this.commands.create({
-        id: randomUUID(),
-        tenantId: command.tenantId,
-        deviceId: command.deviceId,
-        plotCode: command.plotCode,
-        operatorId: "system-timeout",
-        type: "ESTOP",
-        parameters: { targetCommandId: command.id },
-        status: "QUEUED",
-        version: 1,
-        origin: "EVENT",
-        idempotencyKey: retryKey,
-        reason: `拖拉机指令 ${command.id} 回执超时，先急停并等待设备确认`,
-        createdAt: new Date(nowMs).toISOString(),
-      });
-      emergencyStop ??= await this.commands.findByIdempotencyKey(command.tenantId, retryKey);
+      const retry = withTransaction
+        ? await withTransaction((tx) => ensureEmergencyStop(retryKey, tx))
+        : await ensureEmergencyStop(retryKey);
+      if (candidateExpired) return false;
+      if (!retry.stop) throw new Error("超时急停重试指令创建失败，原作业指令保持未收口");
+      emergencyStop = retry.stop;
+      if (!retry.created) continue;
       retryCreated = true;
       break;
     }

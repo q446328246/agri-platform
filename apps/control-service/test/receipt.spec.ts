@@ -125,6 +125,65 @@ describe("指令仓储跃迁", () => {
     expect(await repository.transition(TENANT, { id: "cmd-1", status: "FAILED", at: "2026-11-12T00:06:00.000Z", version: 3 })).toBeNull();
   });
 
+  it("急停代际拒绝旧作业与旧恢复指令的迟到推进，并保持设备互锁", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "job-old", type: "SEEDING", status: "ACKED", version: 3, createdAt: "2026-11-12T00:00:00.000Z" }),
+      command({ id: "resume-old", type: "RESUME", status: "SENT", version: 2, createdAt: "2026-11-12T00:04:00.000Z", parameters: { targetCommandId: "job-old" } }),
+      command({ id: "estop", type: "ESTOP", status: "SENT", version: 2, createdAt: "2026-11-12T00:05:00.000Z", sentAt: "2026-11-12T00:05:00.000Z" }),
+      command({ id: "job-new", type: "SEEDING", status: "ACKED", version: 3, createdAt: "2026-11-12T00:07:00.000Z" }),
+    ]);
+    const at = "2026-11-12T00:06:00.000Z";
+
+    expect(await repository.hasActiveJob(TENANT, "device-fert-001")).toBe(true);
+    expect(await repository.transition(TENANT, { id: "job-old", status: "DONE", at, version: 3 })).toBeNull();
+    expect(await repository.transition(TENANT, { id: "resume-old", status: "DONE", at, version: 2 })).toBeNull();
+    expect(await repository.transition(TENANT, { id: "job-old", status: "FAILED", at, version: 3, message: "急停收口" })).not.toBeNull();
+
+    const stopped = await repository.transition(TENANT, { id: "estop", status: "DONE", at, version: 2, result: { confirmed: true } });
+    expect(stopped).not.toBeNull();
+    expect(await repository.hasActiveJob(TENANT, "device-fert-001", "job-new")).toBe(false);
+    expect(await repository.transition(TENANT, { id: "job-new", status: "DONE", at: "2026-11-12T00:08:00.000Z", version: 3 })).not.toBeNull();
+  });
+
+  it("最新确认急停取代旧失败急停，只放行停车后新建的作业", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "estop-failed", type: "ESTOP", status: "FAILED", version: 2, finishedAt: "2026-11-12T00:04:00.000Z", createdAt: "2026-11-12T00:03:00.000Z" }),
+      command({ id: "estop-confirmed", type: "ESTOP", status: "DONE", version: 3, result: { confirmed: true }, finishedAt: "2026-11-12T00:06:00.000Z", createdAt: "2026-11-12T00:05:00.000Z" }),
+      command({ id: "job-before-stop", type: "SEEDING", status: "ACKED", version: 3, createdAt: "2026-11-12T00:05:30.000Z" }),
+      command({ id: "job-after-stop", type: "SEEDING", status: "ACKED", version: 3, createdAt: "2026-11-12T00:06:01.000Z" }),
+    ]);
+    const at = "2026-11-12T00:07:00.000Z";
+
+    expect(await repository.hasActiveJob(TENANT, "device-fert-001", "job-after-stop")).toBe(true);
+    expect(await repository.transition(TENANT, { id: "job-before-stop", status: "DONE", at, version: 3 })).toBeNull();
+    expect(await repository.transition(TENANT, { id: "job-before-stop", status: "FAILED", at, version: 3 })).not.toBeNull();
+    expect(await repository.transition(TENANT, { id: "job-after-stop", status: "DONE", at, version: 3 })).not.toBeNull();
+  });
+
+  it("取消的急停重试不掩盖此前仍未闭环的急停", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "estop-failed", type: "ESTOP", status: "FAILED", version: 2, finishedAt: "2026-11-12T00:04:00.000Z", createdAt: "2026-11-12T00:03:00.000Z" }),
+      command({ id: "estop-cancelled", type: "ESTOP", status: "CANCELLED", version: 2, finishedAt: "2026-11-12T00:06:00.000Z", createdAt: "2026-11-12T00:05:00.000Z" }),
+    ]);
+
+    expect(await repository.hasActiveJob(TENANT, "device-fert-001")).toBe(true);
+  });
+
+  it("本体与联动目标先共同校验再提交，联动版本过期时两条都不变", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "job-pair", status: "ACKED", version: 3 }),
+      command({ id: "pause-pair", type: "PAUSE", status: "SENT", version: 2, parameters: { targetCommandId: "job-pair" } }),
+    ]);
+
+    expect(await repository.transitionPair?.(TENANT, {
+      id: "pause-pair", status: "DONE", at: "2026-11-12T00:05:00.000Z", version: 2,
+    }, {
+      id: "job-pair", status: "PAUSED", at: "2026-11-12T00:05:00.000Z", version: 1,
+    })).toBeNull();
+    expect((await repository.find(TENANT, "pause-pair"))?.status).toBe("SENT");
+    expect((await repository.find(TENANT, "job-pair"))).toMatchObject({ status: "ACKED", version: 3 });
+  });
+
   it("在途时长从最后一次状态推进时间起算，终态不参与超时", () => {
     const now = Date.parse("2026-11-12T01:00:00.000Z");
     expect(pendingMinutesOf(command({ createdAt: "2026-11-12T00:40:00.000Z" }), now)).toBe(20);
@@ -439,6 +498,38 @@ describe("设备通道：下发确认与执行回执", () => {
     expect((await stale.json() as { message: string }).message).toContain("早于上一次状态推进");
     expect((await repository.find(TENANT, "job-late-ack"))).toMatchObject({ status: "ACKED", version: 4 });
     expect((await repository.find(TENANT, "pause-too-early"))?.status).toBe("SENT");
+  });
+
+  it("急停后迟到的 RESUME 结单不能越过急停代际恢复原作业", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "job-estop-fence", type: "SEEDING", status: "PAUSED", version: 4, pausedAt: "2026-11-12T00:03:00.000Z" }),
+      command({ id: "resume-estop-fence", type: "RESUME", status: "SENT", version: 2, sentAt: "2026-11-12T00:04:00.000Z", parameters: { targetCommandId: "job-estop-fence" } }),
+      command({ id: "estop-fence", type: "ESTOP", status: "SENT", version: 2, sentAt: "2026-11-12T00:05:00.000Z", createdAt: "2026-11-12T00:05:00.000Z" }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+
+    const response = await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "resume-estop-fence", status: "DONE", at: "2026-11-12T00:06:00.000Z",
+    });
+    expect(response.status).toBe(409);
+    expect((await repository.find(TENANT, "resume-estop-fence"))?.status).toBe("SENT");
+    expect((await repository.find(TENANT, "job-estop-fence"))?.status).toBe("PAUSED");
+  });
+
+  it("人工急停确认停车后原子收口原作业并释放设备互锁", async () => {
+    const repository = new InMemoryControlCommandRepository([
+      command({ id: "job-manual-stop", type: "SEEDING", status: "SENT", version: 2, sentAt: "2026-11-12T00:01:00.000Z" }),
+      command({ id: "manual-stop", type: "ESTOP", status: "SENT", version: 2, sentAt: "2026-11-12T00:02:00.000Z", createdAt: "2026-11-12T00:02:00.000Z" }),
+    ]);
+    const base = await start(createControlHttpServer(repository));
+
+    const response = await postJson(base, "/api/v1/control/device/receipt", {
+      commandId: "manual-stop", status: "DONE", at: "2026-11-12T00:03:00.000Z", result: { confirmed: true },
+    });
+    expect(response.status).toBe(200);
+    expect((await repository.find(TENANT, "job-manual-stop"))).toMatchObject({ status: "FAILED", version: 3 });
+    expect((await repository.find(TENANT, "job-manual-stop"))?.receiptMessage).toContain("确认停车");
+    expect(await repository.hasActiveJob(TENANT, "device-fert-001")).toBe(false);
   });
 
   it("下发与回执校验指令设备归属，越权设备不能推进状态", async () => {
@@ -812,6 +903,117 @@ describe.runIf(databaseUrl)("SqlControlCommandRepository 回执列（真实库�
       // 结单后退出队列
       expect(await repository.transition(TENANT, { id: oldest, status: "SENT", at: new Date().toISOString(), version: 1 })).toMatchObject({ status: "SENT" });
       expect((await repository.page(TENANT, { deviceId, pending: true, ascending: true, page: 1, size: 3 })).items.map((item) => item.id)).toEqual([oldest, middle, newest]);
+    } finally {
+      await client.$executeRawUnsafe("DELETE FROM control_commands WHERE device_id = $1", deviceId);
+      await client.$disconnect();
+    }
+  });
+
+  it("急停围栏进入 SQL 更新条件，旧作业与旧恢复不能迟到推进", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const repository = new SqlControlCommandRepository(client);
+    const suffix = Date.now();
+    const deviceId = `device-fence-smoke-${suffix}`;
+    const jobId = `cmd-fence-job-${suffix}`;
+    const resumeId = `cmd-fence-resume-${suffix}`;
+    const estopId = `cmd-fence-estop-${suffix}`;
+    const at = new Date().toISOString();
+    try {
+      await repository.create(command({ id: jobId, deviceId, type: "SEEDING", createdAt: new Date(Date.now() - 5000).toISOString() }));
+      let current = await repository.find(TENANT, jobId);
+      await repository.transition(TENANT, { id: jobId, status: "SENT", at, version: current!.version });
+      current = await repository.find(TENANT, jobId);
+      await repository.transition(TENANT, { id: jobId, status: "ACKED", at, version: current!.version });
+      await repository.create(command({ id: resumeId, deviceId, type: "RESUME", parameters: { targetCommandId: jobId }, createdAt: new Date(Date.now() - 3000).toISOString() }));
+      current = await repository.find(TENANT, resumeId);
+      await repository.transition(TENANT, { id: resumeId, status: "SENT", at, version: current!.version });
+      await repository.create(command({ id: estopId, deviceId, type: "ESTOP", parameters: {}, createdAt: new Date(Date.now() - 1000).toISOString() }));
+
+      const job = await repository.find(TENANT, jobId);
+      expect(await repository.transition(TENANT, { id: jobId, status: "DONE", at, version: job!.version })).toBeNull();
+      const resume = await repository.find(TENANT, resumeId);
+      expect(await repository.transition(TENANT, { id: resumeId, status: "DONE", at, version: resume!.version })).toBeNull();
+      expect(await repository.hasActiveJob(TENANT, deviceId)).toBe(true);
+    } finally {
+      await client.$executeRawUnsafe("DELETE FROM control_commands WHERE device_id = $1", deviceId);
+      await client.$disconnect();
+    }
+  });
+
+  it("SQL 急停围栏按最新有效代次放行停车后的新作业", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const repository = new SqlControlCommandRepository(client);
+    const suffix = Date.now();
+    const deviceId = `device-fence-generation-${suffix}`;
+    const oldStopId = `cmd-old-stop-${suffix}`;
+    const confirmedStopId = `cmd-confirmed-stop-${suffix}`;
+    const oldJobId = `cmd-old-job-${suffix}`;
+    const newJobId = `cmd-new-job-${suffix}`;
+    const at = new Date().toISOString();
+    try {
+      await repository.create(command({ id: oldStopId, deviceId, type: "ESTOP", createdAt: new Date(Date.now() - 5000).toISOString() }));
+      expect(await repository.transition(TENANT, { id: oldStopId, status: "SENT", at: new Date(Date.now() - 4900).toISOString(), version: 1 })).not.toBeNull();
+      expect(await repository.transition(TENANT, { id: oldStopId, status: "FAILED", at: new Date(Date.now() - 4000).toISOString(), version: 2 })).not.toBeNull();
+      await repository.create(command({ id: confirmedStopId, deviceId, type: "ESTOP", createdAt: new Date(Date.now() - 3000).toISOString() }));
+      expect(await repository.transition(TENANT, { id: confirmedStopId, status: "SENT", at: new Date(Date.now() - 2900).toISOString(), version: 1 })).not.toBeNull();
+      expect(await repository.transition(TENANT, { id: confirmedStopId, status: "DONE", at: new Date(Date.now() - 2000).toISOString(), version: 2, result: { confirmed: true } })).not.toBeNull();
+      await repository.create(command({ id: oldJobId, deviceId, type: "SEEDING", status: "ACKED", createdAt: new Date(Date.now() - 2500).toISOString() }));
+
+      expect(await repository.find(TENANT, confirmedStopId)).toMatchObject({ status: "DONE", result: { confirmed: true } });
+      const latestSafety = await client.$queryRawUnsafe<Array<{ id: string; status: string; finished_at: string | null; confirmed: string | null }>>(
+        "SELECT id, status, finished_at, result_json->>'confirmed' AS confirmed FROM control_commands WHERE device_id = $1 AND type = 'ESTOP' ORDER BY created_at DESC, id DESC LIMIT 1",
+        deviceId,
+      );
+      expect(latestSafety[0]).toMatchObject({ id: confirmedStopId, status: "DONE", confirmed: "true" });
+      expect(await repository.transition(TENANT, { id: oldJobId, status: "DONE", at, version: 1 })).toBeNull();
+      expect(await repository.transition(TENANT, { id: oldJobId, status: "FAILED", at, version: 1 })).not.toBeNull();
+      expect(await repository.create(command({ id: newJobId, deviceId, type: "SEEDING", status: "ACKED", createdAt: new Date(Date.now() - 1000).toISOString() }))).not.toBeNull();
+      expect(await repository.find(TENANT, newJobId)).toMatchObject({ status: "ACKED", version: 1 });
+      const fenceState = await client.$queryRawUnsafe<Array<Record<string, unknown>>>(
+        `SELECT job.created_at, safety.finished_at, job.created_at <= safety.finished_at AS overlaps,
+                safety.status, safety.result_json->>'confirmed' AS confirmed
+           FROM control_commands AS job JOIN control_commands AS safety ON safety.id = $2
+          WHERE job.id = $1`,
+        newJobId,
+        confirmedStopId,
+      );
+      expect(fenceState[0]).toMatchObject({ overlaps: false, status: "DONE", confirmed: "true" });
+      expect(await repository.transition(TENANT, { id: newJobId, status: "DONE", at, version: 1 })).not.toBeNull();
+    } finally {
+      await client.$executeRawUnsafe("DELETE FROM control_commands WHERE device_id = $1", deviceId);
+      await client.$disconnect();
+    }
+  });
+
+  it("SQL 联动跃迁失败会回滚本体结单，不留分家状态", async () => {
+    const client = PgClientAdapter.fromUrl(databaseUrl as string);
+    await client.$connect();
+    const repository = new SqlControlCommandRepository(client);
+    const suffix = Date.now();
+    const deviceId = `device-pair-smoke-${suffix}`;
+    const jobId = `cmd-pair-job-${suffix}`;
+    const pauseId = `cmd-pair-pause-${suffix}`;
+    const at = new Date().toISOString();
+    try {
+      await repository.create(command({ id: jobId, deviceId, type: "SEEDING" }));
+      let current = await repository.find(TENANT, jobId);
+      await repository.transition(TENANT, { id: jobId, status: "SENT", at, version: current!.version });
+      current = await repository.find(TENANT, jobId);
+      await repository.transition(TENANT, { id: jobId, status: "ACKED", at, version: current!.version });
+      await repository.create(command({ id: pauseId, deviceId, type: "PAUSE", parameters: { targetCommandId: jobId } }));
+      current = await repository.find(TENANT, pauseId);
+      await repository.transition(TENANT, { id: pauseId, status: "SENT", at, version: current!.version });
+      const pause = await repository.find(TENANT, pauseId);
+
+      await expect(repository.transitionPair(TENANT, {
+        id: pauseId, status: "DONE", at, version: pause!.version,
+      }, {
+        id: jobId, status: "PAUSED", at, version: 1,
+      })).rejects.toThrow("整体回滚");
+      expect((await repository.find(TENANT, pauseId))?.status).toBe("SENT");
+      expect((await repository.find(TENANT, jobId))?.status).toBe("ACKED");
     } finally {
       await client.$executeRawUnsafe("DELETE FROM control_commands WHERE device_id = $1", deviceId);
       await client.$disconnect();

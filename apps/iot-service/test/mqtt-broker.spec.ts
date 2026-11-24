@@ -115,6 +115,8 @@ function createHarness(overrides: Partial<MqttBrokerOptions> = {}) {
 
   const broker = createMqttBroker({
     url: "mqtt://broker.test:1883",
+    username: "test-service",
+    password: "test-password",
     tenantId: "tenant-demo",
     telemetryUrl: "http://telemetry.test:3004",
     controlUrl: "http://control.test:3008",
@@ -377,6 +379,17 @@ describe("createMqttBroker", () => {
       status,
     });
     await broker.stop();
+  });
+
+  it("启用接入时缺少用户名或口令直接失败，不静默发起无凭证连接", () => {
+    vi.stubEnv("MQTT_USERNAME", "");
+    vi.stubEnv("MQTT_PASSWORD", "");
+    try {
+      expect(() => createHarness({ username: "", password: "test-password" })).toThrow("MQTT_USERNAME is required");
+      expect(() => createHarness({ username: "test-service", password: "" })).toThrow("MQTT_PASSWORD is required");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("使用稳定 clientId、持久会话和 broker 凭据", () => {

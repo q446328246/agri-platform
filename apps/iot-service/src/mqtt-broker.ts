@@ -50,6 +50,8 @@ export function createMqttBroker(options: MqttBrokerOptions = {}): MqttBroker {
   const deviceToken = options.deviceToken?.trim() || process.env.DEVICE_CALLBACK_TOKEN?.trim() || "";
   const username = options.username?.trim() || process.env.MQTT_USERNAME?.trim() || "";
   const password = options.password ?? process.env.MQTT_PASSWORD ?? "";
+  if (!username) throw new Error("MQTT_USERNAME is required when MQTT is enabled");
+  if (!password) throw new Error("MQTT_PASSWORD is required when MQTT is enabled");
   const clientId = options.clientId?.trim() || process.env.MQTT_CLIENT_ID?.trim() || `iot-service-${tenantId}`;
   const caPath = options.caPath?.trim() || process.env.MQTT_CA_PATH?.trim() || "";
   const deliveries = options.deliveries ?? new InMemoryMqttDeliveryRepository();
