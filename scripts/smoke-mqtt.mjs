@@ -126,7 +126,12 @@ try {
     value: Number((40 + randomBytes(4).readUInt32BE(0) % 200_000 / 10_000).toFixed(4)),
     recordedAt: new Date().toISOString(),
   };
-  await publish(device, deviceTelemetryTopic, { ...telemetryKey, runId });
+  await publish(device, deviceTelemetryTopic, {
+    metric: telemetryKey.metric,
+    value: telemetryKey.value,
+    recordedAt: telemetryKey.recordedAt,
+    runId,
+  });
   assert((await receivedTelemetry).runId === runId, "Telemetry payload did not survive relay");
   await waitUntil(
     async () => (await database.query(
@@ -152,7 +157,7 @@ try {
     assert(topic === deviceReceiptTopic, "Receipt arrived on an unexpected topic");
     return JSON.parse(String(payload));
   });
-  await publish(device, deviceReceiptTopic, { commandId, status: "ACKED", runId, deviceId: "device-tractor-001" });
+  await publish(device, deviceReceiptTopic, { commandId, status: "ACKED", runId });
   assert((await receivedReceipt).commandId === commandId, "Receipt payload did not survive relay");
   await waitUntil(
     async () => (await database.query("SELECT status FROM control_commands WHERE tenant_id = $1 AND id = $2", [tenantId, commandId])).rows[0]?.status === "ACKED",
