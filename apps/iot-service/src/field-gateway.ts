@@ -1,9 +1,14 @@
 import { isJobCommandType } from "@agri/contracts";
-import { getModbusProfile, readModbusBinding } from "./device-binding.js";
-import type { ModbusBinding, ModbusMeter, ModbusProfile } from "./device-binding.js";
+import { fieldGatewayProtocols, getModbusProfile, isPlcProtocol, readModbusBinding } from "./device-binding.js";
+import type { ModbusBinding } from "./device-binding.js";
 import { ModbusTcpClient, combineUint32 } from "./modbus-tcp.js";
 import { DEFAULT_TENANT } from "./device.repository.js";
 import type { Device, DeviceRepository } from "./device.repository.js";
+import type { MqttConfigCipher } from "./mqtt-config.js";
+import { createPlcClient, plcMeterFor } from "./plc-clients.js";
+import type { PlcClientLike } from "./plc-clients.js";
+import { getPlcProfile, readPlcConfig } from "./plc-binding.js";
+import type { PlcDeviceConfig, PlcMeter, PlcPoint } from "./plc-binding.js";
 
 /**
  * 现场协议网关：把控制指令落到 Modbus TCP 的执行机构上。
@@ -25,7 +30,7 @@ import type { Device, DeviceRepository } from "./device.repository.js";
  * 网关重启后拿不到基线，就只报时长，水量留给控制侧按方案回退，不拿累计读数冒充用量。
  */
 
-/** 网关一次只服务这一协议的设备；HTTP 回调式设备由设备自己上报，网关不该去连 */
+/** 保留旧常量供既有调用方判断；实际网关按驱动目录扫描全部现场协议 */
 export const FIELD_GATEWAY_PROTOCOL = "MODBUS_TCP";
 
 /** control-service 缺省地址，与网关服务的 `CONTROL_SERVICE_URL` 同一口径 */
@@ -35,7 +40,7 @@ export const DEFAULT_CONTROL_BASE_URL = "http://127.0.0.1:3008";
 export const DEFAULT_FIELD_GATEWAY_INTERVAL_MS = 5_000;
 
 /** 回执 result 里作业量的键名按计量单位取，灌溉的立方米正是下游要的那个字段 */
-const METER_RESULT_KEY: Record<ModbusMeter["unit"], string> = {
+const METER_RESULT_KEY: Record<PlcMeter["unit"], string> = {
   "m³": "waterVolumeM3",
   // 剖面量出的是出液升数；投肥量（千克）需要料液密度，平台没有这个权威值，因此不换算成 kg
   L: "fertilizerLiters",
@@ -77,6 +82,10 @@ export interface FieldGatewayOptions {
   fetchImpl?: typeof fetch;
   /** Modbus 客户端注入点，测试用 */
   clientFor?: (device: Device, binding: ModbusBinding) => ModbusClientLike;
+  /** PLC 客户端注入点，测试用；缺省按设备连接配置建立真实协议连接 */
+  plcClientFor?: (device: Device, config: PlcDeviceConfig) => PlcClientLike | Promise<PlcClientLike>;
+  /** MQTT 配置加密器，同时用于解密 PLC 的 OPC UA 登录密码 */
+  configCipher?: MqttConfigCipher;
   /** 单条指令执行失败的回调，缺省只在控制台留一行；不影响其它设备与其它指令 */
   onError?: (device: Device, command: FieldCommand, error: Error) => void;
   now?: () => number;
@@ -90,6 +99,66 @@ export interface ModbusClientLike {
   readHoldingRegisters(address: number, quantity: number): Promise<number[]>;
   writeCoil(address: number, on: boolean): Promise<void>;
   close(): Promise<void>;
+}
+
+interface FieldProfile {
+  switchPoint: PlcPoint;
+  switchLabel: string;
+  runFeedbackPoint: PlcPoint;
+  faultPoint: PlcPoint;
+  faultLabel: string;
+  meter: (PlcMeter & { point: PlcPoint }) | null;
+}
+
+interface FieldClientLike {
+  writeBoolean(point: PlcPoint, value: boolean): Promise<void>;
+  readBoolean(point: PlcPoint): Promise<boolean>;
+  readMeter(point: PlcPoint, meter: PlcMeter): Promise<number>;
+  close(): Promise<void>;
+}
+
+class ModbusFieldClient implements FieldClientLike {
+  constructor(private readonly client: ModbusClientLike) {}
+
+  async writeBoolean(point: PlcPoint, value: boolean): Promise<void> {
+    await this.client.writeCoil(Number(point), value);
+  }
+
+  async readBoolean(point: PlcPoint): Promise<boolean> {
+    const bits = await this.client.readDiscreteInputs(Number(point), 1);
+    return bits[0] ?? false;
+  }
+
+  async readMeter(point: PlcPoint, meter: PlcMeter): Promise<number> {
+    const words = await this.client.readHoldingRegisters(Number(point), 2);
+    const high = meter.wordOrder === "HIGH_FIRST" ? (words[0] ?? 0) : (words[1] ?? 0);
+    const low = meter.wordOrder === "HIGH_FIRST" ? (words[1] ?? 0) : (words[0] ?? 0);
+    return combineUint32(high, low) * meter.scale;
+  }
+
+  async close(): Promise<void> {
+    await this.client.close();
+  }
+}
+
+class PlcFieldClient implements FieldClientLike {
+  constructor(private readonly client: PlcClientLike) {}
+
+  writeBoolean(point: PlcPoint, value: boolean): Promise<void> {
+    return this.client.writeBoolean(point, value);
+  }
+
+  readBoolean(point: PlcPoint): Promise<boolean> {
+    return this.client.readBoolean(point);
+  }
+
+  readMeter(point: PlcPoint, meter: PlcMeter): Promise<number> {
+    return this.client.readMeter(point, meter);
+  }
+
+  close(): Promise<void> {
+    return this.client.close();
+  }
 }
 
 /** 已写入但尚未结单的作业现场，只存在网关进程内；丢失后按「无基线」继续收口 */
@@ -152,7 +221,7 @@ class ControlChannel {
 
 /** 从指令参数里取执行包络；算不出收口条件时返回 undefined，调用方据此拒绝动硬件 */
 function jobSpecOf(command: FieldCommand): JobSpec | undefined {
-  if (command.type === "ESTOP") return { stopOnly: true };
+  if (command.type === "ESTOP" || command.type === "POWER_OFF") return { stopOnly: true };
   const parameters = command.parameters ?? {};
   const plan = parameters.plan;
   const planRecord = plan && typeof plan === "object" && !Array.isArray(plan) ? (plan as Record<string, unknown>) : {};
@@ -176,10 +245,13 @@ export class FieldGateway {
   private readonly channel: ControlChannel;
   private readonly intervalMs: number;
   private readonly clientFor: (device: Device, binding: ModbusBinding) => ModbusClientLike;
+  private readonly plcClientFor: (device: Device, config: PlcDeviceConfig) => PlcClientLike | Promise<PlcClientLike>;
+  private readonly configCipher: MqttConfigCipher | undefined;
   private readonly onError: (device: Device, command: FieldCommand, error: Error) => void;
   private readonly now: () => number;
   private readonly publishCommand: ((deviceNo: string, command: unknown) => void) | undefined;
-  private readonly clients = new Map<string, ModbusClientLike>();
+  private readonly clients = new Map<string, FieldClientLike>();
+  private readonly clientSignatures = new Map<string, string>();
   private readonly jobs = new Map<string, JobState>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
@@ -197,6 +269,8 @@ export class FieldGateway {
     this.clientFor =
       options.clientFor ??
       ((_device, binding) => new ModbusTcpClient({ host: binding.host, port: binding.port, unitId: binding.unitId, timeoutMs: binding.timeoutMs }));
+    this.plcClientFor = options.plcClientFor ?? ((_device, config) => createPlcClient(config, this.configCipher));
+    this.configCipher = options.configCipher;
     this.onError = options.onError ?? ((device, command, error) => console.warn(`[field-gateway] ${device.deviceNo} 指令 ${command.id} 失败：${error.message}`));
     this.now = options.now ?? Date.now;
     this.publishCommand = options.publishCommand;
@@ -219,38 +293,100 @@ export class FieldGateway {
   async closeClients(): Promise<void> {
     const clients = [...this.clients.values()];
     this.clients.clear();
+    this.clientSignatures.clear();
     await Promise.all(clients.map((client) => client.close().catch(() => undefined)));
   }
 
   /** 一台设备的连接复用；出错后由调用方丢弃重建 */
-  private client(device: Device, binding: ModbusBinding): ModbusClientLike {
-    const cached = this.clients.get(device.id);
-    if (cached) return cached;
-    const created = this.clientFor(device, binding);
-    this.clients.set(device.id, created);
-    return created;
+  private async context(device: Device): Promise<{ client: FieldClientLike; profile: FieldProfile }> {
+    if (!isPlcProtocol(device.protocol)) {
+      const binding = readModbusBinding(device.binding, device.type);
+      const signature = JSON.stringify({ protocol: device.protocol, binding });
+      const cached = this.clients.get(device.id);
+      if (cached && this.clientSignatures.get(device.id) === signature) {
+        const selected = getModbusProfile(binding.profile);
+        return {
+          client: cached,
+          profile: {
+            switchPoint: selected.switchCoil,
+            switchLabel: hex(selected.switchCoil),
+            runFeedbackPoint: selected.runFeedbackInput,
+            faultPoint: selected.faultInput,
+            faultLabel: hex(selected.faultInput),
+            meter: selected.meter ? { ...selected.meter, dataType: "UINT32", point: selected.meter.register } : null,
+          },
+        };
+      }
+      if (cached) await cached.close().catch(() => undefined);
+      const client = new ModbusFieldClient(this.clientFor(device, binding));
+      this.clients.set(device.id, client);
+      this.clientSignatures.set(device.id, signature);
+      const selected = getModbusProfile(binding.profile);
+      return {
+        client,
+        profile: {
+          switchPoint: selected.switchCoil,
+          switchLabel: hex(selected.switchCoil),
+          runFeedbackPoint: selected.runFeedbackInput,
+          faultPoint: selected.faultInput,
+          faultLabel: hex(selected.faultInput),
+          meter: selected.meter ? { ...selected.meter, dataType: "UINT32", point: selected.meter.register } : null,
+        },
+      };
+    }
+    const config = readPlcConfig(device.protocol, device.plc, device.type, this.configCipher);
+    const selected = getPlcProfile(device.protocol, config.profile);
+    const signature = JSON.stringify({ protocol: device.protocol, config });
+    let client = this.clients.get(device.id);
+    if (client && this.clientSignatures.get(device.id) !== signature) {
+      await client.close().catch(() => undefined);
+      this.clients.delete(device.id);
+      this.clientSignatures.delete(device.id);
+      client = undefined;
+    }
+    if (!client) {
+      client = new PlcFieldClient(await this.plcClientFor(device, config));
+      this.clients.set(device.id, client);
+      this.clientSignatures.set(device.id, signature);
+    }
+    const meter = plcMeterFor(config);
+    return {
+      client,
+      profile: {
+        switchPoint: config.switchPoint,
+        switchLabel: String(config.switchPoint),
+        runFeedbackPoint: config.runFeedbackPoint,
+        faultPoint: config.faultPoint,
+        faultLabel: String(config.faultPoint),
+        meter: meter ? { ...meter, point: config.meterPoint! } : null,
+      },
+    };
   }
 
   /**
-   * 轮询一轮：取现场协议设备，逐台把在途指令往前推一步。
+   * 轮询一轮：取全部现场协议设备，逐台把在途指令往前推一步。
    * 一轮里每条指令至多推进一步（写入或结单），因此同一个指令不会既写线圈又立刻结单。
-   * 单台设备的台账问题（缺绑定、剖面写错）只影响它自己，不把整轮带走；
-   * 现场连接出错由 `ModbusTcpClient` 自行断线重连，这里不额外拆连接。
+   * 单台设备的台账问题（缺连接、剖面写错）只影响它自己，不把整轮带走。
    */
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
-      const devices = await this.devices.list(this.tenantId, { protocol: FIELD_GATEWAY_PROTOCOL });
+      const devices = await this.devices.list(this.tenantId, { protocols: fieldGatewayProtocols() });
       for (const device of devices) {
         try {
-          const binding = readModbusBinding(device.binding, device.type);
-          const profile = getModbusProfile(binding.profile);
+          await this.context(device);
           const commands = await this.channel.pending(device.id);
           for (const command of commands) {
+            let client: FieldClientLike | undefined;
             try {
-              await this.execute(device, binding, profile, command);
+              const context = await this.context(device);
+              client = context.client;
+              await this.execute(device, context.client, context.profile, command);
             } catch (error) {
+              await client?.close().catch(() => undefined);
+              this.clients.delete(device.id);
+              this.clientSignatures.delete(device.id);
               this.onError(device, command, error instanceof Error ? error : new Error(String(error)));
             }
           }
@@ -263,7 +399,7 @@ export class FieldGateway {
     }
   }
 
-  private async execute(device: Device, binding: ModbusBinding, profile: ModbusProfile, command: FieldCommand): Promise<void> {
+  private async execute(device: Device, client: FieldClientLike, profile: FieldProfile, command: FieldCommand): Promise<void> {
     // 作业联锁与电子围栏（B4）：作业类指令执行前先过安全校验，判不过直接失败收口，不碰硬件。
     // 控制类指令（急停/断电/暂停等）不受此约束——它们是对在途作业的处置动作，急停必须能下达。
     if (isJobCommandType(command.type)) {
@@ -289,7 +425,6 @@ export class FieldGateway {
       );
       return;
     }
-    const client = this.client(device, binding);
     if (command.status === "QUEUED") {
       await this.channel.dispatch(command.id);
       // MQTT 指令通道（A2）：与 Modbus 线圈下发并存，领取后补发一条给订阅 command topic 的设备
@@ -307,41 +442,71 @@ export class FieldGateway {
     }
   }
 
-  /** 第二步：写入启停线圈，读一眼故障输入，没问题就报「设备已接收」 */
-  private async startJob(client: ModbusClientLike, profile: ModbusProfile, command: FieldCommand, spec: JobSpec): Promise<void> {
+  /** 第二步：写入启停点位，读一眼故障输入，没问题就报「设备已接收」 */
+  private async startJob(client: FieldClientLike, profile: FieldProfile, command: FieldCommand, spec: JobSpec): Promise<void> {
     const on = !spec.stopOnly;
-    await client.writeCoil(profile.switchCoil, on);
-    if (await this.isFaulted(client, profile)) {
-      // 刚写下去就撞上故障输入：先把线圈收回位再报失败，别让阀门挂在打开状态等人来关
-      await client.writeCoil(profile.switchCoil, false).catch(() => undefined);
-      await this.channel.receipt(command.id, "FAILED", `设备故障输入置位（${hex(profile.faultInput)}），已关线圈止损`);
+    await client.writeBoolean(profile.switchPoint, on);
+    let faulted: boolean;
+    try {
+      faulted = await this.isFaulted(client, profile);
+    } catch (error) {
+      await client.writeBoolean(profile.switchPoint, false).catch(() => undefined);
+      throw error;
+    }
+    if (faulted) {
+      // 刚写下去就撞上故障输入：先把开关收回位再报失败，别让阀门挂在打开状态等人来关
+      await client.writeBoolean(profile.switchPoint, false).catch(() => undefined);
+      await this.channel.receipt(command.id, "FAILED", `设备故障输入置位（${profile.faultLabel}），已关闭启停点位止损`);
       return;
     }
-    this.jobs.set(command.id, {
-      startedAtMs: this.now(),
-      // 急停不需要计量；没有累计寄存器的设备也记空基线，结单时只报时长
-      baselineCounts: spec.stopOnly || profile.meter === null ? null : await this.readMeterCounts(client, profile.meter),
-    });
-    await this.channel.receipt(command.id, "ACKED", `已写入${on ? "启" : "停"}线圈 ${hex(profile.switchCoil)}`);
+    let baselineCounts: number | null = null;
+    if (!spec.stopOnly && profile.meter) {
+      try {
+        baselineCounts = (await this.readMeterValue(client, profile.meter, null)) ?? null;
+      } catch (error) {
+        await client.writeBoolean(profile.switchPoint, false).catch(() => undefined);
+        throw error;
+      }
+    }
+    this.jobs.set(command.id, { startedAtMs: this.now(), baselineCounts });
+    await this.channel.receipt(command.id, "ACKED", `已写入${on ? "启" : "停"}点位 ${profile.switchLabel}`);
   }
 
-  /** 第三步：读反馈判收口，够了就关线圈并带上实测作业量结单 */
-  private async finishJob(client: ModbusClientLike, profile: ModbusProfile, command: FieldCommand, spec: JobSpec): Promise<void> {
-    if (await this.isFaulted(client, profile)) {
+  /** 第三步：读反馈判收口，够了就关点位并带上实测作业量结单 */
+  private async finishJob(client: FieldClientLike, profile: FieldProfile, command: FieldCommand, spec: JobSpec): Promise<void> {
+    let faulted: boolean;
+    try {
+      faulted = await this.isFaulted(client, profile);
+    } catch (error) {
       this.jobs.delete(command.id);
-      // 作业中出故障先关线圈止损，再如实报失败：阀门挂在打开状态等人来关是最坏结果
-      await client.writeCoil(profile.switchCoil, false).catch(() => undefined);
-      await this.channel.receipt(command.id, "FAILED", `作业中故障输入置位（${hex(profile.faultInput)}），已关线圈止损`);
+      await client.writeBoolean(profile.switchPoint, false).catch(() => undefined);
+      await this.channel.receipt(command.id, "FAILED", `故障反馈读取失败，已关闭启停点位止损：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (faulted) {
+      // 作业中出故障先关点位止损，再如实报失败：阀门挂在打开状态等人来关是最坏结果
+      await client.writeBoolean(profile.switchPoint, false).catch(() => undefined);
+      await this.channel.receipt(command.id, "FAILED", `作业中故障输入置位（${profile.faultLabel}），已关闭启停点位止损`);
       return;
     }
 
     const state = this.jobs.get(command.id);
     const elapsedMin = Math.max(0, Math.round((this.now() - (state?.startedAtMs ?? startedAtMs(command))) / 60_000));
-    const measured = profile.meter && state ? await this.readMeterValue(client, profile.meter, state.baselineCounts) : undefined;
+    let measured: number | undefined;
+    if (profile.meter && state) {
+      try {
+        measured = await this.readMeterValue(client, profile.meter, state.baselineCounts);
+      } catch (error) {
+        this.jobs.delete(command.id);
+        await client.writeBoolean(profile.switchPoint, false).catch(() => undefined);
+        await this.channel.receipt(command.id, "FAILED", `作业计量读取失败，已关闭启停点位止损：${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+    }
 
     if (spec.stopOnly) {
-      // 急停要的是「真的停了」：运行反馈输入为假才允许结单，且必须带到位确认
-      const running = await client.readDiscreteInputs(profile.runFeedbackInput, 1).then((bits) => bits[0] ?? false);
+      // 急停要的是「真的停了」：运行反馈为假才允许结单，且必须带到位确认
+      const running = await client.readBoolean(profile.runFeedbackPoint);
       if (running) return;
       this.jobs.delete(command.id);
       await this.channel.receipt(command.id, "DONE", "运行反馈已消失，急停到位", { confirmed: true });
@@ -352,7 +517,7 @@ export class FieldGateway {
     const durationReached = spec.durationMin !== undefined && elapsedMin >= spec.durationMin;
     if (!volumeReached && !durationReached) return;
 
-    await client.writeCoil(profile.switchCoil, false);
+    await client.writeBoolean(profile.switchPoint, false);
     // 关阀后再读一次表：管路里的余量不计入本轮用量，最后一次读数才是作业量
     const finalMeasured = profile.meter && state ? await this.readMeterValue(client, profile.meter, state.baselineCounts) : measured;
     this.jobs.delete(command.id);
@@ -363,29 +528,20 @@ export class FieldGateway {
     await this.channel.receipt(
       command.id,
       "DONE",
-      volumeReached ? `计划作业量达成（实测 ${finalMeasured ?? 0} ${profile.meter?.unit ?? ""}），已关线圈` : `作业满 ${elapsedMin} 分钟，已关线圈`,
+      volumeReached ? `计划作业量达成（实测 ${finalMeasured ?? 0} ${profile.meter?.unit ?? ""}），已关闭启停点位` : `作业满 ${elapsedMin} 分钟，已关闭启停点位`,
       result,
     );
   }
 
-  private async isFaulted(client: ModbusClientLike, profile: ModbusProfile): Promise<boolean> {
-    const bits = await client.readDiscreteInputs(profile.faultInput, 1);
-    return bits[0] ?? false;
+  private async isFaulted(client: FieldClientLike, profile: FieldProfile): Promise<boolean> {
+    return client.readBoolean(profile.faultPoint);
   }
 
-  /** 累计量占两个寄存器，按剖面的字序拼 32 位后乘倍率换成业务量 */
-  private async readMeterCounts(client: ModbusClientLike, meter: ModbusMeter): Promise<number> {
-    const words = await client.readHoldingRegisters(meter.register, 2);
-    const high = meter.wordOrder === "HIGH_FIRST" ? (words[0] ?? 0) : (words[1] ?? 0);
-    const low = meter.wordOrder === "HIGH_FIRST" ? (words[1] ?? 0) : (words[0] ?? 0);
-    return combineUint32(high, low);
-  }
-
-  /** 表计读数换成作业期间的增量；没有基线就不报作业量，免得把出厂累计值当成这一轮的用量 */
-  private async readMeterValue(client: ModbusClientLike, meter: ModbusMeter, baselineCounts: number | null): Promise<number | undefined> {
-    const counts = await this.readMeterCounts(client, meter);
-    if (baselineCounts === null) return undefined;
-    return Math.max(0, (counts - baselineCounts) * meter.scale);
+  /** 表计读数换算成业务量；没有基线就不报作业量，免得把出厂累计值当成这一轮的用量 */
+  private async readMeterValue(client: FieldClientLike, meter: PlcMeter & { point: PlcPoint }, baseline: number | null): Promise<number | undefined> {
+    const value = await client.readMeter(meter.point, meter);
+    if (baseline === null) return value;
+    return Math.max(0, value - baseline);
   }
 }
 

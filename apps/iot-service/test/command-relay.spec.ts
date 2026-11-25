@@ -23,6 +23,7 @@ const BASE_DEVICE: Device = {
   status: "ONLINE",
   plotCode: "P-1",
   protocol: "MQTT",
+  driverId: "MQTT_DIRECT",
   lastSeenAt: null,
   createdAt: "2026-11-20T00:00:00.000Z",
   updatedAt: "2026-11-20T00:00:00.000Z",
@@ -35,6 +36,7 @@ const HTTP_DEVICE: Device = {
   name: "一号灌溉阀",
   type: "IRRIGATION_VALVE",
   protocol: "HTTP",
+  driverId: "HTTP_CALLBACK",
 };
 
 interface PendingCommand {

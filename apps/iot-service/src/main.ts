@@ -8,6 +8,8 @@ import { createMqttCommandRelay } from './command-relay.js';
 import { FieldGateway } from './field-gateway.js';
 import { DEFAULT_TENANT, InMemoryDeviceRepository, SqlDeviceRepository, demoDevices } from './device.repository.js';
 import { InMemoryMqttDeliveryRepository, SqlMqttDeliveryRepository } from './mqtt-delivery.repository.js';
+import { createMqttConfigCipher } from './mqtt-config.js';
+import { mqttProvisionerFromEnv } from './emqx-device-provisioner.js';
 import type { DeviceRepository } from './device.repository.js';
 
 /**
@@ -40,7 +42,16 @@ async function bootstrap(): Promise<void> {
     devices = new InMemoryDeviceRepository(demoDevices(process.env.TENANT_ID?.trim() || DEFAULT_TENANT));
   }
 
-  const server = createIotHttpServer({ devices });
+  const mqttConfigCipher = process.env.MQTT_CONFIG_ENCRYPTION_KEY?.trim()
+    ? createMqttConfigCipher(process.env.MQTT_CONFIG_ENCRYPTION_KEY.trim())
+    : undefined;
+  const mqttProvisioner = mqttProvisionerFromEnv();
+  const server = createIotHttpServer({
+    devices,
+    ...(mqttConfigCipher ? { mqttConfigCipher } : {}),
+    ...(mqttProvisioner ? { mqttProvisioner } : {}),
+    ...(process.env.MQTT_CA_PATH ? { mqttCaPath: process.env.MQTT_CA_PATH } : {}),
+  });
   server.listen(port, '127.0.0.1', () => console.log(`iot-service HTTP started on ${port} (${mode})`));
 
   // MQTT 接入（A2）：订阅设备遥测/回执 topic 并转发，同时提供指令下发通道；缺省关闭，保留 HTTP 回调链路
@@ -87,7 +98,7 @@ async function bootstrap(): Promise<void> {
   }
 
   const gatewayEnabled = ['1', 'true'].includes((process.env.FIELD_GATEWAY_ENABLED ?? '').toLowerCase());
-  const gateway = gatewayEnabled ? new FieldGateway({ devices, publishCommand: mqttBroker?.publishCommand }) : undefined;
+  const gateway = gatewayEnabled ? new FieldGateway({ devices, publishCommand: mqttBroker?.publishCommand, ...(mqttConfigCipher ? { configCipher: mqttConfigCipher } : {}) }) : undefined;
   if (gateway) {
     gateway.start();
     console.log(`iot-service 现场协议网关已启动 -> ${process.env.CONTROL_SERVICE_URL ?? 'http://127.0.0.1:3008'}`);

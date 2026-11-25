@@ -102,6 +102,70 @@
             <el-option v-for="item in deviceTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </el-form-item>
+        <el-form-item label="连接协议" prop="protocol">
+          <el-select v-model="createForm.protocol" placeholder="请选择连接协议" style="width: 100%">
+            <el-option
+              v-for="item in createProtocolOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+              :disabled="item.unsupported"
+            />
+          </el-select>
+          <span class="form-hint">{{ createProtocolHint }}</span>
+        </el-form-item>
+        <template v-for="parameter in createProtocol?.parameters" :key="parameter.key">
+          <el-form-item :label="parameter.label" :prop="`connection.${parameter.key}`">
+            <el-select
+              v-if="parameter.input === 'select'"
+              v-model="createForm.connection[parameter.key]"
+              :placeholder="parameter.placeholder ?? `请选择${parameter.label}`"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="option in parameterOptions(createProtocol.value, createForm.type, parameter) ?? []"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+                :disabled="option.disabled"
+              />
+            </el-select>
+            <el-input-number
+              v-else-if="parameter.input === 'number'"
+              v-model="createForm.connection[parameter.key]"
+              :min="parameter.min"
+              :max="parameter.max"
+              :step="parameter.step"
+              :placeholder="parameter.defaultValue?.toString()"
+              controls-position="right"
+              style="width: 100%"
+            />
+            <template v-else-if="parameter.input === 'certificate'">
+              <el-upload
+                :auto-upload="false"
+                :limit="1"
+                :on-change="(file: UploadFile) => loadCaFile(file, createForm.connection)"
+                :on-remove="() => clearCaFile(createForm.connection)"
+              >
+                <el-button>选择 CA 文件</el-button>
+              </el-upload>
+              <span v-if="createForm.connection.caFileName" class="form-hint">{{ createForm.connection.caFileName }}</span>
+              <el-button link type="primary" @click="downloadMqttCa()">下载平台默认 CA</el-button>
+            </template>
+            <el-input
+              v-else
+              v-model="createForm.connection[parameter.key]"
+              :type="parameter.input === 'password' ? 'password' : 'text'"
+              :show-password="parameter.input === 'password'"
+              autocomplete="new-password"
+              :maxlength="parameter.maxLength"
+              :placeholder="parameter.placeholder"
+            />
+            <span v-if="parameter.hint || (parameter.input === 'password' && parameter.secret)" class="form-hint">
+              {{ parameter.hint ?? '密码加密保存，平台不回显' }}
+            </span>
+          </el-form-item>
+        </template>
         <el-form-item label="所属地块">
           <el-select v-model="createForm.plotCode" placeholder="未绑定地块" clearable filterable style="width: 100%">
             <el-option
@@ -165,60 +229,70 @@
           </el-select>
           <span class="form-hint">{{ protocolHint }}</span>
         </el-form-item>
-        <template v-if="needsBinding">
-          <el-form-item label="寄存器剖面" prop="profile">
-            <el-select v-model="configForm.profile" placeholder="请选择现场剖面" style="width: 100%">
-              <el-option v-for="item in profileOptions" :key="item.key" :label="item.label" :value="item.key" />
+        <template v-for="parameter in configProtocol?.parameters" :key="parameter.key">
+          <el-form-item :label="parameter.label" :prop="`connection.${parameter.key}`">
+            <el-select
+              v-if="parameter.input === 'select'"
+              v-model="configForm.connection[parameter.key]"
+              :placeholder="parameter.placeholder ?? `请选择${parameter.label}`"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="option in parameterOptions(configProtocol.value, configForm.type, parameter) ?? []"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+                :disabled="option.disabled"
+              />
             </el-select>
-            <span v-if="selectedProfile" class="form-hint">
+            <el-input-number
+              v-else-if="parameter.input === 'number'"
+              v-model="configForm.connection[parameter.key]"
+              :min="parameter.min"
+              :max="parameter.max"
+              :step="parameter.step"
+              :placeholder="parameter.defaultValue?.toString()"
+              controls-position="right"
+              style="width: 100%"
+            />
+            <template v-else-if="parameter.input === 'certificate'">
+              <el-upload
+                :auto-upload="false"
+                :limit="1"
+                :on-change="(file: UploadFile) => loadCaFile(file, configForm.connection)"
+                :on-remove="() => clearCaFile(configForm.connection)"
+              >
+                <el-button>选择 CA 文件</el-button>
+              </el-upload>
+              <span v-if="configForm.connection.caFileName" class="form-hint">{{ configForm.connection.caFileName }}</span>
+              <span v-else-if="configForm.connection.hasCaCertificate" class="form-hint">已配置 CA</span>
+              <el-button link type="primary" @click="downloadMqttCa(configForm.id)">下载当前 CA</el-button>
+            </template>
+            <el-input
+              v-else
+              v-model="configForm.connection[parameter.key]"
+              :type="parameter.input === 'password' ? 'password' : 'text'"
+              :show-password="parameter.input === 'password'"
+              autocomplete="new-password"
+              :maxlength="parameter.maxLength"
+              :placeholder="parameter.input === 'password' ? '留空保持原密码' : parameter.placeholder"
+            />
+            <span v-if="parameter.key === 'profile' && selectedPlcProfile" class="form-hint">
+              点位格式：{{ selectedPlcProfile.pointHint }}；
+              <template v-if="selectedPlcProfile.meter">
+                计量点位：{{ selectedPlcProfile.meterPointHint }}（{{ selectedPlcProfile.meter.wordOrderLabel }}，每计数 {{ selectedPlcProfile.meter.scale }} {{ selectedPlcProfile.meter.unit }}），作业量按前后读数之差上报
+              </template>
+              <template v-else>无累计计量，结单只报到位与时长，不报作业量</template>
+            </span>
+            <span v-if="parameter.key === 'profile' && selectedProfile" class="form-hint">
               <template v-if="selectedProfile.meter">
                 累计量读保持寄存器 {{ hex(selectedProfile.meter.register) }}（{{ selectedProfile.meter.wordOrderLabel }}，每计数 {{ selectedProfile.meter.scale }} {{ selectedProfile.meter.unit }}），结单作业量按前后两次读数之差上报
               </template>
               <template v-else>无累计计量，结单只报到位与时长，不报作业量</template>
             </span>
-          </el-form-item>
-          <el-form-item label="接入地址" prop="host">
-            <el-input v-model="configForm.host" placeholder="从站或现场网关地址，如 10.0.0.9" maxlength="64" />
-            <span class="form-hint">现场从站不会主动回调平台，网关按这个地址主动连过去写线圈、读反馈</span>
-          </el-form-item>
-          <el-form-item label="端口">
-            <el-input-number
-              v-model="configForm.port"
-              :min="1"
-              :max="65535"
-              :step="1"
-              :value-on-clear="null"
-              controls-position="right"
-              :placeholder="`${fieldAccess?.defaults.port ?? ''}`"
-              style="width: 100%"
-            />
-            <span class="form-hint">留空则用目录缺省端口 {{ fieldAccess?.defaults.port ?? '—' }}</span>
-          </el-form-item>
-          <el-form-item label="单元标识">
-            <el-input-number
-              v-model="configForm.unitId"
-              :min="0"
-              :max="255"
-              :step="1"
-              :value-on-clear="null"
-              controls-position="right"
-              :placeholder="`${fieldAccess?.defaults.unitId ?? ''}`"
-              style="width: 100%"
-            />
-            <span class="form-hint">直连从站一般为 {{ fieldAccess?.defaults.unitId ?? '—' }}，串口服务器下挂多台时逐台不同；留空取缺省</span>
-          </el-form-item>
-          <el-form-item label="事务超时">
-            <el-input-number
-              v-model="configForm.timeoutMs"
-              :min="100"
-              :max="60000"
-              :step="100"
-              :value-on-clear="null"
-              controls-position="right"
-              :placeholder="`${fieldAccess?.defaults.timeoutMs ?? ''}`"
-              style="width: 100%"
-            />
-            <span class="form-hint">单次 Modbus 事务的等待毫秒数，留空取缺省 {{ fieldAccess?.defaults.timeoutMs ?? '—' }}</span>
+            <span v-if="parameter.hint || (parameter.input === 'password' && parameter.secret)" class="form-hint">
+              {{ parameter.input === 'password' && parameter.secret ? '密码加密保存，平台不回显；留空表示不修改' : parameter.hint }}
+            </span>
           </el-form-item>
         </template>
       </el-form>
@@ -354,8 +428,8 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import type { DeviceFieldAccess, DeviceModbusBinding, DeviceQuery } from '@/types'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile } from 'element-plus'
+import type { DeviceConnectionParameter, DeviceFieldAccess, DeviceModbusBinding, DeviceProtocolOption, DeviceQuery } from '@/types'
 import { formatDateTime, getControlStatusText, getControlTypeText, getDeviceStatusText, getDeviceStatusType } from '@/utils'
 import { deviceStatusOptions, deviceTypeLabel, deviceTypeOptions } from '@/utils/device'
 import { controlApi, iotApi, plotApi, type IrrigationPlan } from '@/api'
@@ -385,24 +459,39 @@ const createVisible = ref(false)
 const submitting = ref(false)
 const createFormRef = ref<FormInstance | null>(null)
 
+interface ConnectionFormState extends Record<string, string | number | boolean | null | undefined> {
+  caFileName?: string
+  hasCaCertificate?: boolean
+  clearCaCertificate?: boolean
+  hasPassword?: boolean
+}
+
+function emptyConnection(): ConnectionFormState {
+  return { caFileName: '', hasCaCertificate: false, clearCaCertificate: false, hasPassword: false }
+}
+
 const createForm = reactive({
   name: '',
   deviceNo: '',
   type: '',
-  // el-select 清空后把值置为 undefined，地块是可选项，类型上如实保留
   plotCode: '' as string | undefined,
-  status: 'OFFLINE' as 'ONLINE' | 'OFFLINE'
+  status: 'OFFLINE' as 'ONLINE' | 'OFFLINE',
+  protocol: 'HTTP',
+  driverId: '',
+  connection: emptyConnection()
 })
 
-const createRules: FormRules = {
+const createRules = computed<FormRules>(() => ({
   name: [{ required: true, message: '请输入设备名称', trigger: 'blur' }],
   deviceNo: [
     { required: true, message: '请输入设备编号', trigger: 'blur' },
     { pattern: /^[A-Za-z0-9-]{3,32}$/, message: '编号由字母、数字和连字符组成，长度 3~32', trigger: 'blur' }
   ],
   type: [{ required: true, message: '请选择设备类型', trigger: 'change' }],
-  status: [{ required: true, message: '请选择初始状态', trigger: 'change' }]
-}
+  status: [{ required: true, message: '请选择初始状态', trigger: 'change' }],
+  protocol: [{ required: true, message: '请选择连接协议', trigger: 'change' }],
+  ...connectionRules(createProtocol.value, createForm.connection, true)
+}))
 
 async function fetchList() {
   loading.value = true
@@ -446,12 +535,66 @@ async function refreshDevice(row: any) {
   try { const latest = await iotApi.getDevice(row.id); const index = tableData.value.findIndex((item) => item.id === row.id); if (index >= 0) tableData.value[index] = toRow(latest); ElMessage.success('设备状态已刷新') } catch (error) { console.error('设备刷新失败', error) }
 }
 
-function openCreate() {
+function connectionInput(connection: ConnectionFormState): Record<string, string | number> {
+  const result: Record<string, string | number> = {}
+  for (const [key, value] of Object.entries(connection)) {
+    if (key === 'caCertificate' && connection.clearCaCertificate) result[key] = ''
+    else if (typeof value === 'string') {
+      const trimmed = value.trim()
+      if (trimmed) result[key] = trimmed
+    } else if (typeof value === 'number' && Number.isFinite(value)) {
+      result[key] = value
+    }
+  }
+  return result
+}
+
+async function loadCaFile(file: UploadFile, target: ConnectionFormState) {
+  if (!file.raw) return
+  if ((file.size ?? file.raw.size) > 65_536) { ElMessage.warning('CA 证书不能超过 64 KB'); return }
+  try {
+    target.caCertificate = await file.raw.text()
+    target.caFileName = file.name
+    target.hasCaCertificate = true
+    target.clearCaCertificate = false
+  } catch {
+    ElMessage.error('CA 证书读取失败')
+  }
+}
+
+function clearCaFile(target: ConnectionFormState) {
+  target.caCertificate = ''
+  target.caFileName = ''
+  target.hasCaCertificate = false
+  target.clearCaCertificate = true
+}
+
+async function downloadMqttCa(id?: string) {
+  try {
+    const blob = await iotApi.downloadMqttCa(id)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'mqtt-ca.crt'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    console.error('CA 证书下载失败', error)
+  }
+}
+
+async function openCreate() {
+  await ensureFieldAccess()
   createForm.name = ''
   createForm.deviceNo = ''
   createForm.type = ''
   createForm.plotCode = ''
   createForm.status = 'OFFLINE'
+  createForm.connection = emptyConnection()
+  createForm.protocol = ''
+  createForm.protocol = fieldAccess.value?.defaultProtocol || 'HTTP'
   createFormRef.value?.clearValidate()
   createVisible.value = true
 }
@@ -466,7 +609,10 @@ async function submitCreate() {
       name: createForm.name.trim(),
       type: createForm.type,
       status: createForm.status,
-      plotCode: createForm.plotCode?.trim() || undefined
+      plotCode: createForm.plotCode?.trim() || undefined,
+      protocol: createForm.protocol,
+      driverId: createForm.driverId,
+      connection: createProtocol.value?.connectionKind === 'NONE' ? undefined : connectionInput(createForm.connection)
     })
     ElMessage.success('设备已登记')
     createVisible.value = false
@@ -518,9 +664,73 @@ async function ensureFieldAccess() {
   }
 }
 
+const createProtocol = computed(() => fieldAccess.value?.protocols.find((item) => item.value === createForm.protocol))
+const createProfileOptions = computed(() => {
+  const catalogue = fieldAccess.value
+  if (!catalogue) return []
+  return [...catalogue.profiles, ...(catalogue.plcProfiles ?? [])].filter((item) => !createForm.type || item.applicableTypes.includes(createForm.type))
+})
+const createProtocolOptions = computed(() => {
+  const catalogue = fieldAccess.value
+  if (!catalogue) return []
+  return catalogue.protocols.map((item) => ({ ...item, unsupported: (item.connectionKind === 'MODBUS_TCP' || item.connectionKind === 'PLC') && createProfileOptions.value.length === 0 }))
+})
+const createProtocolHint = computed(() => createProtocol.value?.description ?? '协议驱动目录加载中')
+
+watch(() => createForm.protocol, (protocol) => {
+  const option = createProtocolOptions.value.find((item) => item.value === protocol)
+  createForm.driverId = option?.driverId ?? ''
+  createForm.connection = emptyConnection()
+  for (const parameter of option?.parameters ?? []) {
+    if (parameter.defaultValue !== undefined) createForm.connection[parameter.key] = parameter.defaultValue
+  }
+  createFormRef.value?.clearValidate()
+})
+
+watch(() => createForm.type, () => {
+  const selected = createForm.connection.profile
+  if (typeof selected === 'string' && selected && !createProfileOptions.value.some((item) => item.key === selected)) createForm.connection.profile = ''
+})
+
 /** 寄存器地址在剖面表里是十进制，现场手册写十六进制，展示时统一成 0x 前缀 */
 function hex(value: number) {
   return `0x${value.toString(16).toUpperCase().padStart(4, '0')}`
+}
+
+function parameterOptions(protocol: DeviceProtocolOption | undefined, deviceType: string, parameter: DeviceConnectionParameter) {
+  if (parameter.key !== 'profile' || !protocol || !fieldAccess.value) return parameter.options ?? []
+  const profiles = protocol.connectionKind === 'PLC' ? fieldAccess.value.plcProfiles ?? [] : fieldAccess.value.profiles
+  return profiles
+    .filter((item) => item.protocol === protocol.value && (!deviceType || item.applicableTypes.includes(deviceType)))
+    .map((item) => ({ value: item.key, label: item.label }))
+}
+
+function connectionRules(
+  protocol: DeviceProtocolOption | undefined,
+  connection: ConnectionFormState,
+  creating: boolean,
+): FormRules {
+  const rules: FormRules = {}
+  const plcProfile = fieldAccess.value?.plcProfiles?.find((item) => item.protocol === protocol?.value && item.key === connection.profile)
+  for (const parameter of protocol?.parameters ?? []) {
+    const required = parameter.required
+      || (parameter.key === 'meterPoint' && Boolean(plcProfile?.meter))
+      || (creating && Boolean(parameter.requiredOnCreate) && !(parameter.key === 'password' && connection.authMode === 'ANONYMOUS'))
+      || (parameter.key === 'password' && connection.authMode === 'USERNAME')
+      || (parameter.requiredWhen !== undefined
+        && String(connection[parameter.requiredWhen.key] ?? '').startsWith(parameter.requiredWhen.startsWith ?? ''))
+    const value = connection[parameter.key]
+    const hasExistingValue = !creating && parameter.secret && Boolean(connection.hasPassword)
+      || !creating && parameter.input === 'certificate' && Boolean(connection.hasCaCertificate)
+    rules[`connection.${parameter.key}`] = [{
+      validator: (_rule: unknown, _value: unknown, callback: (error?: Error) => void) => {
+        if (required && (value === undefined || value === null || value === '') && !hasExistingValue) callback(new Error(`请填写或选择${parameter.label}`))
+        else callback()
+      },
+      trigger: parameter.input === 'select' || parameter.input === 'certificate' ? 'change' : 'blur'
+    }]
+  }
+  return rules
 }
 
 function protocolLabel(protocol?: string) {
@@ -540,6 +750,9 @@ const configVisible = ref(false)
 const configSaving = ref(false)
 const configFormRef = ref<FormInstance | null>(null)
 
+watch(createVisible, (visible) => { if (!visible && 'password' in createForm.connection) createForm.connection.password = '' })
+watch(configVisible, (visible) => { if (!visible && 'password' in configForm.connection) configForm.connection.password = '' })
+
 const configForm = reactive({
   id: '',
   deviceNo: '',
@@ -548,42 +761,50 @@ const configForm = reactive({
   plotCode: '' as string | undefined,
   status: 'OFFLINE' as 'ONLINE' | 'OFFLINE',
   protocol: '',
-  // 绑定摊平成表单字段：留空的端口、单元标识与超时不发出去，由服务端按目录缺省补齐
-  host: '',
-  port: null as number | null,
-  unitId: null as number | null,
-  profile: '',
-  timeoutMs: null as number | null
+  driverId: '',
+  connection: emptyConnection()
 })
 
-/** 要不要填绑定，问目录里该协议的 requiresBinding——服务端建档校验用的是同一个判定 */
-const needsBinding = computed(() => fieldAccess.value?.protocols.find((item) => item.value === configForm.protocol)?.requiresBinding ?? false)
+const configProtocol = computed(() => fieldAccess.value?.protocols.find((item) => item.value === configForm.protocol))
 
-/** 剖面按设备类型过滤：给墒情站配启停剖面等于对着表计下令，服务端也会拒 */
 const profileOptions = computed(() => {
   const catalogue = fieldAccess.value
   if (!catalogue) return []
-  return catalogue.profiles.filter((item) => !configForm.type || item.applicableTypes.includes(configForm.type))
+  return [...catalogue.profiles, ...(catalogue.plcProfiles ?? [])].filter((item) => !configForm.type || item.applicableTypes.includes(configForm.type))
 })
 
 const protocolOptions = computed(() => {
   const catalogue = fieldAccess.value
   if (!catalogue) return []
-  return catalogue.protocols.map((item) => ({ ...item, unsupported: item.requiresBinding && profileOptions.value.length === 0 }))
+  return catalogue.protocols.map((item) => ({ ...item, unsupported: (item.connectionKind === 'MODBUS_TCP' || item.connectionKind === 'PLC') && profileOptions.value.length === 0 }))
 })
 
-const selectedProfile = computed(() => fieldAccess.value?.profiles.find((item) => item.key === configForm.profile) ?? null)
+const selectedProfile = computed(() => fieldAccess.value?.profiles.find((item) => item.key === configForm.connection.profile && item.protocol === configForm.protocol) ?? null)
+const selectedPlcProfile = computed(() => fieldAccess.value?.plcProfiles?.find((item) => item.key === configForm.connection.profile && item.protocol === configForm.protocol) ?? null)
 
 const protocolHint = computed(() => {
-  if (!fieldAccess.value) return '现场接入目录加载中'
-  if (!needsBinding.value) return '设备自己把遥测与回执回调给平台，平台不主动连设备，无需填接入地址'
+  if (!fieldAccess.value) return '协议驱动目录加载中'
+  if (configForm.protocol === 'MQTT') return '仅保存设备自有 MQTT 连接配置；默认不调用 EMQX 开户，密码加密保存，CA 可下载'
+  if (configProtocol.value?.connectionKind === 'PLC') return '现场网关按协议驱动主动连接 PLC；点位必须按设备项目填写，计量剖面必须提供累计量点位'
+  if (configProtocol.value?.connectionKind === 'NONE') return '设备自己把遥测与回执回调给平台，平台不主动连设备，无需填接入地址'
   if (profileOptions.value.length === 0) return `设备类型 ${deviceTypeLabel(configForm.type)} 不是可执行设备，没有能下发的现场剖面，请先改设备类型`
-  return '平台侧现场网关按台账主动轮询：写启停线圈、读故障与运行反馈，再把回执收回指令队列'
+  return configProtocol.value?.description ?? '请选择接入协议'
 })
 
-// 类型改了原剖面就可能不再适用，清空让用户重选，而不是留一个服务端必拒的组合
+watch(() => configForm.protocol, (protocol) => {
+  if (configForm.id && !configVisible.value) return
+  const option = protocolOptions.value.find((item) => item.value === protocol)
+  configForm.driverId = option?.driverId ?? ''
+  configForm.connection = emptyConnection()
+  for (const parameter of option?.parameters ?? []) {
+    if (parameter.defaultValue !== undefined) configForm.connection[parameter.key] = parameter.defaultValue
+  }
+  configFormRef.value?.clearValidate()
+}, { flush: 'sync' })
+
 watch(() => configForm.type, () => {
-  if (configForm.profile && !profileOptions.value.some((item) => item.key === configForm.profile)) configForm.profile = ''
+  const selected = configForm.connection.profile
+  if (typeof selected === 'string' && selected && !profileOptions.value.some((item) => item.key === selected)) configForm.connection.profile = ''
 })
 
 const configRules = computed<FormRules>(() => ({
@@ -591,29 +812,20 @@ const configRules = computed<FormRules>(() => ({
   type: [{ required: true, message: '请选择设备类型', trigger: 'change' }],
   status: [{ required: true, message: '请选择在线状态', trigger: 'change' }],
   protocol: [{ required: true, message: '请选择接入协议', trigger: 'change' }],
-  ...(needsBinding.value
-    ? {
-        host: [
-          { required: true, message: '请填写接入地址', trigger: 'blur' },
-          { pattern: /^\S+$/, message: '接入地址不能含空格', trigger: 'blur' }
-        ],
-        profile: [
-          {
-            validator: (_rule: unknown, value: string, callback: (error?: Error) => void) => {
-              if (!value) callback(new Error('请选择现场剖面'))
-              else if (!profileOptions.value.some((item) => item.key === value)) callback(new Error(`剖面 ${value} 与设备类型 ${deviceTypeLabel(configForm.type)} 不匹配`))
-              else callback()
-            },
-            trigger: 'change'
-          }
-        ]
-      }
-    : {})
+  ...connectionRules(configProtocol.value, configForm.connection, false)
 }))
 
 async function openConfig(row: any) {
   await ensureFieldAccess()
-  const binding = row.binding as DeviceModbusBinding | undefined
+  const protocol = row.protocol || fieldAccess.value?.defaultProtocol || ''
+  const driver = fieldAccess.value?.protocols.find((item) => item.value === protocol)
+  const connection: ConnectionFormState = { ...emptyConnection(), ...(row.connection && typeof row.connection === 'object' ? row.connection : {}) }
+  if (driver?.connectionKind === 'MQTT' || driver?.connectionKind === 'PLC') {
+    connection.password = ''
+    connection.hasPassword = Boolean(row.connection?.hasPassword)
+    if (driver.connectionKind === 'MQTT') connection.hasCaCertificate = Boolean(row.connection?.hasCaCertificate)
+  }
+  if (protocol === 'MITSUBISHI_MC' && typeof connection.ascii === 'boolean') connection.ascii = connection.ascii ? 'ASCII' : 'BINARY'
   Object.assign(configForm, {
     id: row.id,
     deviceNo: row.deviceNo,
@@ -621,13 +833,11 @@ async function openConfig(row: any) {
     type: row.type,
     plotCode: row.plotCode || '',
     status: row.status === 'ONLINE' ? 'ONLINE' : 'OFFLINE',
-    protocol: row.protocol || fieldAccess.value?.defaultProtocol || '',
-    host: binding?.host ?? '',
-    port: binding?.port ?? null,
-    unitId: binding?.unitId ?? null,
-    profile: binding?.profile ?? '',
-    timeoutMs: binding?.timeoutMs ?? null
+    protocol: '',
+    driverId: row.driverId || driver?.driverId || '',
+    connection
   })
+  configForm.protocol = protocol
   configFormRef.value?.clearValidate()
   configVisible.value = true
   void ensurePlotOptions()
@@ -645,18 +855,10 @@ async function submitConfig() {
       // 空串是「解绑地块」的明确语义，必须原样发出去，不能转成 undefined
       plotCode: (configForm.plotCode ?? '').trim(),
       protocol: configForm.protocol,
-      // 服务端口径：改了协议就必须配套给绑定，回调式则显式传 null 清掉历史地址，
-      // 否则网关会继续连一台已经改回回调的设备
-      binding: needsBinding.value
-        ? {
-            host: configForm.host.trim(),
-            profile: configForm.profile,
-            ...(configForm.port === null ? {} : { port: configForm.port }),
-            ...(configForm.unitId === null ? {} : { unitId: configForm.unitId }),
-            ...(configForm.timeoutMs === null ? {} : { timeoutMs: configForm.timeoutMs })
-          }
-        : null
+      driverId: configForm.driverId,
+      connection: configProtocol.value?.connectionKind === 'NONE' ? null : connectionInput(configForm.connection)
     })
+    if ('password' in configForm.connection) configForm.connection.password = ''
     const index = tableData.value.findIndex((item) => item.id === configForm.id)
     if (index >= 0) tableData.value[index] = toRow(updated)
     ElMessage.success('设备配置已保存')

@@ -7,6 +7,7 @@
  */
 
 export const deviceTypeOptions: Array<{ value: string; label: string }> = [
+  { value: 'PLC', label: 'PLC 控制器' },
   { value: 'WEATHER_STATION', label: '气象站' },
   { value: 'SOIL_SENSOR', label: '墒情传感器' },
   { value: 'INTEGRATED_STATION', label: '综合监测站' },

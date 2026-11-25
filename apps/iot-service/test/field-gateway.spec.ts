@@ -4,6 +4,9 @@ import { FieldGateway } from "../src/field-gateway.js";
 import type { FieldCommand, ModbusClientLike } from "../src/field-gateway.js";
 import { InMemoryDeviceRepository, DEFAULT_TENANT } from "../src/device.repository.js";
 import type { Device } from "../src/device.repository.js";
+import type { PlcClientLike } from "../src/plc-clients.js";
+import { normalizePlcConfig } from "../src/plc-binding.js";
+import type { PlcMeter, PlcPoint } from "../src/plc-binding.js";
 
 /**
  * 现场协议网关的行为验证：领队列、写线圈、读反馈、把状态推到底。
@@ -443,5 +446,149 @@ describe("现场协议网关", () => {
     expect(errors).toEqual(["DZ-P-903"]);
     // 坏绑定没有拖住后面那台：台账按编号排序，好设备照常轮到
     expect(seen).toEqual([good.id]);
+  });
+});
+
+class FakePlc implements PlcClientLike {
+  writes: Array<{ point: PlcPoint; value: boolean }> = [];
+  fault = false;
+  running = false;
+  meterValue = 100;
+  faultReadError: Error | null = null;
+  meterReadError: Error | null = null;
+  closed = false;
+
+  async writeBoolean(point: PlcPoint, value: boolean): Promise<void> {
+    this.writes.push({ point, value });
+  }
+
+  async readBoolean(point: PlcPoint): Promise<boolean> {
+    if (point === "DB1,X0.2" || point === "ns=2;i=1003") {
+      if (this.faultReadError) throw this.faultReadError;
+      return this.fault;
+    }
+    return this.running;
+  }
+
+  async readMeter(_point: PlcPoint, _meter: PlcMeter): Promise<number> {
+    if (this.meterReadError) throw this.meterReadError;
+    return this.meterValue;
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+}
+
+async function plcDevice(protocol: "SIEMENS_S7" | "OPC_UA", profile: string): Promise<Device> {
+  const common = {
+    profile,
+    switchPoint: protocol === "SIEMENS_S7" ? "DB1,X0.0" : "ns=2;i=1001",
+    runFeedbackPoint: protocol === "SIEMENS_S7" ? "DB1,X0.1" : "ns=2;i=1002",
+    faultPoint: protocol === "SIEMENS_S7" ? "DB1,X0.2" : "ns=2;i=1003",
+  };
+  const raw = protocol === "SIEMENS_S7"
+    ? { ...common, host: "s7.test", ...(profile.endsWith("WATER_M3") ? { meterPoint: "DB1,INT0" } : {}) }
+    : { ...common, endpointUrl: "opc.tcp://opc.test:4840", authMode: "ANONYMOUS", ...(profile.endsWith("WATER_M3") ? { meterPoint: "ns=2;i=1004" } : {}) };
+  const plc = normalizePlcConfig(protocol, raw, "PLC").config;
+  const devices = new InMemoryDeviceRepository([]);
+  return devices.create(DEFAULT_TENANT, {
+    deviceNo: protocol === "SIEMENS_S7" ? "DZ-PLC-900" : "DZ-PLC-901",
+    name: "现场 PLC",
+    type: "PLC",
+    status: "ONLINE",
+    protocol,
+    plc,
+  });
+}
+
+describe("PLC 现场协议网关", () => {
+  it("S7 设备参与领单、写点位并按业务量增量结单", async () => {
+    const device = await plcDevice("SIEMENS_S7", "SIEMENS_S7_WATER_M3");
+    const job = command({ id: "cmd-plc-s7", deviceId: device.id });
+    const channel = makeChannel([job]);
+    const plc = new FakePlc();
+    const gateway = new FieldGateway({ devices: ledgerOf([device]), fetchImpl: channel.fetchImpl, plcClientFor: () => plc, now: channel.now });
+
+    await gateway.tick();
+    expect(plc.writes).toEqual([{ point: "DB1,X0.0", value: true }]);
+    expect(channel.rows.get(job.id)?.status).toBe("ACKED");
+
+    plc.meterValue = 108;
+    channel.advance(3);
+    await gateway.tick();
+    expect(plc.writes.at(-1)).toEqual({ point: "DB1,X0.0", value: false });
+    expect(channel.receipt(job.id)).toMatchObject({ status: "DONE", result: { durationMin: 3, waterVolumeM3: 8 } });
+    await gateway.stop();
+    expect(plc.closed).toBe(true);
+  });
+
+  it("PLC 启动即故障时先关闭点位再报失败", async () => {
+    const device = await plcDevice("SIEMENS_S7", "SIEMENS_S7_SWITCH_ONLY");
+    const job = command({ id: "cmd-plc-fault", deviceId: device.id });
+    const channel = makeChannel([job]);
+    const plc = new FakePlc();
+    plc.fault = true;
+    const gateway = new FieldGateway({ devices: ledgerOf([device]), fetchImpl: channel.fetchImpl, plcClientFor: () => plc, now: channel.now });
+
+    await gateway.tick();
+    expect(plc.writes).toEqual([{ point: "DB1,X0.0", value: true }, { point: "DB1,X0.0", value: false }]);
+    expect(channel.receipt(job.id)).toMatchObject({ status: "FAILED" });
+    expect(channel.receipt(job.id)?.message).toContain("DB1,X0.2");
+    await gateway.stop();
+  });
+
+  it("PLC 计量基线读取失败时先收回启停点位", async () => {
+    const device = await plcDevice("SIEMENS_S7", "SIEMENS_S7_WATER_M3");
+    const job = command({ id: "cmd-plc-baseline", deviceId: device.id });
+    const channel = makeChannel([job]);
+    const plc = new FakePlc();
+    plc.meterReadError = new Error("baseline unavailable");
+    const errors: Error[] = [];
+    const gateway = new FieldGateway({ devices: ledgerOf([device]), fetchImpl: channel.fetchImpl, plcClientFor: () => plc, now: channel.now, onError: (_device, _command, error) => errors.push(error) });
+
+    await gateway.tick();
+    expect(plc.writes).toEqual([{ point: "DB1,X0.0", value: true }, { point: "DB1,X0.0", value: false }]);
+    expect(channel.rows.get(job.id)?.status).toBe("SENT");
+    expect(errors[0]?.message).toBe("baseline unavailable");
+    await gateway.stop();
+  });
+
+  it.each(["faultReadError", "meterReadError"] as const)("PLC 作业中 %s 时关闭点位并以 FAILED 收口", async (failure) => {
+    const device = await plcDevice("SIEMENS_S7", "SIEMENS_S7_WATER_M3");
+    const job = command({ id: `cmd-plc-running-${failure}`, deviceId: device.id });
+    const channel = makeChannel([job]);
+    const plc = new FakePlc();
+    const gateway = new FieldGateway({ devices: ledgerOf([device]), fetchImpl: channel.fetchImpl, plcClientFor: () => plc, now: channel.now });
+
+    await gateway.tick();
+    expect(channel.rows.get(job.id)?.status).toBe("ACKED");
+    plc[failure] = new Error("feedback unavailable");
+    await gateway.tick();
+
+    expect(plc.writes.at(-1)).toEqual({ point: "DB1,X0.0", value: false });
+    expect(channel.receipt(job.id)).toMatchObject({ status: "FAILED" });
+    expect(channel.receipt(job.id)?.message).toContain("已关闭启停点位止损");
+    await gateway.stop();
+  });
+
+  it.each(["ESTOP", "POWER_OFF"] as const)("PLC %s 必须读到运行反馈为假才确认到位", async (type) => {
+    const device = await plcDevice("OPC_UA", "OPC_UA_SWITCH_ONLY");
+    const estop = command({ id: `cmd-plc-${type}`, deviceId: device.id, type, parameters: {} });
+    const channel = makeChannel([estop]);
+    const plc = new FakePlc();
+    plc.running = true;
+    const gateway = new FieldGateway({ devices: ledgerOf([device]), fetchImpl: channel.fetchImpl, plcClientFor: () => plc, now: channel.now });
+
+    await gateway.tick();
+    expect(plc.writes).toEqual([{ point: "ns=2;i=1001", value: false }]);
+    expect(channel.rows.get(estop.id)?.status).toBe("ACKED");
+
+    await gateway.tick();
+    expect(channel.rows.get(estop.id)?.status).toBe("ACKED");
+    plc.running = false;
+    await gateway.tick();
+    expect(channel.receipt(estop.id)).toMatchObject({ status: "DONE", result: { confirmed: true } });
+    await gateway.stop();
   });
 });

@@ -16,14 +16,24 @@ afterEach(() => {
  */
 const CATALOGUE = {
   protocols: [
-    { value: "CB", label: "回调式", requiresBinding: false },
-    { value: "BUS", label: "总线式", requiresBinding: true },
+    { value: "CB", label: "回调式", driverId: "CB_DRIVER", connectionKind: "NONE", runtime: "DEVICE_CALLBACK", requiresBinding: false, parameters: [] },
+    {
+      value: "BUS", label: "总线式", driverId: "BUS_DRIVER", connectionKind: "MODBUS_TCP", runtime: "FIELD_GATEWAY", requiresBinding: true,
+      parameters: [
+        { key: "host", label: "地址", input: "text", required: true },
+        { key: "port", label: "端口", input: "number", required: false, defaultValue: 1502 },
+        { key: "unitId", label: "单元标识", input: "number", required: false, defaultValue: 9 },
+        { key: "profile", label: "剖面", input: "select", required: true },
+        { key: "timeoutMs", label: "超时", input: "number", required: false, defaultValue: 4321 },
+      ],
+    },
   ],
   defaultProtocol: "CB",
   profiles: [
-    { key: "SW", label: "启停剖面", applicableTypes: ["PUMP"], meter: null },
-    { key: "METER", label: "计量剖面", applicableTypes: ["PUMP", "VALVE"], meter: { register: 32, wordOrder: "LOW_FIRST", wordOrderLabel: "低字在前（CDAB）", scale: 0.1, unit: "L" } },
+    { key: "SW", label: "启停剖面", protocol: "BUS", applicableTypes: ["PUMP"], meter: null },
+    { key: "METER", label: "计量剖面", protocol: "BUS", applicableTypes: ["PUMP", "VALVE"], meter: { register: 32, wordOrder: "LOW_FIRST", wordOrderLabel: "低字在前（CDAB）", scale: 0.1, unit: "L" } },
   ],
+  plcProfiles: [],
   defaults: { port: 1502, unitId: 9, timeoutMs: 4321 },
 };
 
@@ -35,7 +45,8 @@ const LEDGER = {
   status: "OFFLINE",
   plotCode: "P-1",
   protocol: "BUS",
-  binding: { host: "10.1.2.3", port: 1502, unitId: 9, profile: "SW", timeoutMs: 4321 },
+  driverId: "BUS_DRIVER",
+  connection: { host: "10.1.2.3", port: 1502, unitId: 9, profile: "SW", timeoutMs: 4321 },
   lastSeenAt: "2026-11-12T00:00:00.000Z",
 };
 
@@ -89,25 +100,25 @@ describe("设备配置弹窗按服务端现场接入目录渲染并收发绑定"
     passValidation(state);
     await state.openConfig({ ...LEDGER });
     expect(state.configForm.protocol).toBe("BUS");
-    expect(state.configForm.host).toBe("10.1.2.3");
-    expect(state.configForm.profile).toBe("SW");
-    expect(state.needsBinding).toBe(true);
+    expect(state.configForm.connection).toMatchObject({ host: "10.1.2.3", profile: "SW" });
+    expect(state.configProtocol.connectionKind).toBe("MODBUS_TCP");
   });
 
-  it("切到需要绑定的协议后，缺省端口以外的绑定按目录缺省留空即不发出", async () => {
+  it("切到现场协议后，连接参数按目录缺省值初始化并提交", async () => {
     const { state, updateDevice } = mountDeviceList();
     await flushView();
     passValidation(state);
-    await state.openConfig({ ...LEDGER, protocol: "CB", binding: undefined });
+    await state.openConfig({ ...LEDGER, protocol: "CB", connection: undefined });
+    passValidation(state);
     state.configForm.protocol = "BUS";
-    state.configForm.host = " 10.9.9.9 ";
-    state.configForm.profile = "METER";
+    state.configForm.connection.host = " 10.9.9.9 ";
+    state.configForm.connection.profile = "METER";
     passValidation(state);
     await state.submitConfig();
     expect(updateDevice).toHaveBeenCalledWith("d1", expect.objectContaining({
       protocol: "BUS",
-      // 端口、单元标识与超时留空：不发出去，由服务端按目录缺省补齐，前端不替后端决定数值
-      binding: { host: "10.9.9.9", profile: "METER" },
+      driverId: "BUS_DRIVER",
+      connection: { host: "10.9.9.9", port: 1502, unitId: 9, profile: "METER", timeoutMs: 4321 },
     }));
   });
 
@@ -116,11 +127,12 @@ describe("设备配置弹窗按服务端现场接入目录渲染并收发绑定"
     await flushView();
     passValidation(state);
     await state.openConfig({ ...LEDGER });
+    passValidation(state);
     state.configForm.protocol = "CB";
     passValidation(state);
     await state.submitConfig();
-    expect(state.needsBinding).toBe(false);
-    expect(updateDevice).toHaveBeenCalledWith("d1", expect.objectContaining({ protocol: "CB", binding: null }));
+    expect(state.configProtocol.connectionKind).toBe("NONE");
+    expect(updateDevice).toHaveBeenCalledWith("d1", expect.objectContaining({ protocol: "CB", connection: null }));
   });
 
   it("设备类型没有可用剖面时，需要绑定的协议不可选且原剖面被清空", async () => {
@@ -132,8 +144,16 @@ describe("设备配置弹窗按服务端现场接入目录渲染并收发绑定"
     await flushView();
     const bus = state.protocolOptions.find((item: any) => item.value === "BUS");
     expect(bus.unsupported).toBe(true);
-    expect(state.configForm.profile).toBe("");
+    expect(state.configForm.connection.profile).toBe("");
     expect(state.protocolHint).toContain("类型(SENSOR)");
+  });
+
+  it("显式移除 CA 时提交空串，不让空值被连接参数归一化丢弃", () => {
+    const { state } = mountDeviceList();
+    state.configForm.connection.caCertificate = "old certificate";
+    state.configForm.connection.hasCaCertificate = true;
+    state.clearCaFile(state.configForm.connection);
+    expect(state.connectionInput(state.configForm.connection)).toEqual({ caCertificate: "" });
   });
 
   it("计量剖面把倍率与字序翻成可读话，启停剖面说明不报作业量", async () => {
@@ -141,10 +161,10 @@ describe("设备配置弹窗按服务端现场接入目录渲染并收发绑定"
     await flushView();
     passValidation(state);
     await state.openConfig({ ...LEDGER });
-    state.configForm.profile = "METER";
+    state.configForm.connection.profile = "METER";
     expect(state.hex(state.selectedProfile.meter.register)).toBe("0x0020");
     expect(state.selectedProfile.meter.wordOrderLabel).toBe("低字在前（CDAB）");
-    state.configForm.profile = "SW";
+    state.configForm.connection.profile = "SW";
     expect(state.selectedProfile.meter).toBeNull();
   });
 });

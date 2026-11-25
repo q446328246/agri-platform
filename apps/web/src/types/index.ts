@@ -223,6 +223,11 @@ export interface Device {
   installLocation?: string;
   lastOnlineTime?: string;
   firmwareVersion?: string;
+  protocol?: string;
+  driverId?: string;
+  connection?: DeviceModbusBinding | DeviceMqttConfig | Record<string, never>;
+  binding?: DeviceModbusBinding;
+  mqtt?: DeviceMqttConfig;
   createdAt: string;
 }
 
@@ -255,17 +260,71 @@ export interface DeviceModbusBinding {
   timeoutMs?: number;
 }
 
-/** 现场接入目录：由 iot-service 的接入绑定模块直接给出，配置弹窗按它渲染选项 */
+/** MQTT 设备自带连接配置；密码只在保存时提交，平台不返回明文或密文 */
+export interface DeviceMqttConfig {
+  username: string;
+  brokerUrl: string;
+  hasPassword: boolean;
+  hasCaCertificate: boolean;
+}
+
+export interface DeviceMqttConfigInput {
+  username: string;
+  password?: string;
+  brokerUrl: string;
+  caCertificate?: string;
+}
+
+export interface DeviceConnectionParameter {
+  key: string;
+  label: string;
+  input: 'text' | 'password' | 'number' | 'select' | 'certificate';
+  required: boolean;
+  requiredOnCreate?: boolean;
+  requiredWhen?: { key: string; startsWith?: string };
+  secret?: boolean;
+  defaultValue?: number | string;
+  min?: number;
+  max?: number;
+  step?: number;
+  maxLength?: number;
+  placeholder?: string;
+  hint?: string;
+  options?: Array<{ value: string; label: string; disabled?: boolean }>;
+}
+
+export interface DeviceProtocolOption {
+  value: string;
+  label: string;
+  driverId: string;
+  driverLabel: string;
+  description: string;
+  connectionKind: 'NONE' | 'MODBUS_TCP' | 'MQTT' | 'PLC';
+  runtime: 'DEVICE_CALLBACK' | 'FIELD_GATEWAY' | 'MQTT_BROKER' | 'PLC_DRIVER';
+  requiresBinding: boolean;
+  parameters: DeviceConnectionParameter[];
+}
+
+/** 现场接入目录：由 iot-service 的协议驱动模块直接给出，配置弹窗按参数 schema 渲染 */
 export interface DeviceFieldAccess {
-  /** requiresBinding 由服务端判定：界面按它决定显不显示地址与剖面，不在前端再认一次协议名 */
-  protocols: Array<{ value: string; label: string; requiresBinding: boolean }>;
+  protocols: DeviceProtocolOption[];
   defaultProtocol: string;
   profiles: Array<{
     key: string;
     label: string;
+    protocol: string;
     /** 可配用的台账类型：只有执行类设备能被网关写线圈 */
     applicableTypes: string[];
     meter: { register: number; wordOrder: string; wordOrderLabel: string; scale: number; unit: string } | null;
+  }>;
+  plcProfiles: Array<{
+    key: string;
+    label: string;
+    protocol: string;
+    applicableTypes: string[];
+    pointHint: string;
+    meterPointHint: string;
+    meter: { dataType: string; wordOrder: string; wordOrderLabel: string; scale: number; unit: string } | null;
   }>;
   defaults: { port: number; unitId: number; timeoutMs: number };
 }

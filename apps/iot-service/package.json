@@ -17,14 +17,17 @@
     "@agri/db": "workspace:*",
     "@agri/shared": "workspace:*",
     "@nestjs/common": "^11.2.8",
+    "mcprotocol": "0.1.2",
     "mqtt": "^5.10.1",
+    "node-opcua": "2.187.34",
+    "nodes7": "0.3.18",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "@agri/tsconfig": "workspace:*",
     "@agri/testing": "workspace:*",
+    "@agri/tsconfig": "workspace:*",
     "typescript": "^5.9.3",
     "vitest": "^3.0.0"
   }

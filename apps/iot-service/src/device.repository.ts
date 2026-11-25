@@ -1,8 +1,10 @@
 import type { PrismaClientLike } from "@agri/db";
 import { keywordHits, likePattern, toIsoTimestamp, ulid } from "@agri/shared";
 
-import { DEFAULT_DEVICE_PROTOCOL } from "./device-binding.js";
+import { DEFAULT_DEVICE_PROTOCOL, getDeviceProtocolDriver } from "./device-binding.js";
 import type { DeviceProtocol, ModbusBinding } from "./device-binding.js";
+import type { PlcDeviceConfig } from "./plc-binding.js";
+import type { MqttDeviceConfig } from "./mqtt-config.js";
 
 /**
  * 设备台账仓储。
@@ -20,6 +22,7 @@ export const DEFAULT_TENANT = "tenant-demo";
 
 /** 台账类型白名单，与迁移 014 的 CHECK、前端 apps/web/src/utils/device.ts 的选项三处同口径 */
 export const DEVICE_TYPES = [
+  "PLC",
   "WEATHER_STATION",
   "SOIL_SENSOR",
   "INTEGRATED_STATION",
@@ -51,8 +54,14 @@ export interface Device {
   plotCode?: string | undefined;
   /** 接入协议（迁移 038）：HTTP 为设备回调，MODBUS_TCP 由 iot-service 现场网关主动下发 */
   protocol: DeviceProtocol;
+  /** 协议驱动标识；与 protocol 配套，新增协议时扩展驱动目录而不是改台账结构 */
+  driverId: string;
   /** 现场接入绑定（地址 + 剖面）；协议为 HTTP 时省略 */
   binding?: ModbusBinding | undefined;
+  /** MQTT 设备自带连接配置；密码仅以密文保存，HTTP 响应不返回密文或证书正文 */
+  mqtt?: MqttDeviceConfig | undefined;
+  /** PLC 协议独立连接配置；不同驱动的字段由 plc-binding 按协议校验，不共用 Modbus binding */
+  plc?: PlcDeviceConfig | undefined;
   /** 最后一次上报时间；新登记但尚未上报的设备为 null，不拿当前时刻冒充 */
   lastSeenAt: string | null;
   createdAt: string;
@@ -68,7 +77,11 @@ export interface CreateDeviceInput {
   plotCode?: string | undefined;
   /** 省略即按缺省协议（HTTP 回调）建档 */
   protocol?: DeviceProtocol | undefined;
+  /** 省略时按协议取默认驱动；显式值必须与协议匹配 */
+  driverId?: string | undefined;
   binding?: ModbusBinding | undefined;
+  mqtt?: MqttDeviceConfig | undefined;
+  plc?: PlcDeviceConfig | undefined;
 }
 
 /**
@@ -85,10 +98,16 @@ export interface UpdateDeviceInput {
   status?: DeviceStatus;
   /** 传空串表示解绑地块，省略表示不改绑定 */
   plotCode?: string;
-  /** 接入协议：与 binding 配套改，协议与绑定同生同灭的口径由迁移 038 的 CHECK 兜住 */
+  /** 接入协议：与 driverId/binding 配套改，协议与连接同生同灭 */
   protocol?: DeviceProtocol;
+  /** 协议驱动：与 protocol 配套改，省略时按协议取默认驱动 */
+  driverId?: string;
   /** 传 null 表示清空绑定（改回 HTTP 回调时用），省略表示不改绑定 */
   binding?: ModbusBinding | null;
+  /** MQTT 连接配置；传 null 表示切换协议时清空 */
+  mqtt?: MqttDeviceConfig | null;
+  /** PLC 连接配置；传 null 表示切换协议时清空 */
+  plc?: PlcDeviceConfig | null;
 }
 
 /** 台账筛选条件，全部为精确或子串匹配，缺省不过滤 */
@@ -100,6 +119,8 @@ export interface DeviceFilter {
   plotCode?: string | undefined;
   /** 接入协议：现场网关只取非 HTTP 的设备，不用把整本台账拉过去再筛 */
   protocol?: string | undefined;
+  /** 多协议执行器按驱动运行时批量取设备；与 protocol 同时使用时取交集 */
+  protocols?: string[] | undefined;
 }
 
 export interface DeviceRepository {
@@ -120,6 +141,7 @@ function matchesFilter(device: Device, filter: DeviceFilter | undefined): boolea
   if (filter.status && device.status !== filter.status) return false;
   if (filter.plotCode && device.plotCode !== filter.plotCode) return false;
   if (filter.protocol && device.protocol !== filter.protocol) return false;
+  if (filter.protocols && !filter.protocols.includes(device.protocol)) return false;
   if (filter.keyword) {
     if (!keywordHits(filter.keyword, [device.name, device.deviceNo])) return false;
   }
@@ -171,6 +193,7 @@ export function demoDevices(tenantId: string = DEFAULT_TENANT): Device[] {
     ...(plotCode ? { plotCode } : {}),
     // 演示拖拉机与迁移 074 一致，走 MQTT 直连；其余设备保持 HTTP 回调。
     protocol: id === "device-tractor-001" ? "MQTT" : DEFAULT_DEVICE_PROTOCOL,
+    driverId: getDeviceProtocolDriver(id === "device-tractor-001" ? "MQTT" : DEFAULT_DEVICE_PROTOCOL).id,
     lastSeenAt,
     createdAt: lastSeenAt ?? now,
     updatedAt: lastSeenAt ?? now,
@@ -214,7 +237,10 @@ export class InMemoryDeviceRepository implements DeviceRepository {
       status: input.status,
       ...(input.plotCode ? { plotCode: input.plotCode } : {}),
       protocol: input.protocol ?? DEFAULT_DEVICE_PROTOCOL,
+      driverId: input.driverId ?? getDeviceProtocolDriver(input.protocol ?? DEFAULT_DEVICE_PROTOCOL).id,
       ...(input.binding ? { binding: structuredClone(input.binding) } : {}),
+      ...(input.mqtt ? { mqtt: structuredClone(input.mqtt) } : {}),
+      ...(input.plc ? { plc: structuredClone(input.plc) } : {}),
       lastSeenAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -244,16 +270,21 @@ function mergeDevice(current: Device, input: UpdateDeviceInput, updatedAt: strin
     type: input.type ?? current.type,
     status: input.status ?? current.status,
     protocol: input.protocol ?? current.protocol,
+    driverId: input.driverId ?? getDeviceProtocolDriver(input.protocol ?? current.protocol).id,
     updatedAt,
   };
   if (input.plotCode === "") delete merged.plotCode;
   else if (input.plotCode !== undefined) merged.plotCode = input.plotCode;
   if (input.binding === null) delete merged.binding;
   else if (input.binding !== undefined) merged.binding = structuredClone(input.binding);
+  if (input.mqtt === null) delete merged.mqtt;
+  else if (input.mqtt !== undefined) merged.mqtt = structuredClone(input.mqtt);
+  if (input.plc === null) delete merged.plc;
+  else if (input.plc !== undefined) merged.plc = structuredClone(input.plc);
   return merged;
 }
 
-const DEVICE_COLUMNS = "id, tenant_id, device_no, name, type, status, plot_code, protocol, binding_json, last_seen_at, created_at, updated_at";
+const DEVICE_COLUMNS = "id, tenant_id, device_no, name, type, status, plot_code, protocol, driver_id, binding_json, mqtt_config_json, plc_config_json, last_seen_at, created_at, updated_at";
 
 /** JSONB 列在不同驱动下可能是对象也可能是文本，两种都收成绑定对象；空值返回 undefined 而不是 null */
 function toBinding(row: Record<string, unknown>): ModbusBinding | undefined {
@@ -264,12 +295,30 @@ function toBinding(row: Record<string, unknown>): ModbusBinding | undefined {
   return parsed as ModbusBinding;
 }
 
+function toMqttConfig(row: Record<string, unknown>): MqttDeviceConfig | undefined {
+  const raw = row.mqtt_config_json;
+  if (raw === null || raw === undefined || raw === "") return undefined;
+  const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  return parsed as MqttDeviceConfig;
+}
+
+function toPlcConfig(row: Record<string, unknown>): PlcDeviceConfig | undefined {
+  const raw = row.plc_config_json;
+  if (raw === null || raw === undefined || raw === "") return undefined;
+  const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  return parsed as PlcDeviceConfig;
+}
+
 export class SqlDeviceRepository implements DeviceRepository {
   constructor(private readonly client: PrismaClientLike) {}
 
   private toDevice(row: Record<string, unknown>): Device {
     const plotCode = String(row.plot_code ?? "");
     const binding = toBinding(row);
+    const mqtt = toMqttConfig(row);
+    const plc = toPlcConfig(row);
     return {
       id: String(row.id),
       tenantId: String(row.tenant_id),
@@ -279,7 +328,10 @@ export class SqlDeviceRepository implements DeviceRepository {
       status: String(row.status) as DeviceStatus,
       ...(plotCode ? { plotCode } : {}),
       protocol: String(row.protocol) as DeviceProtocol,
+      driverId: String(row.driver_id || getDeviceProtocolDriver(String(row.protocol)).id),
       ...(binding ? { binding } : {}),
+      ...(mqtt ? { mqtt } : {}),
+      ...(plc ? { plc } : {}),
       lastSeenAt: row.last_seen_at === null || row.last_seen_at === undefined ? null : toIsoTimestamp(row.last_seen_at),
       createdAt: toIsoTimestamp(row.created_at),
       updatedAt: toIsoTimestamp(row.updated_at),
@@ -304,6 +356,10 @@ export class SqlDeviceRepository implements DeviceRepository {
     if (filter?.protocol) {
       values.push(filter.protocol);
       conditions.push(`protocol = $${values.length}`);
+    }
+    if (filter?.protocols?.length) {
+      values.push(...filter.protocols);
+      conditions.push(`protocol IN (${filter.protocols.map((_, index) => `$${values.length - filter.protocols!.length + index + 1}`).join(", ")})`);
     }
     if (filter?.keyword) {
       // 转义 LIKE 通配符，否则关键词里的 % 和 _ 会当通配符用，和内存模式的字面包含对不上
@@ -349,14 +405,17 @@ export class SqlDeviceRepository implements DeviceRepository {
       status: input.status,
       ...(input.plotCode ? { plotCode: input.plotCode } : {}),
       protocol: input.protocol ?? DEFAULT_DEVICE_PROTOCOL,
+      driverId: input.driverId ?? getDeviceProtocolDriver(input.protocol ?? DEFAULT_DEVICE_PROTOCOL).id,
       ...(input.binding ? { binding: input.binding } : {}),
+      ...(input.mqtt ? { mqtt: input.mqtt } : {}),
+      ...(input.plc ? { plc: input.plc } : {}),
       lastSeenAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
     await this.client.$executeRawUnsafe(
-      `INSERT INTO devices (id, tenant_id, device_no, name, type, status, plot_code, protocol, binding_json, last_seen_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NULL, $10::timestamptz, $11::timestamptz)`,
+      `INSERT INTO devices (id, tenant_id, device_no, name, type, status, plot_code, protocol, driver_id, binding_json, mqtt_config_json, plc_config_json, last_seen_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, NULL, $13::timestamptz, $14::timestamptz)`,
       device.id,
       device.tenantId,
       device.deviceNo,
@@ -365,7 +424,10 @@ export class SqlDeviceRepository implements DeviceRepository {
       device.status,
       input.plotCode ?? "",
       device.protocol,
+      device.driverId,
       device.binding ? JSON.stringify(device.binding) : null,
+      device.mqtt ? JSON.stringify(device.mqtt) : null,
+      device.plc ? JSON.stringify(device.plc) : null,
       device.createdAt,
       device.updatedAt,
     );
@@ -377,15 +439,18 @@ export class SqlDeviceRepository implements DeviceRepository {
     if (!current) return null;
     const next = mergeDevice(current, input, new Date().toISOString());
     const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
-      `UPDATE devices SET name = $1, type = $2, status = $3, plot_code = $4, protocol = $5, binding_json = $6::jsonb, updated_at = $7::timestamptz
-       WHERE tenant_id = $8 AND id = $9
+      `UPDATE devices SET name = $1, type = $2, status = $3, plot_code = $4, protocol = $5, driver_id = $6, binding_json = $7::jsonb, mqtt_config_json = $8::jsonb, plc_config_json = $9::jsonb, updated_at = $10::timestamptz
+       WHERE tenant_id = $11 AND id = $12
        RETURNING ${DEVICE_COLUMNS}`,
       next.name,
       next.type,
       next.status,
       next.plotCode ?? "",
       next.protocol,
+      next.driverId,
       next.binding ? JSON.stringify(next.binding) : null,
+      next.mqtt ? JSON.stringify(next.mqtt) : null,
+      next.plc ? JSON.stringify(next.plc) : null,
       next.updatedAt,
       tenantId,
       id,

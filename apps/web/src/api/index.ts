@@ -5,7 +5,7 @@ import type {
   CropSeason, CropSeasonStatus,
   PlotChangeLog,
   Device, DeviceRealtimeData,
-  DeviceFieldAccess, DeviceModbusBinding,
+  DeviceFieldAccess, DeviceModbusBinding, DeviceMqttConfigInput,
   FarmTask, FarmTaskQuery,
   DashboardStats,
   PageResult, LoginParams, LoginResult,
@@ -414,12 +414,16 @@ export const iotApi = {
     return get<DeviceFieldAccess>('/devices/field-access')
   },
   /** 登记新设备：deviceNo 台账内唯一，type/status 取值见 utils/device.ts；返回的 lastSeenAt 为 null 表示尚未上报 */
-  createDevice(data: { deviceNo: string; name: string; type: string; status: 'ONLINE' | 'OFFLINE'; plotCode?: string | undefined; protocol?: string | undefined; binding?: DeviceModbusBinding | undefined }): Promise<any> {
+  createDevice(data: { deviceNo: string; name: string; type: string; status: 'ONLINE' | 'OFFLINE'; plotCode?: string | undefined; protocol?: string | undefined; driverId?: string | undefined; connection?: Record<string, string | number> | undefined; binding?: DeviceModbusBinding | undefined; mqtt?: DeviceMqttConfigInput }): Promise<any> {
     return post<any>('/devices', data)
   },
   /** 台账配置编辑：字段省略即不改，plotCode 传空串表示解绑地块；设备编号不可改 */
-  updateDevice(id: string, data: { name?: string; type?: string; status?: 'ONLINE' | 'OFFLINE'; plotCode?: string; protocol?: string; binding?: DeviceModbusBinding | null }): Promise<any> {
+  updateDevice(id: string, data: { name?: string; type?: string; status?: 'ONLINE' | 'OFFLINE'; plotCode?: string; protocol?: string; driverId?: string; connection?: Record<string, string | number> | null; binding?: DeviceModbusBinding | null; mqtt?: DeviceMqttConfigInput | null }): Promise<any> {
     return put<any>(`/devices/${encodeURIComponent(id)}`, data)
+  },
+  /** 下载平台默认 CA；设备已上传独立 CA 时优先按设备 id 下载 */
+  downloadMqttCa(id?: string): Promise<Blob> {
+    return request<Blob>({ method: 'GET', url: id ? `/devices/${encodeURIComponent(id)}/mqtt-ca` : '/devices/mqtt-ca', responseType: 'blob' })
   }
 }
 

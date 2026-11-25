@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Server } from "node:http";
 
 import { createIotHttpServer } from "../src/http.js";
 import { DEFAULT_TENANT, DEVICE_TYPES, InMemoryDeviceRepository, demoDevices } from "../src/device.repository.js";
-import { DEFAULT_DEVICE_PROTOCOL, MODBUS_DEFAULT_UNIT_ID, DEVICE_PROTOCOLS } from "../src/device-binding.js";
+import { DEFAULT_DEVICE_PROTOCOL, MODBUS_DEFAULT_UNIT_ID, DEVICE_PROTOCOLS, getDeviceProtocolDriver } from "../src/device-binding.js";
 import { MODBUS_TCP_DEFAULT_PORT, MODBUS_TCP_DEFAULT_TIMEOUT_MS } from "../src/modbus-tcp.js";
+import { createMqttConfigCipher } from "../src/mqtt-config.js";
+import { mqttProvisionerFromEnv } from "../src/emqx-device-provisioner.js";
 
 /**
  * 设备台账接口验证：列表筛选与分页、新增设备的校验与编号在租户内唯一、
@@ -254,6 +256,8 @@ describe("设备现场接入绑定", () => {
       binding: { host: "10.20.30.41", profile: "WATER_M3" },
     }));
     expect(created.data.protocol).toBe("MODBUS_TCP");
+    expect(created.data.driverId).toBe("MODBUS_TCP_GATEWAY");
+    expect(created.data.connection).toEqual({ host: "10.20.30.41", port: 502, unitId: 1, profile: "WATER_M3", timeoutMs: 2000 });
     // 端口/单元标识/超时都是可以从规范与剖面缺省推出的值，不该让人反复抄
     expect(created.data.binding).toEqual({ host: "10.20.30.41", port: 502, unitId: 1, profile: "WATER_M3", timeoutMs: 2000 });
 
@@ -306,7 +310,7 @@ describe("设备现场接入绑定", () => {
     const put = (id: string, body: unknown) => fetch(`${base}/api/v1/devices/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
     const switched = await jsonOf(await put("device-pump-001", { protocol: "MODBUS_TCP", binding: { host: "10.20.30.42", port: 1502, unitId: 4, profile: "WATER_M3", timeoutMs: 5000 } }));
-    expect(switched.data).toMatchObject({ deviceNo: "DZ-P-001", protocol: "MODBUS_TCP" });
+    expect(switched.data).toMatchObject({ deviceNo: "DZ-P-001", protocol: "MODBUS_TCP", driverId: "MODBUS_TCP_GATEWAY" });
     expect(switched.data.binding).toEqual({ host: "10.20.30.42", port: 1502, unitId: 4, profile: "WATER_M3", timeoutMs: 5000 });
 
     // 只改名称不动协议：绑定原样留着，不会因为编辑把现场接入抹掉
@@ -322,6 +326,7 @@ describe("设备现场接入绑定", () => {
     expect(bareSwitch.status).toBe(200);
     const backToCallback = await jsonOf(bareSwitch);
     expect(backToCallback.data.protocol).toBe("HTTP");
+    expect(backToCallback.data.driverId).toBe("HTTP_CALLBACK");
     expect(backToCallback.data.binding).toBeUndefined();
 
     const stillModbus = await jsonOf(await put("device-station-002", { protocol: "MODBUS_TCP" }));
@@ -336,6 +341,11 @@ describe("设备现场接入绑定", () => {
 
     expect(catalogue.protocols.map((item: { value: string }) => item.value)).toEqual([...DEVICE_PROTOCOLS]);
     expect(catalogue.protocols.every((item: { label: string }) => item.label.length > 0)).toBe(true);
+    expect(catalogue.protocols.map((item: { driverId: string }) => item.driverId)).toEqual(DEVICE_PROTOCOLS.map((protocol) => getDeviceProtocolDriver(protocol).id));
+    const mqttDriver = catalogue.protocols.find((item: { value: string }) => item.value === "MQTT");
+    expect(mqttDriver.parameters.map((parameter: { key: string }) => parameter.key)).toEqual(["username", "password", "brokerUrl", "caCertificate"]);
+    expect(mqttDriver.parameters.find((parameter: { key: string }) => parameter.key === "password")).toMatchObject({ requiredOnCreate: true, secret: true });
+    expect(mqttDriver.parameters.find((parameter: { key: string }) => parameter.key === "caCertificate").requiredWhen).toEqual({ key: "brokerUrl", startsWith: "mqtts://" });
     expect(catalogue.defaultProtocol).toBe(DEFAULT_DEVICE_PROTOCOL);
     // 端口、单元标识、超时由协议侧常量给出：前端写死就等于允许界面和网关按两套口径连设备
     expect(catalogue.defaults).toEqual({ port: MODBUS_TCP_DEFAULT_PORT, unitId: MODBUS_DEFAULT_UNIT_ID, timeoutMs: MODBUS_TCP_DEFAULT_TIMEOUT_MS });
@@ -368,8 +378,213 @@ describe("设备现场接入绑定", () => {
     }
 
     // 目录只收执行类设备：表计没有可写线圈，配剖面等于对着墒情站下令
-    const profiledTypes: string[] = catalogue.profiles.flatMap((profile: { applicableTypes: string[] }) => profile.applicableTypes);
+    const profiledTypes: string[] = [...catalogue.profiles, ...catalogue.plcProfiles].flatMap((profile: { applicableTypes: string[] }) => profile.applicableTypes);
     expect(profiledTypes.some((type) => ["WEATHER_STATION", "SOIL_SENSOR", "INTEGRATED_STATION", "REMOTE_SENSE"].includes(type))).toBe(false);
     expect(DEVICE_TYPES.some((type) => !profiledTypes.includes(type))).toBe(true);
+  });
+});
+
+describe("PLC 设备连接配置", () => {
+  it("按协议保存 PLC 点位，计量剖面缺点位时拒绝建档", async () => {
+    const base = await start(createIotHttpServer());
+    const connection = { host: "s7.test", profile: "SIEMENS_S7_WATER_M3", switchPoint: "DB1,X0.0", runFeedbackPoint: "DB1,X0.1", faultPoint: "DB1,X0.2", meterPoint: "DB1,INT0" };
+    const created = await fetch(`${base}/api/v1/devices`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceNo: "DZ-PLC-100", name: "S7 灌溉泵", type: "PLC", status: "ONLINE", protocol: "SIEMENS_S7", connection }),
+    });
+    expect(created.status).toBe(201);
+    expect((await jsonOf(created)).data).toMatchObject({ protocol: "SIEMENS_S7", driverId: "SIEMENS_S7_DRIVER", type: "PLC", connection: { ...connection, port: 102, rack: 0, slot: 1 } });
+
+    const { meterPoint, ...missingMeter } = connection;
+    const rejected = await fetch(`${base}/api/v1/devices`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceNo: "DZ-PLC-101", name: "缺计量点位", type: "PLC", status: "ONLINE", protocol: "SIEMENS_S7", connection: missingMeter }),
+    });
+    expect(rejected.status).toBe(400);
+    expect((await jsonOf(rejected)).message).toContain("meterPoint");
+    expect(meterPoint).toBeTruthy();
+  });
+
+  it("OPC UA 密码加密且不回显，切回 HTTP 时清空 PLC 配置", async () => {
+    const cipher = createMqttConfigCipher(Buffer.alloc(32, 9).toString("base64"));
+    const base = await start(createIotHttpServer({ mqttConfigCipher: cipher }));
+    const created = await fetch(`${base}/api/v1/devices`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        deviceNo: "DZ-PLC-102",
+        name: "OPC UA 控制器",
+        type: "PLC",
+        status: "ONLINE",
+        protocol: "OPC_UA",
+        connection: {
+          endpointUrl: "opc.tcp://opc.test:4840",
+          authMode: "USERNAME",
+          username: "operator",
+          password: "fixture-only-password",
+          profile: "OPC_UA_SWITCH_ONLY",
+          switchPoint: "ns=2;i=1001",
+          runFeedbackPoint: "ns=2;i=1002",
+          faultPoint: "ns=2;i=1003",
+        },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const device = (await jsonOf(created)).data;
+    expect(device.connection).toMatchObject({ authMode: "USERNAME", hasPassword: true });
+    expect(device.connection).not.toHaveProperty("password");
+    expect(device.connection).not.toHaveProperty("passwordCiphertext");
+
+    const switched = await jsonOf(await fetch(`${base}/api/v1/devices/${device.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ protocol: "HTTP", connection: null }),
+    }));
+    expect(switched.data).toMatchObject({ protocol: "HTTP", driverId: "HTTP_CALLBACK", connection: {} });
+    expect(switched.data.plc).toBeUndefined();
+  });
+});
+
+describe("MQTT 设备连接配置", () => {
+  const cipher = createMqttConfigCipher(Buffer.alloc(32, 7).toString("base64"));
+  const certificate = "-----BEGIN CERTIFICATE-----\nfixture-certificate\n-----END CERTIFICATE-----";
+
+  it("默认建档只加密保存设备自有配置，不调用 EMQX", async () => {
+    const base = await start(createIotHttpServer({ mqttConfigCipher: cipher }));
+    const created = await fetch(`${base}/api/v1/devices`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        deviceNo: "DZ-MQTT-001",
+        name: "自有 Broker 设备",
+        type: "AUTO_TRACTOR",
+        protocol: "MQTT",
+        driverId: "MQTT_DIRECT",
+        connection: {
+          username: "device-account",
+          password: "device-password",
+          brokerUrl: "mqtts://broker.example.test:8883",
+          caCertificate: certificate,
+        },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const payload = await jsonOf(created);
+    expect(payload.data).toMatchObject({
+      protocol: "MQTT",
+      driverId: "MQTT_DIRECT",
+      connection: { username: "device-account", brokerUrl: "mqtts://broker.example.test:8883", hasPassword: true, hasCaCertificate: true },
+    });
+    expect(JSON.stringify(payload.data)).not.toContain("device-password");
+    expect(JSON.stringify(payload.data)).not.toContain("passwordCiphertext");
+    expect(JSON.stringify(payload.data)).not.toContain(certificate);
+
+    const downloaded = await fetch(`${base}/api/v1/devices/${payload.data.id}/mqtt-ca`);
+    expect(downloaded.status).toBe(200);
+    expect(downloaded.headers.get("content-disposition")).toContain("attachment");
+    expect(await downloaded.text()).toBe(certificate);
+  });
+
+  it("密码修改重新加密，留空保持原密文，CA 可替换", async () => {
+    const base = await start(createIotHttpServer({ mqttConfigCipher: cipher }));
+    const post = await fetch(`${base}/api/v1/devices`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        deviceNo: "DZ-MQTT-002",
+        name: "配置维护设备",
+        type: "AUTO_TRACTOR",
+        protocol: "MQTT",
+        connection: { username: "device-account", password: "device-password", brokerUrl: "mqtt://broker.example.test:1883" },
+      }),
+    });
+    const device = (await jsonOf(post)).data;
+    const put = (connection: Record<string, unknown>) => fetch(`${base}/api/v1/devices/${device.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ connection }),
+    });
+
+    const unchanged = await jsonOf(await put({ username: "device-account", brokerUrl: "mqtt://broker.example.test:1883" }));
+    expect(unchanged.data.connection).toMatchObject({ hasPassword: true, hasCaCertificate: false });
+    const changed = await jsonOf(await put({
+      username: "device-account",
+      password: "replacement-password",
+      brokerUrl: "mqtts://broker.example.test:8883",
+      caCertificate: certificate,
+    }));
+    expect(changed.data.connection).toMatchObject({ hasPassword: true, hasCaCertificate: true });
+    expect(JSON.stringify(changed.data)).not.toContain("replacement-password");
+
+    const switched = await jsonOf(await fetch(`${base}/api/v1/devices/${device.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ protocol: "HTTP", connection: null }),
+    }));
+    expect(switched.data).toMatchObject({ protocol: "HTTP", driverId: "HTTP_CALLBACK", connection: {} });
+    expect(switched.data.mqtt).toBeUndefined();
+    expect((await fetch(`${base}/api/v1/devices/${device.id}/mqtt-ca`)).status).toBe(400);
+  });
+
+  it("拒绝协议与驱动错配及混用新旧连接字段", async () => {
+    const base = await start(createIotHttpServer({ mqttConfigCipher: cipher }));
+    const post = (body: unknown) => fetch(`${base}/api/v1/devices`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceNo: "DZ-MQTT-003", name: "错配设备", type: "AUTO_TRACTOR", ...body }),
+    });
+    const mqttConnection = { username: "device-account", password: "device-password", brokerUrl: "mqtt://broker.example.test:1883" };
+
+    expect((await post({ protocol: "MQTT", driverId: "MODBUS_TCP_GATEWAY", connection: mqttConnection })).status).toBe(400);
+    expect((await post({
+      protocol: "MQTT",
+      connection: mqttConnection,
+      mqtt: mqttConnection,
+    })).status).toBe(400);
+    expect((await post({ protocol: "HTTP", connection: {} })).status).toBe(400);
+    expect((await post({ protocol: "MQTT", connection: { ...mqttConnection, password: "" } })).status).toBe(400);
+  });
+
+  it("只有显式测试开关才装配 EMQX 开户器", async () => {
+    expect(mqttProvisionerFromEnv({ IOT_MQTT_ENABLED: "true" })).toBeUndefined();
+    expect(mqttProvisionerFromEnv({ IOT_MQTT_AUTO_PROVISION_TEST_ONLY: "false" })).toBeUndefined();
+    expect(mqttProvisionerFromEnv({
+      IOT_MQTT_AUTO_PROVISION_TEST_ONLY: "true",
+      EMQX_API_URL: "http://127.0.0.1:18083",
+      EMQX_DASHBOARD_USERNAME: "admin",
+      EMQX_DASHBOARD_PASSWORD: "fixture-dashboard-password",
+      MQTT_USERNAME: "service-account",
+      MQTT_PASSWORD: "fixture-service-password",
+    })).toBeDefined();
+  });
+
+  it("测试开户器在建档时接收明文密码，台账仍只保存密文", async () => {
+    const provision = vi.fn(async () => undefined);
+    const base = await start(createIotHttpServer({ mqttConfigCipher: cipher, mqttProvisioner: { provision } }));
+    const created = await fetch(`${base}/api/v1/devices`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        deviceNo: "DZ-MQTT-004",
+        name: "测试开户设备",
+        type: "AUTO_TRACTOR",
+        protocol: "MQTT",
+        connection: { username: "device-account", password: "device-password", brokerUrl: "mqtt://broker.example.test:1883" },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const createdDevice = (await jsonOf(created)).data;
+    expect(provision).toHaveBeenCalledWith({ tenantId: DEFAULT_TENANT, deviceNo: "DZ-MQTT-004", username: "device-account", password: "device-password" });
+    expect(JSON.stringify(createdDevice)).not.toContain("device-password");
+
+    const renamedAccount = await fetch(`${base}/api/v1/devices/${createdDevice.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ connection: { username: "new-account", brokerUrl: "mqtt://broker.example.test:1883" } }),
+    });
+    expect(renamedAccount.status).toBe(400);
+    expect(provision).toHaveBeenCalledTimes(1);
   });
 });

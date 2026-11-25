@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PrismaClientLike, Tx } from "@agri/db";
 
 import { DEFAULT_TENANT, SqlDeviceRepository } from "../src/device.repository.js";
+import { fieldGatewayProtocols } from "../src/device-binding.js";
 
 /**
  * SQL 设备仓储的语句与映射验证：部署走 sql 模式，
@@ -47,7 +48,10 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     status: "ONLINE",
     plot_code: EAST_1,
     protocol: "HTTP",
+    driver_id: "HTTP_CALLBACK",
     binding_json: null,
+    mqtt_config_json: null,
+    plc_config_json: null,
     last_seen_at: "2026-11-09T01:02:03.000Z",
     created_at: "2026-11-01",
     updated_at: "2026-11-02",
@@ -62,7 +66,7 @@ describe("SqlDeviceRepository", () => {
       row({ id: "device-y", device_no: "DZ-Y-1", name: "首部气象站", type: "WEATHER_STATION", status: "OFFLINE", plot_code: "", last_seen_at: null }),
     ]);
     const list = await new SqlDeviceRepository(client).list(DEFAULT_TENANT);
-    expect(list[0]).toMatchObject({ id: "device-x", tenantId: DEFAULT_TENANT, deviceNo: "DZ-X-1", type: "SOIL_SENSOR", status: "ONLINE", plotCode: EAST_1, protocol: "HTTP" });
+    expect(list[0]).toMatchObject({ id: "device-x", tenantId: DEFAULT_TENANT, deviceNo: "DZ-X-1", type: "SOIL_SENSOR", status: "ONLINE", plotCode: EAST_1, protocol: "HTTP", driverId: "HTTP_CALLBACK" });
     expect(list[0]!.lastSeenAt).toBe("2026-11-09T01:02:03.000Z");
     expect(list[1]!.plotCode).toBeUndefined();
     expect(list[1]!.binding).toBeUndefined();
@@ -82,6 +86,30 @@ describe("SqlDeviceRepository", () => {
     // 网关按协议取数，落到 SQL 是等值条件
     expect(calls[0]!.query).toContain("WHERE tenant_id = $1 AND protocol = $2");
     expect(calls[0]!.params).toEqual([DEFAULT_TENANT, "MODBUS_TCP"]);
+  });
+
+  it("PLC 配置从独立 JSONB 列还原，现场网关用参数化多协议条件批量取数", async () => {
+    const plc = { driverId: "SIEMENS_S7_DRIVER", host: "s7.test", port: 102, rack: 0, slot: 1, timeoutMs: 2000, profile: "SIEMENS_S7_SWITCH_ONLY", switchPoint: "DB1,X0.0", runFeedbackPoint: "DB1,X0.1", faultPoint: "DB1,X0.2" };
+    const { client, calls } = makeClient([
+      row({ id: "device-s7", device_no: "DZ-S7-1", type: "PLC", protocol: "SIEMENS_S7", driver_id: "SIEMENS_S7_DRIVER", plc_config_json: plc }),
+      row({ id: "device-opc", device_no: "DZ-OPC-1", type: "PLC", protocol: "OPC_UA", driver_id: "OPC_UA_CLIENT", plc_config_json: JSON.stringify(plc) }),
+    ]);
+    const protocols = fieldGatewayProtocols();
+    const list = await new SqlDeviceRepository(client).list(DEFAULT_TENANT, { protocols });
+    expect(list.map((device) => device.plc)).toEqual([plc, plc]);
+    expect(calls[0]!.query).toContain(`protocol IN (${protocols.map((_, index) => `$${index + 2}`).join(", ")})`);
+    expect(calls[0]!.params).toEqual([DEFAULT_TENANT, ...protocols]);
+  });
+
+  it("PLC 建档只写 plc_config_json，不占用 Modbus 或 MQTT 容器", async () => {
+    const { client, calls } = makeClient();
+    const plc = { driverId: "OPC_UA_CLIENT", endpointUrl: "opc.tcp://opc.test:4840", timeoutMs: 5000, authMode: "ANONYMOUS" as const, profile: "OPC_UA_SWITCH_ONLY", switchPoint: "ns=2;i=1001", runFeedbackPoint: "ns=2;i=1002", faultPoint: "ns=2;i=1003" };
+    const created = await new SqlDeviceRepository(client).create(DEFAULT_TENANT, { deviceNo: "DZ-PLC-1", name: "OPC PLC", type: "PLC", status: "ONLINE", protocol: "OPC_UA", plc });
+    const insert = calls.find((call) => call.query.includes("INSERT INTO devices"))!;
+    expect(insert.params[9]).toBeNull();
+    expect(insert.params[10]).toBeNull();
+    expect(JSON.parse(String(insert.params[11]))).toEqual(plc);
+    expect(created.plc).toEqual(plc);
   });
 
   it("筛选条件按出现顺序编号占位，租户固定为第一个条件", async () => {
@@ -107,7 +135,7 @@ describe("SqlDeviceRepository", () => {
     const insert = calls.find((call) => call.query.includes("INSERT INTO devices"));
     expect(insert).toBeDefined();
     expect(insert!.query).toContain("last_seen_at, created_at, updated_at");
-    expect(insert!.params.slice(0, 7)).toEqual([created.id, OTHER_TENANT, "DZ-N-001", "新墒情站", "SOIL_SENSOR", "OFFLINE", EAST_1]);
+    expect(insert!.params.slice(0, 9)).toEqual([created.id, OTHER_TENANT, "DZ-N-001", "新墒情站", "SOIL_SENSOR", "OFFLINE", EAST_1, "HTTP", "HTTP_CALLBACK"]);
     expect(created.id.startsWith("device-")).toBe(true);
     expect(created.tenantId).toBe(OTHER_TENANT);
     expect(created.lastSeenAt).toBeNull();
@@ -119,7 +147,10 @@ describe("SqlDeviceRepository", () => {
     const insert = calls.find((call) => call.query.includes("INSERT INTO devices"));
     expect(insert!.params[6]).toBe("");
     expect(insert!.params[7]).toBe("HTTP");
-    expect(insert!.params[8]).toBeNull();
+    expect(insert!.params[8]).toBe("HTTP_CALLBACK");
+    expect(insert!.params[9]).toBeNull();
+    expect(insert!.params[10]).toBeNull();
+    expect(insert!.params[11]).toBeNull();
   });
 
   it("现场协议建档把绑定序列化成 JSONB，缺省端口与超时由入参给全", async () => {
@@ -127,11 +158,15 @@ describe("SqlDeviceRepository", () => {
     const binding = { host: "10.20.30.40", port: 1502, unitId: 3, profile: "WATER_M3", timeoutMs: 3000 };
     const created = await new SqlDeviceRepository(client).create(DEFAULT_TENANT, { deviceNo: "DZ-N-003", name: "联片泵站", type: "IRRIGATION_PUMP", status: "ONLINE", protocol: "MODBUS_TCP", binding });
     const insert = calls.find((call) => call.query.includes("INSERT INTO devices"));
-    expect(insert!.query).toContain("protocol, binding_json");
-    expect(insert!.query).toContain("$9::jsonb");
+    expect(insert!.query).toContain("protocol, driver_id, binding_json");
+    expect(insert!.query).toContain("$10::jsonb");
     expect(insert!.params[7]).toBe("MODBUS_TCP");
-    expect(JSON.parse(String(insert!.params[8]))).toEqual(binding);
+    expect(insert!.params[8]).toBe("MODBUS_TCP_GATEWAY");
+    expect(JSON.parse(String(insert!.params[9]))).toEqual(binding);
+    expect(insert!.params[10]).toBeNull();
+    expect(insert!.params[11]).toBeNull();
     expect(created.protocol).toBe("MODBUS_TCP");
+    expect(created.driverId).toBe("MODBUS_TCP_GATEWAY");
     expect(created.binding).toEqual(binding);
   });
 
@@ -159,7 +194,7 @@ describe("SqlDeviceRepository", () => {
       async $queryRawUnsafe<T>(query: string, ...params: unknown[]) {
         calls.push({ query, params });
         if (!query.includes("UPDATE")) return [current] as T;
-        return [{ ...current, name: params[0], type: params[1], status: params[2], plot_code: params[3], protocol: params[4], binding_json: params[5], updated_at: params[6] }] as T;
+        return [{ ...current, name: params[0], type: params[1], status: params[2], plot_code: params[3], protocol: params[4], driver_id: params[5], binding_json: params[6], mqtt_config_json: params[7], plc_config_json: params[8], updated_at: params[9] }] as T;
       },
       async $executeRawUnsafe(query: string, ...params: unknown[]) {
         calls.push({ query, params });
@@ -171,17 +206,17 @@ describe("SqlDeviceRepository", () => {
     const statement = calls.find((call) => call.query.includes("UPDATE devices"));
     expect(statement).toBeDefined();
     expect(statement!.query).toContain("RETURNING");
-    expect(statement!.query).toContain("updated_at = $7::timestamptz");
-    expect(statement!.query).toContain("WHERE tenant_id = $8 AND id = $9");
+    expect(statement!.query).toContain("updated_at = $10::timestamptz");
+    expect(statement!.query).toContain("WHERE tenant_id = $11 AND id = $12");
     // 名称与类型没传，参数里仍是当前行的取值；解绑地块写成空串而不是 NULL
     expect(statement!.params.slice(0, 4)).toEqual(["甲", "SOIL_SENSOR", "OFFLINE", ""]);
-    // 没传协议与绑定：沿用当前行的 HTTP，绑定为 NULL 与 CHECK 约束同口径
-    expect(statement!.params.slice(4, 6)).toEqual(["HTTP", null]);
-    expect(statement!.params.slice(7)).toEqual([DEFAULT_TENANT, "device-a"]);
-    expect(updated).toMatchObject({ id: "device-a", tenantId: DEFAULT_TENANT, deviceNo: "DZ-A-1", name: "甲", type: "SOIL_SENSOR", status: "OFFLINE", protocol: "HTTP" });
+    // 没传协议与连接：沿用当前行的 HTTP 驱动，三种连接容器均为 NULL
+    expect(statement!.params.slice(4, 9)).toEqual(["HTTP", "HTTP_CALLBACK", null, null, null]);
+    expect(statement!.params.slice(10)).toEqual([DEFAULT_TENANT, "device-a"]);
+    expect(updated).toMatchObject({ id: "device-a", tenantId: DEFAULT_TENANT, deviceNo: "DZ-A-1", name: "甲", type: "SOIL_SENSOR", status: "OFFLINE", protocol: "HTTP", driverId: "HTTP_CALLBACK" });
     expect(updated!.plotCode).toBeUndefined();
     expect(updated!.binding).toBeUndefined();
-    expect(updated!.updatedAt).toBe(String(statement!.params[6]));
+    expect(updated!.updatedAt).toBe(String(statement!.params[9]));
   });
 
   it("设备不存在时更新返回 null，不发写语句", async () => {

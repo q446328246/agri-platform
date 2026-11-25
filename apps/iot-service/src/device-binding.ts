@@ -1,5 +1,7 @@
 import type { DeviceType } from "./device.repository.js";
 import { MODBUS_TCP_DEFAULT_PORT, MODBUS_TCP_DEFAULT_TIMEOUT_MS } from "./modbus-tcp.js";
+import { plcProfiles } from "./plc-binding.js";
+import type { PlcProtocol } from "./plc-binding.js";
 
 /**
  * 设备接入绑定：台账里「这台设备怎么连」的那一段。
@@ -15,11 +17,45 @@ import { MODBUS_TCP_DEFAULT_PORT, MODBUS_TCP_DEFAULT_TIMEOUT_MS } from "./modbus
 
 /** 接入协议：HTTP 沿用既有「设备等录回调」，MODBUS_TCP 由 iot-service 现场网关主动轮询下发，
  *  MQTT 由设备订阅平台主题直连（遥测上报与指令下发同链路，B2 拖拉机等设备走此协议） */
-export const DEVICE_PROTOCOLS = ["HTTP", "MODBUS_TCP", "MQTT"] as const;
+export const DEVICE_PROTOCOLS = ["HTTP", "MODBUS_TCP", "MQTT", "PLC_MODBUS_TCP", "SIEMENS_S7", "MITSUBISHI_MC", "OPC_UA"] as const;
 export type DeviceProtocol = (typeof DEVICE_PROTOCOLS)[number];
+export type PlcDeviceProtocol = Extract<DeviceProtocol, PlcProtocol>;
 
 /** 缺省协议：既有台账与存量行都是回调式接入，不因为本迁移改变行为 */
 export const DEFAULT_DEVICE_PROTOCOL: DeviceProtocol = "HTTP";
+
+export type DeviceConnectionKind = "NONE" | "MODBUS_TCP" | "MQTT" | "PLC";
+export type DeviceDriverRuntime = "DEVICE_CALLBACK" | "FIELD_GATEWAY" | "MQTT_BROKER" | "PLC_DRIVER";
+export type DeviceConnectionParameterType = "text" | "password" | "number" | "select" | "certificate";
+
+export interface DeviceConnectionParameter {
+  key: string;
+  label: string;
+  input: DeviceConnectionParameterType;
+  required: boolean;
+  requiredOnCreate?: boolean;
+  requiredWhen?: { key: string; startsWith?: string };
+  secret?: boolean;
+  defaultValue?: number | string;
+  min?: number;
+  max?: number;
+  step?: number;
+  maxLength?: number;
+  placeholder?: string;
+  hint?: string;
+  options?: Array<{ value: string; label: string; disabled?: boolean }>;
+}
+
+export interface DeviceProtocolDriver {
+  id: string;
+  protocol: DeviceProtocol;
+  label: string;
+  description: string;
+  connectionKind: DeviceConnectionKind;
+  runtime: DeviceDriverRuntime;
+  parameters: DeviceConnectionParameter[];
+}
+
 
 /**
  * 这个协议是否需要现场接入绑定。
@@ -31,6 +67,17 @@ export const DEFAULT_DEVICE_PROTOCOL: DeviceProtocol = "HTTP";
 /** 只有现场总线协议需要 Modbus 绑定；HTTP 回调与 MQTT 直连都不需要 */
 export function protocolRequiresBinding(protocol: DeviceProtocol): boolean {
   return protocol === "MODBUS_TCP";
+}
+
+export function fieldGatewayProtocols(): DeviceProtocol[] {
+  return DEVICE_PROTOCOLS.filter((protocol) => {
+    const driver = getDeviceProtocolDriver(protocol);
+    return driver.runtime === "FIELD_GATEWAY" || driver.runtime === "PLC_DRIVER";
+  });
+}
+
+export function isPlcProtocol(protocol: DeviceProtocol): protocol is PlcDeviceProtocol {
+  return getDeviceProtocolDriver(protocol).connectionKind === "PLC";
 }
 
 /** Modbus 单元标识缺省值：直连从站时手册常写 1，串口网关下挂多台时逐台不同 */
@@ -104,11 +151,147 @@ export const MODBUS_PROFILES: Record<string, ModbusProfile> = {
 
 export const MODBUS_PROFILE_KEYS = Object.keys(MODBUS_PROFILES);
 
+function plcParameters(protocol: PlcProtocol): DeviceConnectionParameter[] {
+  const profiles = plcProfiles(protocol);
+  const first = profiles[0]!;
+  const parameters: DeviceConnectionParameter[] = [
+    { key: "profile", label: "点位剖面", input: "select", required: true, options: profiles.map((item) => ({ value: item.key, label: item.label })) },
+    { key: "switchPoint", label: "启停点位", input: protocol === "PLC_MODBUS_TCP" ? "number" : "text", required: true, ...(protocol === "PLC_MODBUS_TCP" ? { min: 0, max: 65535, step: 1 } : { maxLength: 128 }), placeholder: first.pointHint },
+    { key: "runFeedbackPoint", label: "运行反馈点位", input: protocol === "PLC_MODBUS_TCP" ? "number" : "text", required: true, ...(protocol === "PLC_MODBUS_TCP" ? { min: 0, max: 65535, step: 1 } : { maxLength: 128 }), placeholder: first.pointHint, hint: "急停必须读到反馈为假才确认到位" },
+    { key: "faultPoint", label: "故障点位", input: protocol === "PLC_MODBUS_TCP" ? "number" : "text", required: true, ...(protocol === "PLC_MODBUS_TCP" ? { min: 0, max: 65535, step: 1 } : { maxLength: 128 }), placeholder: first.pointHint },
+    { key: "meterPoint", label: "累计计量点位", input: protocol === "PLC_MODBUS_TCP" ? "number" : "text", required: false, ...(protocol === "PLC_MODBUS_TCP" ? { min: 0, max: 65535, step: 1 } : { maxLength: 128 }), placeholder: first.meterPointHint, hint: "选择计量剖面时必填；无计量剖面留空" },
+  ];
+  if (protocol === "PLC_MODBUS_TCP") return [
+    { key: "host", label: "PLC 接入地址", input: "text", required: true, maxLength: 255, placeholder: "PLC 或现场网关 IPv4/IPv6/域名" },
+    { key: "port", label: "端口", input: "number", required: false, defaultValue: 502, min: 1, max: 65535, step: 1 },
+    { key: "unitId", label: "单元标识", input: "number", required: false, defaultValue: 1, min: 0, max: 255, step: 1 },
+    ...parameters,
+    { key: "timeoutMs", label: "事务超时", input: "number", required: false, defaultValue: 5000, min: 100, max: 60000, step: 100 },
+  ];
+  if (protocol === "SIEMENS_S7") return [
+    { key: "host", label: "PLC 接入地址", input: "text", required: true, maxLength: 255, placeholder: "S7 PLC IPv4/IPv6/域名" },
+    { key: "port", label: "S7comm 端口", input: "number", required: false, defaultValue: 102, min: 1, max: 65535, step: 1 },
+    { key: "rack", label: "机架", input: "number", required: false, defaultValue: 0, min: 0, max: 255, step: 1 },
+    { key: "slot", label: "插槽", input: "number", required: false, defaultValue: 1, min: 0, max: 255, step: 1, hint: "S7-1200/1500 通常为 1；S7-300/400 以实际配置为准" },
+    ...parameters,
+    { key: "timeoutMs", label: "事务超时", input: "number", required: false, defaultValue: 5000, min: 100, max: 60000, step: 100, hint: "S7-1200/1500 需启用 GET/PUT，并使用非优化 DB 绝对地址" },
+  ];
+  if (protocol === "MITSUBISHI_MC") return [
+    { key: "host", label: "PLC 接入地址", input: "text", required: true, maxLength: 255, placeholder: "三菱 PLC IPv4/IPv6/域名" },
+    { key: "port", label: "MC 协议端口", input: "number", required: false, defaultValue: 1281, min: 1, max: 65535, step: 1 },
+    { key: "ascii", label: "帧格式", input: "select", required: false, defaultValue: "BINARY", options: [{ value: "BINARY", label: "二进制 1E 帧" }, { value: "ASCII", label: "ASCII 1E 帧" }] },
+    ...parameters,
+    { key: "timeoutMs", label: "事务超时", input: "number", required: false, defaultValue: 5000, min: 100, max: 60000, step: 100 },
+  ];
+  return [
+    { key: "endpointUrl", label: "OPC UA Endpoint", input: "text", required: true, maxLength: 512, placeholder: "opc.tcp://plc.example.test:4840", hint: "当前驱动使用 None 安全模式，请仅在可信工业网络或通过安全网关部署" },
+    { key: "authMode", label: "身份认证", input: "select", required: false, defaultValue: "ANONYMOUS", options: [{ value: "ANONYMOUS", label: "匿名" }, { value: "USERNAME", label: "账号密码" }] },
+    { key: "username", label: "OPC UA 账号", input: "text", required: false, requiredWhen: { key: "authMode", startsWith: "USERNAME" }, maxLength: 128 },
+    { key: "password", label: "OPC UA 密码", input: "password", required: false, requiredOnCreate: true, requiredWhen: { key: "authMode", startsWith: "USERNAME" }, secret: true, maxLength: 128, placeholder: "首次配置必填，编辑时留空保持不变", hint: "密码加密保存，平台不回显" },
+    ...parameters,
+    { key: "timeoutMs", label: "会话超时", input: "number", required: false, defaultValue: 10000, min: 100, max: 60000, step: 100 },
+  ];
+}
+
+/** 协议驱动是单一真相源：台账校验、目录接口与前端连接表单都按它生成。 */
+export const DEVICE_PROTOCOL_DRIVERS: Record<DeviceProtocol, DeviceProtocolDriver> = {
+  HTTP: {
+    id: "HTTP_CALLBACK",
+    protocol: "HTTP",
+    label: "HTTP 回调驱动",
+    description: "设备主动把遥测与回执回调到平台，无需设备连接参数。",
+    connectionKind: "NONE",
+    runtime: "DEVICE_CALLBACK",
+    parameters: [],
+  },
+  MODBUS_TCP: {
+    id: "MODBUS_TCP_GATEWAY",
+    protocol: "MODBUS_TCP",
+    label: "Modbus TCP 现场网关驱动",
+    description: "平台侧网关按设备地址与寄存器剖面主动连接、轮询和下发。",
+    connectionKind: "MODBUS_TCP",
+    runtime: "FIELD_GATEWAY",
+    parameters: [
+      { key: "host", label: "接入地址", input: "text", required: true, maxLength: 64, placeholder: "从站或现场网关地址，如 10.0.0.9" },
+      { key: "port", label: "端口", input: "number", required: false, defaultValue: MODBUS_TCP_DEFAULT_PORT, min: 1, max: 65535, step: 1 },
+      { key: "unitId", label: "单元标识", input: "number", required: false, defaultValue: MODBUS_DEFAULT_UNIT_ID, min: 0, max: 255, step: 1 },
+      { key: "profile", label: "寄存器剖面", input: "select", required: true, options: MODBUS_PROFILE_KEYS.map((key) => ({ value: key, label: MODBUS_PROFILES[key]!.label })) },
+      { key: "timeoutMs", label: "事务超时", input: "number", required: false, defaultValue: MODBUS_TCP_DEFAULT_TIMEOUT_MS, min: 100, max: 60000, step: 100, hint: "单次 Modbus 事务的等待毫秒数" },
+    ],
+  },
+  MQTT: {
+    id: "MQTT_DIRECT",
+    protocol: "MQTT",
+    label: "MQTT 直连驱动",
+    description: "保存设备自有 Broker 账号与连接参数；默认不调用 EMQX 开户。",
+    connectionKind: "MQTT",
+    runtime: "MQTT_BROKER",
+    parameters: [
+      { key: "username", label: "MQTT 账号", input: "text", required: true, maxLength: 64, placeholder: "设备在 Broker 中已有的账号" },
+      { key: "password", label: "MQTT 密码", input: "password", required: false, requiredOnCreate: true, secret: true, maxLength: 128, placeholder: "首次配置必填，编辑时留空保持不变", hint: "密码加密保存，平台不回显" },
+      { key: "brokerUrl", label: "Broker 地址", input: "text", required: true, defaultValue: "mqtts://", maxLength: 256, placeholder: "mqtts://broker.example.com:8883" },
+      { key: "caCertificate", label: "CA 证书", input: "certificate", required: false, requiredWhen: { key: "brokerUrl", startsWith: "mqtts://" }, hint: "mqtts 连接必填；已配置证书支持下载" },
+    ],
+  },
+  PLC_MODBUS_TCP: {
+    id: "PLC_MODBUS_TCP_GATEWAY",
+    protocol: "PLC_MODBUS_TCP",
+    label: "PLC over Modbus TCP",
+    description: "通过 Modbus TCP 读写 PLC 线圈、离散输入与保持寄存器。",
+    connectionKind: "PLC",
+    runtime: "PLC_DRIVER",
+    parameters: plcParameters("PLC_MODBUS_TCP"),
+  },
+  SIEMENS_S7: {
+    id: "SIEMENS_S7_DRIVER",
+    protocol: "SIEMENS_S7",
+    label: "Siemens S7comm 驱动",
+    description: "通过 S7comm/RFC1006 读写西门子 PLC 的 BOOL 与字地址。",
+    connectionKind: "PLC",
+    runtime: "PLC_DRIVER",
+    parameters: plcParameters("SIEMENS_S7"),
+  },
+  MITSUBISHI_MC: {
+    id: "MITSUBISHI_MC_DRIVER",
+    protocol: "MITSUBISHI_MC",
+    label: "Mitsubishi MC Protocol 驱动",
+    description: "通过 MC 兼容 1E 帧读写三菱 FX 系列 PLC 的位与字软元件。",
+    connectionKind: "PLC",
+    runtime: "PLC_DRIVER",
+    parameters: plcParameters("MITSUBISHI_MC"),
+  },
+  OPC_UA: {
+    id: "OPC_UA_CLIENT",
+    protocol: "OPC_UA",
+    label: "OPC UA 客户端驱动",
+    description: "通过 OPC UA 会话读写 PLC 暴露的 BOOL、UInt32 与浮点节点。",
+    connectionKind: "PLC",
+    runtime: "PLC_DRIVER",
+    parameters: plcParameters("OPC_UA"),
+  },
+};
+
+export function getDeviceProtocolDriver(protocol: string): DeviceProtocolDriver {
+  const driver = DEVICE_PROTOCOL_DRIVERS[protocol as DeviceProtocol];
+  if (!driver) throw new Error(`接入协议需为 ${DEVICE_PROTOCOLS.join("/")}`);
+  return driver;
+}
+
+export function resolveDeviceProtocolDriver(protocol: string, driverId?: string): DeviceProtocolDriver {
+  const driver = getDeviceProtocolDriver(protocol);
+  if (driverId && driverId !== driver.id) throw new Error(`协议 ${protocol} 必须使用驱动 ${driver.id}`);
+  return driver;
+}
+
 /** 接入协议的可读名字：配置弹窗与网关日志说同一套话，不在前端再抄一份清单 */
 export const DEVICE_PROTOCOL_LABELS: Record<DeviceProtocol, string> = {
   HTTP: "设备回调（设备自己上报）",
   MODBUS_TCP: "现场总线 Modbus TCP（平台主动轮询）",
   MQTT: "MQTT 直连（设备订阅平台主题）",
+  PLC_MODBUS_TCP: "PLC over Modbus TCP",
+  SIEMENS_S7: "西门子 S7comm",
+  MITSUBISHI_MC: "三菱 MC Protocol",
+  OPC_UA: "OPC UA",
 };
 
 /** 字序的可读名字：剖面里的计数拼法只有两种，但选错会把用量读成完全不相干的数 */
@@ -132,26 +315,68 @@ export function getModbusProfile(key: string): ModbusProfile {
  */
 export function fieldAccessCatalogue(): FieldAccessCatalogue {
   return {
-    protocols: DEVICE_PROTOCOLS.map((value) => ({ value, label: DEVICE_PROTOCOL_LABELS[value], requiresBinding: protocolRequiresBinding(value) })),
+    protocols: DEVICE_PROTOCOLS.map((value) => {
+      const driver = getDeviceProtocolDriver(value);
+      return {
+        value,
+        label: DEVICE_PROTOCOL_LABELS[value],
+        driverId: driver.id,
+        driverLabel: driver.label,
+        description: driver.description,
+        connectionKind: driver.connectionKind,
+        runtime: driver.runtime,
+        requiresBinding: protocolRequiresBinding(value),
+        parameters: driver.parameters,
+      };
+    }),
     defaultProtocol: DEFAULT_DEVICE_PROTOCOL,
     profiles: MODBUS_PROFILE_KEYS.map((key) => {
       const profile = getModbusProfile(key);
       return {
         key,
         label: profile.label,
+        protocol: "MODBUS_TCP",
         applicableTypes: profile.applicableTypes,
         meter: profile.meter === null ? null : { ...profile.meter, wordOrderLabel: MODBUS_WORD_ORDER_LABELS[profile.meter.wordOrder] },
       };
     }),
+    plcProfiles: (["PLC_MODBUS_TCP", "SIEMENS_S7", "MITSUBISHI_MC", "OPC_UA"] as const).flatMap((protocol) => plcProfiles(protocol).map((profile) => ({
+      key: profile.key,
+      label: profile.label,
+      protocol,
+      applicableTypes: profile.applicableTypes,
+      pointHint: profile.pointHint,
+      meterPointHint: profile.meterPointHint,
+      meter: profile.meter === null ? null : { ...profile.meter, wordOrderLabel: profile.meter.wordOrder === "HIGH_FIRST" ? "高字在前（ABCD）" : "低字在前（CDAB）" },
+    }))),
     defaults: { port: MODBUS_TCP_DEFAULT_PORT, unitId: MODBUS_DEFAULT_UNIT_ID, timeoutMs: MODBUS_TCP_DEFAULT_TIMEOUT_MS },
   };
 }
 
 /** 现场接入目录的形状 */
 export interface FieldAccessCatalogue {
-  protocols: Array<{ value: DeviceProtocol; label: string; requiresBinding: boolean }>;
+  protocols: Array<{
+    value: DeviceProtocol;
+    label: string;
+    driverId: string;
+    driverLabel: string;
+    description: string;
+    connectionKind: DeviceConnectionKind;
+    runtime: DeviceDriverRuntime;
+    requiresBinding: boolean;
+    parameters: DeviceConnectionParameter[];
+  }>;
   defaultProtocol: DeviceProtocol;
-  profiles: Array<{ key: string; label: string; applicableTypes: DeviceType[]; meter: (ModbusMeter & { wordOrderLabel: string }) | null }>;
+  profiles: Array<{ key: string; label: string; protocol: "MODBUS_TCP"; applicableTypes: DeviceType[]; meter: (ModbusMeter & { wordOrderLabel: string }) | null }>;
+  plcProfiles: Array<{
+    key: string;
+    label: string;
+    protocol: PlcProtocol;
+    applicableTypes: DeviceType[];
+    pointHint: string;
+    meterPointHint: string;
+    meter: ({ dataType: "UINT32" | "REAL"; wordOrder: "HIGH_FIRST" | "LOW_FIRST"; scale: number; unit: "m³" | "L"; wordOrderLabel: string }) | null;
+  }>;
   defaults: { port: number; unitId: number; timeoutMs: number };
 }
 
