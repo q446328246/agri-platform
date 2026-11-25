@@ -24,10 +24,10 @@ import { getModbusProfile } from "../apps/iot-service/dist/device-binding.js";
 
 const root = process.cwd();
 const DB = process.env.DB_URL ?? "postgresql://agri:agri@127.0.0.1:5432/agri";
-// CTRL 避开 3651：本机安全软件对该端口回环绑定拦 EACCES（端口空闲也拒），改 3655
-const CTRL = 3655;
-const IOT = 3652;
-const SLAVE_PORT = 3653;
+// 默认端口避开已知被安全软件拦截的 3651；受限环境可通过 SMOKE_PROTOCOL_*_PORT 覆盖。
+const CTRL = Number(process.env.SMOKE_PROTOCOL_CTRL_PORT ?? 3655);
+const IOT = Number(process.env.SMOKE_PROTOCOL_IOT_PORT ?? 3652);
+const SLAVE_PORT = Number(process.env.SMOKE_PROTOCOL_SLAVE_PORT ?? 3653);
 const PLOT = "P-SMOKE-PROTOCOL";
 const FIELD_DEVICE_NO = "DZ-SMOKE-PROTOCOL-PUMP";
 const CALLBACK_DEVICE_NO = "DZ-SMOKE-PROTOCOL-CB";

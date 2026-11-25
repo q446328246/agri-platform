@@ -25,11 +25,11 @@ import { Client } from "pg";
 
 const root = process.cwd();
 const DB = process.env.DB_URL ?? "postgresql://agri:agri@127.0.0.1:5432/agri";
-const DEC = 3641;
-const CTRL = 3642;
-const TRC = 3643;
-const MSG = 3644;
-const IOT = 3645;
+const DEC = Number(process.env.SMOKE_RECEIPT_DEC_PORT ?? 3641);
+const CTRL = Number(process.env.SMOKE_RECEIPT_CTRL_PORT ?? 3642);
+const TRC = Number(process.env.SMOKE_RECEIPT_TRC_PORT ?? 3643);
+const MSG = Number(process.env.SMOKE_RECEIPT_MSG_PORT ?? 3644);
+const IOT = Number(process.env.SMOKE_RECEIPT_IOT_PORT ?? 3645);
 const PLOT = "P-SMOKE-RECEIPT";
 const DEVICE = "device-smoke-receipt";
 const IRRIGATION_DEVICE = "device-smoke-receipt-irrigation";
