@@ -6,8 +6,6 @@ const dashboardPassword = process.env.EMQX_DASHBOARD_PASSWORD;
 const dashboardLoginPassword = process.env.EMQX_DASHBOARD_LOGIN_PASSWORD ?? dashboardPassword;
 const serviceUsername = process.env.MQTT_USERNAME?.trim();
 const servicePassword = process.env.MQTT_PASSWORD;
-const deviceUsername = process.env.MQTT_DEVICE_USERNAME?.trim();
-const devicePassword = process.env.MQTT_DEVICE_PASSWORD;
 const topicPrefix = process.env.MQTT_TOPIC_PREFIX?.trim() || "agri";
 const tenantId = process.env.TENANT_ID?.trim() || "tenant-demo";
 
@@ -16,14 +14,56 @@ for (const [name, value] of Object.entries({
   EMQX_DASHBOARD_PASSWORD: dashboardPassword,
   MQTT_USERNAME: serviceUsername,
   MQTT_PASSWORD: servicePassword,
-  MQTT_DEVICE_USERNAME: deviceUsername,
-  MQTT_DEVICE_PASSWORD: devicePassword,
 })) {
   if (!value) throw new Error(`${name} is required`);
 }
-for (const [name, value] of Object.entries({ MQTT_USERNAME: serviceUsername, MQTT_DEVICE_USERNAME: deviceUsername, MQTT_TOPIC_PREFIX: topicPrefix, TENANT_ID: tenantId })) {
+for (const [name, value] of Object.entries({ MQTT_USERNAME: serviceUsername, MQTT_TOPIC_PREFIX: topicPrefix, TENANT_ID: tenantId })) {
   if (/[+/#\s]/.test(value)) throw new Error(`${name} must not contain whitespace, /, + or #`);
 }
+
+function parseDeviceCredentials(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("MQTT_DEVICES_JSON must be a valid JSON array");
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error("MQTT_DEVICES_JSON must contain at least one device");
+  }
+
+  const seen = new Set();
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`MQTT_DEVICES_JSON[${index}] must be an object`);
+    }
+    const deviceNo = typeof entry.deviceNo === "string" ? entry.deviceNo.trim() : "";
+    const password = typeof entry.password === "string" ? entry.password : "";
+    if (!deviceNo) throw new Error(`MQTT_DEVICES_JSON[${index}].deviceNo is required`);
+    if (!password) throw new Error(`MQTT_DEVICES_JSON[${index}].password is required`);
+    if (/[+/#\s]/.test(deviceNo)) {
+      throw new Error(`MQTT_DEVICES_JSON[${index}].deviceNo must not contain whitespace, /, + or #`);
+    }
+    if (deviceNo === serviceUsername) {
+      throw new Error(`MQTT device ${deviceNo} must not use the service account`);
+    }
+    if (seen.has(deviceNo)) throw new Error(`MQTT_DEVICES_JSON contains duplicate deviceNo ${deviceNo}`);
+    seen.add(deviceNo);
+    return { deviceNo, password };
+  });
+}
+
+const devices = process.env.MQTT_DEVICES_JSON?.trim()
+  ? parseDeviceCredentials(process.env.MQTT_DEVICES_JSON)
+  : (() => {
+      const deviceNo = process.env.MQTT_DEVICE_USERNAME?.trim();
+      const password = process.env.MQTT_DEVICE_PASSWORD;
+      if (!deviceNo) throw new Error("MQTT_DEVICE_USERNAME is required when MQTT_DEVICES_JSON is not set");
+      if (!password) throw new Error("MQTT_DEVICE_PASSWORD is required when MQTT_DEVICES_JSON is not set");
+      if (/[+/#\s]/.test(deviceNo)) throw new Error("MQTT_DEVICE_USERNAME must not contain whitespace, /, + or #");
+      if (deviceNo === serviceUsername) throw new Error(`MQTT device ${deviceNo} must not use the service account`);
+      return [{ deviceNo, password }];
+    })();
 
 class EmqxApiError extends Error {
   constructor(message, status) {
@@ -114,19 +154,23 @@ if (!authenticator) {
 if (!authenticator.id) throw new Error("EMQX built-in authentication has no id");
 const authenticatorId = encodeURIComponent(authenticator.id);
 
-for (const [user_id, password] of [[serviceUsername, servicePassword], [deviceUsername, devicePassword]]) {
+const authenticatedUsers = [
+  { username: serviceUsername, password: servicePassword },
+  ...devices.map((device) => ({ username: device.deviceNo, password: device.password })),
+];
+for (const user of authenticatedUsers) {
   try {
     await request(`/authentication/${authenticatorId}/users`, {
       token,
       method: "POST",
-      body: { user_id, password, is_superuser: false },
+      body: { user_id: user.username, password: user.password, is_superuser: false },
     });
   } catch (error) {
     if (!String(error).includes("(409)")) throw error;
-    await request(`/authentication/${authenticatorId}/users/${encodeURIComponent(user_id)}`, {
+    await request(`/authentication/${authenticatorId}/users/${encodeURIComponent(user.username)}`, {
       token,
       method: "PUT",
-      body: { password, is_superuser: false },
+      body: { password: user.password, is_superuser: false },
     });
   }
 }
@@ -156,14 +200,14 @@ const aclUsers = [
       { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/+/command` },
     ],
   },
-  {
-    username: deviceUsername,
+  ...devices.map((device) => ({
+    username: device.deviceNo,
     rules: [
-      { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/${deviceUsername}/telemetry` },
-      { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/${deviceUsername}/receipt` },
-      { action: "subscribe", permission: "allow", topic: `${topicPrefix}/${tenantId}/${deviceUsername}/command` },
+      { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/${device.deviceNo}/telemetry` },
+      { action: "publish", permission: "allow", topic: `${topicPrefix}/${tenantId}/${device.deviceNo}/receipt` },
+      { action: "subscribe", permission: "allow", topic: `${topicPrefix}/${tenantId}/${device.deviceNo}/command` },
     ],
-  },
+  })),
 ];
 for (const user of aclUsers) {
   await request(`/authorization/sources/built_in_database/rules/users/${encodeURIComponent(user.username)}`, {
@@ -173,4 +217,4 @@ for (const user of aclUsers) {
   });
 }
 await request("/authorization/cache", { token, method: "DELETE" });
-console.log(`EMQX authentication and ACLs provisioned for tenant ${tenantId}`);
+console.log(`EMQX authentication and ACLs provisioned for tenant ${tenantId} (${devices.length} devices)`);
