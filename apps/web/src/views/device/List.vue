@@ -123,7 +123,7 @@
               style="width: 100%"
             >
               <el-option
-                v-for="option in parameterOptions(createProtocol.value, createForm.type, parameter) ?? []"
+                v-for="option in parameterOptions(createProtocol, createForm.type, parameter) ?? []"
                 :key="option.value"
                 :label="option.label"
                 :value="option.value"
@@ -238,7 +238,7 @@
               style="width: 100%"
             >
               <el-option
-                v-for="option in parameterOptions(configProtocol.value, configForm.type, parameter) ?? []"
+                v-for="option in parameterOptions(configProtocol, configForm.type, parameter) ?? []"
                 :key="option.value"
                 :label="option.label"
                 :value="option.value"
@@ -697,7 +697,11 @@ function hex(value: number) {
   return `0x${value.toString(16).toUpperCase().padStart(4, '0')}`
 }
 
-function parameterOptions(protocol: DeviceProtocolOption | undefined, deviceType: string, parameter: DeviceConnectionParameter) {
+function parameterOptions(
+  protocol: DeviceProtocolOption | undefined,
+  deviceType: string,
+  parameter: DeviceConnectionParameter,
+): Array<{ value: string; label: string; disabled?: boolean }> {
   if (parameter.key !== 'profile' || !protocol || !fieldAccess.value) return parameter.options ?? []
   const profiles = protocol.connectionKind === 'PLC' ? fieldAccess.value.plcProfiles ?? [] : fieldAccess.value.profiles
   return profiles
