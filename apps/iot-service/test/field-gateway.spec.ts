@@ -28,7 +28,7 @@ interface ChannelCall {
   method: "GET" | "POST";
   path: string;
   deviceId: string | null;
-  body?: { commandId?: string; status?: string; message?: string; result?: Record<string, unknown> };
+  body?: { commandId?: string; status?: string; message?: string; result?: Record<string, unknown>; at?: string };
 }
 
 /** 假设备通道：按 control-service 的响应壳子推进指令状态，并记下调用顺序 */
@@ -63,7 +63,19 @@ function makeChannel(commands: FieldCommand[]) {
       const row = rows.get(body?.commandId as string);
       if (!row) return reply(404, { code: "CONTROL-404", message: "指令不存在", data: null });
       row.status = body?.status as FieldCommand["status"];
-      if (row.status === "ACKED") row.ackedAt = new Date(clock.now()).toISOString();
+      const at = body?.at ?? new Date(clock.now()).toISOString();
+      if (row.status === "ACKED") {
+        row.ackedAt = at;
+        if (rows.get(String(row.parameters.targetCommandId))?.status === "PAUSED") row.resumedAt = at;
+      }
+      if (row.status === "DONE" && (row.type === "PAUSE" || row.type === "RESUME")) {
+        const linked = rows.get(String(row.parameters.targetCommandId));
+        if (linked) {
+          linked.status = row.type === "PAUSE" ? "PAUSED" : "ACKED";
+          if (row.type === "PAUSE") linked.pausedAt = at;
+          else linked.resumedAt = at;
+        }
+      }
       return reply(200, { code: "OK", message: "", data: row });
     }
     return reply(404, { code: "CONTROL-404", message: "接口不存在", data: null });
@@ -156,7 +168,7 @@ function command(overrides: Partial<FieldCommand> = {}): FieldCommand {
 
 describe("现场协议网关", () => {
   it("只轮询现场协议设备，并把台账里的接入地址与单元标识交给主站", async () => {
-    const devices = new InMemoryDeviceRepository();
+    const devices = new InMemoryDeviceRepository([]);
     await devices.create(DEFAULT_TENANT, { deviceNo: "DZ-P-901", name: "回调式水泵", type: "IRRIGATION_PUMP", status: "ONLINE" });
     const busDevice = await devices.create(DEFAULT_TENANT, {
       deviceNo: "DZ-P-900",
@@ -190,6 +202,27 @@ describe("现场协议网关", () => {
     expect(polled).toEqual([busDevice.id]);
     expect(channel.calls.some((call) => call.deviceId === "device-pump-001")).toBe(false);
     expect(endpoints).toEqual([{ host: "10.0.0.9", port: 1502, unitId: 7, timeoutMs: 3000 }]);
+  });
+
+  it("没有待执行指令时不连接现场设备", async () => {
+    const pump = await pumpDevice();
+    const channel = makeChannel([]);
+    let connections = 0;
+    const gateway = new FieldGateway({
+      devices: ledgerOf([pump]),
+      fetchImpl: channel.fetchImpl,
+      clientFor: () => {
+        connections += 1;
+        return new FakeModbus();
+      },
+      now: channel.now,
+    });
+
+    await gateway.tick();
+    await gateway.stop();
+
+    expect(channel.calls.map((call) => call.path)).toEqual(["/api/v1/control/device/pending"]);
+    expect(connections).toBe(0);
   });
 
   it("入队指令：先领取再写启线圈，读故障输入后报已接收", async () => {
@@ -294,6 +327,71 @@ describe("现场协议网关", () => {
     expect(modbus.writes).toEqual([{ address: 0x0000, on: true }, { address: 0x0000, on: false }]);
     expect(channel.receipt(job.id)?.result).toMatchObject({ durationMin: 4, waterVolumeM3: 8.1 });
     expect(channel.receipt(job.id)?.message).toContain("计划作业量达成");
+    await gateway.stop();
+  });
+
+  it("暂停恢复：关停硬件、排除暂停时长，并在原作业继续推进后结单", async () => {
+    const pump = await pumpDevice();
+    const job = command({ id: "cmd-field-pause", deviceId: pump.id });
+    const channel = makeChannel([job]);
+    const modbus = new FakeModbus();
+    const gateway = new FieldGateway({ devices: ledgerOf([pump]), fetchImpl: channel.fetchImpl, clientFor: () => modbus, now: channel.now });
+
+    await gateway.tick();
+    expect(channel.rows.get(job.id)?.status).toBe("ACKED");
+    channel.advance(3);
+    const pause = command({ id: "cmd-pause", deviceId: pump.id, type: "PAUSE", status: "QUEUED", parameters: { targetCommandId: job.id } });
+    channel.rows.set(pause.id, { ...pause });
+    await gateway.tick();
+
+    expect(modbus.writes).toEqual([{ address: 0, on: true }, { address: 0, on: false }]);
+    expect(channel.receipt(pause.id)).toMatchObject({ status: "DONE", at: new Date(channel.now()).toISOString() });
+    expect(channel.rows.get(job.id)?.status).toBe("PAUSED");
+
+    channel.advance(20);
+    await gateway.tick();
+    expect(channel.rows.get(job.id)?.status).toBe("PAUSED");
+    expect(modbus.writes).toHaveLength(2);
+
+    const resume = command({ id: "cmd-resume", deviceId: pump.id, type: "RESUME", status: "QUEUED", parameters: { targetCommandId: job.id } });
+    channel.rows.set(resume.id, { ...resume });
+    await gateway.tick();
+    expect(channel.receipt(resume.id)).toMatchObject({ status: "DONE", at: new Date(channel.now()).toISOString() });
+    expect(channel.rows.get(job.id)?.status).toBe("ACKED");
+    expect(modbus.writes.at(-1)).toEqual({ address: 0, on: true });
+
+    channel.advance(7);
+    await gateway.tick();
+    expect(modbus.writes).toEqual([
+      { address: 0, on: true },
+      { address: 0, on: false },
+      { address: 0, on: true },
+      { address: 0, on: false },
+    ]);
+    expect(channel.receipt(job.id)).toMatchObject({ status: "DONE", result: { durationMin: 10 } });
+    await gateway.stop();
+  });
+
+  it("恢复前撞上故障输入只关停并失败，不重新启动设备", async () => {
+    const pump = await pumpDevice();
+    const job = command({ id: "cmd-field-pause-fault", deviceId: pump.id, status: "ACKED" });
+    const pause = command({ id: "cmd-pause-fault", deviceId: pump.id, type: "PAUSE", status: "SENT", parameters: { targetCommandId: job.id } });
+    const resume = command({ id: "cmd-resume-fault", deviceId: pump.id, type: "RESUME", status: "SENT", parameters: { targetCommandId: job.id } });
+    const channel = makeChannel([job, pause]);
+    const modbus = new FakeModbus();
+    const gateway = new FieldGateway({ devices: ledgerOf([pump]), fetchImpl: channel.fetchImpl, clientFor: () => modbus, now: channel.now });
+
+    await gateway.tick();
+    expect(channel.rows.get(job.id)?.status).toBe("PAUSED");
+    channel.rows.set(resume.id, { ...resume });
+    modbus.inputs.set(1, true);
+    await gateway.tick();
+
+    expect(modbus.writes).toEqual([{ address: 0, on: false }, { address: 0, on: false }]);
+    expect(modbus.writes.some((write) => write.on)).toBe(false);
+    expect(channel.receipt(resume.id)).toMatchObject({ status: "FAILED" });
+    expect(channel.receipt(resume.id)?.message).toContain("禁止恢复运行");
+    expect(channel.rows.get(job.id)?.status).toBe("PAUSED");
     await gateway.stop();
   });
 
@@ -434,8 +532,10 @@ describe("现场协议网关", () => {
       devices,
       fetchImpl: (async (input: RequestInfo | URL) => {
         const url = new URL(String(input));
-        seen.push(url.searchParams.get("deviceId") ?? "");
-        return new Response(JSON.stringify({ code: "OK", message: "", data: { items: [], total: 0, page: 1, size: 50, pages: 1 } }), { status: 200 });
+        const deviceId = url.searchParams.get("deviceId") ?? "";
+        seen.push(deviceId);
+        const items = deviceId === broken.id ? [command({ id: "cmd-dirty-ledger", deviceId })] : [];
+        return new Response(JSON.stringify({ code: "OK", message: "", data: { items, total: items.length, page: 1, size: 50, pages: 1 } }), { status: 200 });
       }) as unknown as typeof fetch,
       clientFor: () => new FakeModbus(),
       onError: (device) => errors.push(device.deviceNo),
@@ -444,8 +544,7 @@ describe("现场协议网关", () => {
     await gateway.stop();
 
     expect(errors).toEqual(["DZ-P-903"]);
-    // 坏绑定没有拖住后面那台：台账按编号排序，好设备照常轮到
-    expect(seen).toEqual([good.id]);
+    expect(seen).toEqual([good.id, broken.id]);
   });
 });
 

@@ -1,5 +1,5 @@
 import type { ClientSession } from "node-opcua";
-import { AttributeIds, DataType, MessageSecurityMode, OPCUAClient, SecurityPolicy, UserTokenType, Variant } from "node-opcua";
+import { AttributeIds, DataType, DataValue, MessageSecurityMode, OPCUAClient, SecurityPolicy, UserTokenType, Variant } from "node-opcua";
 import McProtocol from "mcprotocol";
 import NodeS7 from "nodes7";
 
@@ -158,7 +158,12 @@ export class SiemensS7PlcClient extends CallbackPlcClient {
     if (meter.dataType === "REAL") return super.readMeter(point, meter);
     const match = /^(DB\d+|M),INT(\d+)$/.exec(String(point));
     if (!match) throw new Error("Siemens S7 UINT32 meter requires an INT word address");
-    const values = await this.readValues([point, `${match[1]},INT${Number(match[2]) + 1}`]);
+    // nodes7 将 INT 后缀按字节偏移解析，平台点位按 16 位字索引。
+    const byteOffset = Number(match[2]) * 2;
+    const values = [
+      await this.readValue(`${match[1]},INT${byteOffset}`),
+      await this.readValue(`${match[1]},INT${byteOffset + 2}`),
+    ];
     const words = values.map((value) => {
       if (typeof value !== "number" || !Number.isInteger(value)) throw new Error("Siemens S7 meter word is not an integer");
       return value & 0xffff;
@@ -232,7 +237,7 @@ export class OpcUaPlcClient implements PlcClientLike {
     const statuses = await this.sessionValue().write([{
       nodeId: String(point),
       attributeId: AttributeIds.Value,
-      value: new Variant({ dataType: DataType.Boolean, value }),
+      value: new DataValue({ value: new Variant({ dataType: DataType.Boolean, value }) }),
     }]);
     const failed = statuses.find((status) => !status.isGood());
     if (failed) throw new Error(`OPC UA write failed: ${failed.name}`);

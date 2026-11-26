@@ -70,16 +70,18 @@ describe("iot HTTP API", () => {
 
   it("分页字段真实生效，越界页返回空列表但不算错", async () => {
     const base = await start(createIotHttpServer());
+    const total = demoDevices().length;
+    const pages = Math.ceil(total / 5);
     const first = await jsonOf(await fetch(`${base}/api/v1/devices?page=1&size=5`));
-    expect(first.data).toMatchObject({ page: 1, size: 5, total: 12, pages: 3 });
+    expect(first.data).toMatchObject({ page: 1, size: 5, total, pages });
     expect(first.data.items).toHaveLength(5);
 
-    const last = await jsonOf(await fetch(`${base}/api/v1/devices?page=3&size=5`));
-    expect(last.data.items).toHaveLength(2);
+    const last = await jsonOf(await fetch(`${base}/api/v1/devices?page=${pages}&size=5`));
+    expect(last.data.items).toHaveLength(total - (pages - 1) * 5);
 
     const beyond = await jsonOf(await fetch(`${base}/api/v1/devices?page=9&size=5`));
     expect(beyond.data.items).toHaveLength(0);
-    expect(beyond.data.total).toBe(12);
+    expect(beyond.data.total).toBe(total);
   });
 
   it("新增设备后列表与详情都能查到，且未上报时不伪造最后上报时间", async () => {
@@ -215,7 +217,7 @@ describe("iot HTTP API", () => {
     const post = (body: unknown, headers: Record<string, string> = {}) =>
       fetch(`${base}/api/v1/devices`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 
-    // 演示租户的 12 台设备对 tenant-beta 不可见
+    // 演示租户设备对 tenant-beta 不可见
     expect((await jsonOf(await fetch(`${base}/api/v1/devices`, { headers: beta }))).data).toMatchObject({ items: [], total: 0, pages: 0 });
     expect((await fetch(`${base}/api/v1/devices/device-soil-003`, { headers: beta })).status).toBe(404);
     expect((await fetch(`${base}/api/v1/devices/device-soil-003/commands`, { method: "POST", headers: { "content-type": "application/json", ...beta }, body: JSON.stringify({ type: "CONFIGURE", parameters: {} }) })).status).toBe(404);
@@ -228,7 +230,7 @@ describe("iot HTTP API", () => {
     expect(created.data).toMatchObject({ deviceNo: "DZ-W-001", name: "beta 气象站" });
     expect((await post({ deviceNo: "DZ-W-001", name: "beta 撞号", type: "WEATHER_STATION" }, beta)).status).toBe(409);
 
-    // 各看各的：演示租户仍是 12 台，beta 只有刚登记的一台
+    // 各看各的：演示租户仍是完整种子台账，beta 只有刚登记的一台
     expect((await jsonOf(await fetch(`${base}/api/v1/devices?size=200`))).data.total).toBe(demoDevices().length);
     const betaList = await jsonOf(await fetch(`${base}/api/v1/devices?size=200`, { headers: beta }));
     expect(betaList.data.items.map((item: { id: string }) => item.id)).toEqual([created.data.id]);
@@ -236,6 +238,33 @@ describe("iot HTTP API", () => {
     const renamed = await fetch(`${base}/api/v1/devices/${created.data.id}`, { method: "PUT", headers: { "content-type": "application/json", ...beta }, body: JSON.stringify({ status: "ONLINE" }) });
     expect((await jsonOf(renamed)).data).toMatchObject({ id: created.data.id, status: "ONLINE" });
     expect((await fetch(`${base}/api/v1/devices/${created.data.id}`)).status).toBe(404);
+  });
+
+  it("七种协议各有一台可调试的模拟泵，心跳只允许模拟设备且按租户隔离", async () => {
+    const base = await start(createIotHttpServer());
+    const list = await jsonOf(await fetch(`${base}/api/v1/devices?size=200`));
+    const simulators = list.data.items.filter((item: { id: string }) => item.id.startsWith("device-demo-sim-"));
+    expect(simulators.map((item: { protocol: string }) => item.protocol).sort()).toEqual([...DEVICE_PROTOCOLS].sort());
+    expect(simulators.every((item: { type: string; status: string }) => item.type === "IRRIGATION_PUMP" && item.status === "OFFLINE")).toBe(true);
+
+    const heartbeat = (body: unknown, headers: Record<string, string> = {}) => fetch(`${base}/api/v1/device/heartbeat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+    expect((await heartbeat({ deviceId: "device-soil-003", status: "ONLINE" })).status).toBe(403);
+    expect((await heartbeat({ deviceId: "device-demo-sim-http", status: "INVALID" })).status).toBe(400);
+    expect((await heartbeat({ deviceId: "device-demo-sim-http", status: "ONLINE" }, { "x-tenant-id": "tenant-beta" })).status).toBe(404);
+
+    const online = await jsonOf(await heartbeat({ deviceId: "device-demo-sim-http", status: "ONLINE" }));
+    expect(online.data.status).toBe("ONLINE");
+    const detail = await jsonOf(await fetch(`${base}/api/v1/devices/device-demo-sim-http`));
+    expect(detail.data.status).toBe("ONLINE");
+    expect(Number.isFinite(Date.parse(detail.data.lastSeenAt))).toBe(true);
+    const offline = await jsonOf(await heartbeat({ deviceId: "device-demo-sim-http", status: "OFFLINE" }));
+    expect(offline.data.status).toBe("OFFLINE");
+    const stopped = await jsonOf(await fetch(`${base}/api/v1/devices/device-demo-sim-http`));
+    expect(stopped.data).toMatchObject({ status: "OFFLINE", lastSeenAt: detail.data.lastSeenAt });
   });
 });
 
@@ -261,13 +290,12 @@ describe("设备现场接入绑定", () => {
     // 端口/单元标识/超时都是可以从规范与剖面缺省推出的值，不该让人反复抄
     expect(created.data.binding).toEqual({ host: "10.20.30.41", port: 502, unitId: 1, profile: "WATER_M3", timeoutMs: 2000 });
 
-    // 演示台账除拖拉机走 MQTT 直连外，其余均保持 HTTP 回调
     const field = await jsonOf(await fetch(`${base}/api/v1/devices?protocol=MODBUS_TCP&size=200`));
-    expect(field.data.items.map((item: { deviceNo: string }) => item.deviceNo)).toEqual(["DZ-P-100"]);
+    expect(field.data.items.map((item: { deviceNo: string }) => item.deviceNo)).toEqual(["DZ-P-100", "DZ-SIM-MODBUS"]);
     const callback = await jsonOf(await fetch(`${base}/api/v1/devices?protocol=HTTP&size=200`));
     expect(callback.data.total).toBe(demoDevices().filter((item) => item.protocol === "HTTP").length);
     const mqtt = await jsonOf(await fetch(`${base}/api/v1/devices?protocol=MQTT&size=200`));
-    expect(mqtt.data.items.map((item: { deviceNo: string }) => item.deviceNo)).toEqual(["DZ-T-001"]);
+    expect(mqtt.data.items.map((item: { deviceNo: string }) => item.deviceNo).sort()).toEqual(["DZ-SIM-MQTT", "DZ-T-001"]);
   });
 
   it("协议与绑定不配套、剖面未知或与类型不符都会被拒，台账不留半行", async () => {

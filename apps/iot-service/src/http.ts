@@ -164,10 +164,25 @@ export function createIotHttpServer(dependencies: IotDependencies = {}): Server 
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
       if (req.method === "GET" && url.pathname === "/health") { send(res, 200, { status: "ok", service: "iot" }, traceId); return; }
-      const denied = authorizeRequest(req, { read: "device:read", write: "device:control" });
+      const denied = authorizeRequest(req, {
+        read: "device:read",
+        write: "device:control",
+        callbackPaths: ["/api/v1/device/heartbeat"],
+      });
       if (denied) { send(res, denied.status, null, traceId, denied.message); return; }
       // 台账的读写都在这一租户内进行
       const tenantId = tenantOf(req);
+
+      if (req.method === "POST" && url.pathname === "/api/v1/device/heartbeat") {
+        const body = await json(req);
+        const deviceId = text(body.deviceId);
+        if (!deviceId.startsWith("device-demo-sim-")) throw new HttpError("心跳接口仅用于协议模拟设备", 403);
+        const status = text(body.status) || "ONLINE";
+        if (!DEVICE_STATUSES.includes(status as DeviceStatus)) throw new HttpError(`status 需为 ${DEVICE_STATUSES.join("/")}`);
+        if (!(await devices.recordHeartbeat(tenantId, deviceId, status as DeviceStatus, new Date().toISOString()))) throw new HttpError("设备不存在", 404);
+        send(res, 200, { deviceId, status }, traceId);
+        return;
+      }
 
       if (req.method === "GET" && url.pathname === "/api/v1/devices") {
         const pageNo = Math.max(1, Number(url.searchParams.get("page") || 1));

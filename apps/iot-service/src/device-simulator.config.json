@@ -1,0 +1,99 @@
+[
+  {
+    "deviceId": "device-demo-sim-http",
+    "deviceNo": "DZ-SIM-HTTP",
+    "name": "HTTP 真机模拟灌溉泵",
+    "protocol": "HTTP"
+  },
+  {
+    "deviceId": "device-demo-sim-modbus",
+    "deviceNo": "DZ-SIM-MODBUS",
+    "name": "Modbus TCP 真机模拟灌溉泵",
+    "protocol": "MODBUS_TCP",
+    "binding": {
+      "host": "127.0.0.1",
+      "port": 15020,
+      "unitId": 1,
+      "profile": "WATER_M3",
+      "timeoutMs": 2000
+    }
+  },
+  {
+    "deviceId": "device-demo-sim-mqtt",
+    "deviceNo": "DZ-SIM-MQTT",
+    "name": "MQTT 真机模拟灌溉泵",
+    "protocol": "MQTT"
+  },
+  {
+    "deviceId": "device-demo-sim-plc-modbus",
+    "deviceNo": "DZ-SIM-PLC-MB",
+    "name": "PLC Modbus TCP 真机模拟灌溉泵",
+    "protocol": "PLC_MODBUS_TCP",
+    "plc": {
+      "driverId": "PLC_MODBUS_TCP_GATEWAY",
+      "host": "127.0.0.1",
+      "port": 15021,
+      "timeoutMs": 2000,
+      "profile": "PLC_MODBUS_TCP_WATER_M3",
+      "switchPoint": 0,
+      "runFeedbackPoint": 0,
+      "faultPoint": 1,
+      "meterPoint": 0,
+      "unitId": 1
+    }
+  },
+  {
+    "deviceId": "device-demo-sim-s7",
+    "deviceNo": "DZ-SIM-S7",
+    "name": "Siemens S7 真机模拟灌溉泵",
+    "protocol": "SIEMENS_S7",
+    "plc": {
+      "driverId": "SIEMENS_S7_DRIVER",
+      "host": "127.0.0.1",
+      "port": 15022,
+      "timeoutMs": 5000,
+      "profile": "SIEMENS_S7_WATER_M3",
+      "switchPoint": "DB1,X0.0",
+      "runFeedbackPoint": "DB1,X0.1",
+      "faultPoint": "DB1,X0.2",
+      "meterPoint": "DB10,INT0",
+      "rack": 0,
+      "slot": 1
+    }
+  },
+  {
+    "deviceId": "device-demo-sim-mc",
+    "deviceNo": "DZ-SIM-MC",
+    "name": "Mitsubishi MC 真机模拟灌溉泵",
+    "protocol": "MITSUBISHI_MC",
+    "plc": {
+      "driverId": "MITSUBISHI_MC_DRIVER",
+      "host": "127.0.0.1",
+      "port": 15023,
+      "timeoutMs": 5000,
+      "profile": "MITSUBISHI_MC_WATER_M3",
+      "switchPoint": "M0",
+      "runFeedbackPoint": "M16",
+      "faultPoint": "M17",
+      "meterPoint": "D100",
+      "ascii": false
+    }
+  },
+  {
+    "deviceId": "device-demo-sim-opcua",
+    "deviceNo": "DZ-SIM-OPCUA",
+    "name": "OPC UA 真机模拟灌溉泵",
+    "protocol": "OPC_UA",
+    "plc": {
+      "driverId": "OPC_UA_CLIENT",
+      "endpointUrl": "opc.tcp://127.0.0.1:15024",
+      "timeoutMs": 10000,
+      "authMode": "ANONYMOUS",
+      "profile": "OPC_UA_WATER_M3",
+      "switchPoint": "ns=2;i=1001",
+      "runFeedbackPoint": "ns=2;i=1002",
+      "faultPoint": "ns=2;i=1003",
+      "meterPoint": "ns=2;i=1004"
+    }
+  }
+]

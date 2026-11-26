@@ -423,13 +423,15 @@ describe("createMqttBroker", () => {
     const { broker, requests, receive } = createHarness({ resolveDeviceId: async (deviceNo) => deviceNo === "DEV-001" ? "device-internal" : null });
     broker.start();
     receive("agri/tenant-demo/DEV-001/telemetry", JSON.stringify({ metric: "soilMoisture", value: 12 }));
-    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    receive("agri/tenant-demo/DEV-001/telemetry", JSON.stringify({ deviceId: "device-internal", metric: "soilMoisture", value: 13 }));
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[0]!.body.deviceId).toBe("device-internal");
+    expect(requests[1]!.body.deviceId).toBe("device-internal");
 
-    receive("agri/tenant-demo/DEV-001/telemetry", JSON.stringify({ deviceId: "DEV-FORGED", metric: "soilMoisture", value: 13 }));
-    receive("agri/tenant-demo/UNKNOWN/telemetry", JSON.stringify({ metric: "soilMoisture", value: 14 }));
+    receive("agri/tenant-demo/DEV-001/telemetry", JSON.stringify({ deviceId: "DEV-FORGED", metric: "soilMoisture", value: 14 }));
+    receive("agri/tenant-demo/UNKNOWN/telemetry", JSON.stringify({ metric: "soilMoisture", value: 15 }));
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
   });
 
   it("HTTP 转发失败时不确认 QoS 消息，重试成功后才确认", async () => {

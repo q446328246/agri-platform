@@ -31,6 +31,7 @@
     "smoke:consumers": "pnpm run build && node scripts/smoke-consumers.mjs",
     "smoke:receipt": "pnpm run build && node scripts/smoke-command-receipt.mjs",
     "smoke:protocol": "pnpm run build && node scripts/smoke-device-protocol.mjs",
+    "simulate:devices": "node scripts/simulate-device-protocols.mjs",
     "mqtt:certs": "node scripts/init-mqtt-certs.mjs",
     "smoke:mqtt": "node --env-file=.env scripts/smoke-mqtt.mjs",
     "smoke:messages": "pnpm run build && node scripts/smoke-message-preferences.mjs",

@@ -183,12 +183,6 @@ export function createMqttBroker(options: MqttBrokerOptions = {}): MqttBroker {
       callback(0, 0);
       return;
     }
-    const claimedDevice = typeof body.deviceId === "string" ? body.deviceId.trim() : "";
-    if (claimedDevice && claimedDevice !== parsedTopic.deviceNo) {
-      logger.warn("MQTT 消息 deviceId 与主题设备不一致，已丢弃", { topic, deviceId: claimedDevice });
-      callback(0, 0);
-      return;
-    }
     if (parsedTopic.kind === "telemetry" && !String(body.metric ?? "").trim()) {
       logger.warn("遥测消息缺少 metric，已丢弃", { topic });
       callback(0, 0);
@@ -202,6 +196,12 @@ export function createMqttBroker(options: MqttBrokerOptions = {}): MqttBroker {
     const deviceId = await resolveDeviceId(parsedTopic.deviceNo);
     if (!deviceId) {
       logger.warn("MQTT 主题设备未在台账登记，已丢弃", { topic, deviceNo: parsedTopic.deviceNo });
+      callback(0, 0);
+      return;
+    }
+    const claimedDevice = typeof body.deviceId === "string" ? body.deviceId.trim() : "";
+    if (claimedDevice && claimedDevice !== parsedTopic.deviceNo && claimedDevice !== deviceId) {
+      logger.warn("MQTT 消息 deviceId 与主题设备不一致，已丢弃", { topic, deviceId: claimedDevice });
       callback(0, 0);
       return;
     }

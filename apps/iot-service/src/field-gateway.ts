@@ -51,12 +51,14 @@ export interface FieldCommand {
   id: string;
   deviceId: string;
   type: string;
-  status: "QUEUED" | "SENT" | "ACKED" | "DONE" | "FAILED";
+  status: "QUEUED" | "SENT" | "ACKED" | "PAUSED" | "DONE" | "FAILED";
   /** 归属地块，电子围栏（B4）据此校验设备绑定地块与指令地块一致 */
   plotCode?: string;
   parameters: Record<string, unknown>;
   sentAt?: string;
   ackedAt?: string;
+  pausedAt?: string;
+  resumedAt?: string;
   createdAt: string;
 }
 
@@ -164,6 +166,9 @@ class PlcFieldClient implements FieldClientLike {
 /** 已写入但尚未结单的作业现场，只存在网关进程内；丢失后按「无基线」继续收口 */
 interface JobState {
   startedAtMs: number;
+  /** 已累计的暂停时长；当前暂停区间单独记在 pausedAtMs */
+  pausedMs: number;
+  pausedAtMs: number | null;
   /** 写入时刻的累计计数原始值，null 表示这台设备没有计量或网关重启后没赶上取基线 */
   baselineCounts: number | null;
 }
@@ -209,12 +214,13 @@ class ControlChannel {
     return this.call("POST", "/api/v1/control/device/dispatch", { commandId });
   }
 
-  receipt(commandId: string, status: "ACKED" | "DONE" | "FAILED", message: string, result?: Record<string, unknown>): Promise<unknown> {
+  receipt(commandId: string, status: "ACKED" | "DONE" | "FAILED", message: string, result?: Record<string, unknown>, at?: string): Promise<unknown> {
     return this.call("POST", "/api/v1/control/device/receipt", {
       commandId,
       status,
       message,
       ...(result === undefined ? {} : { result }),
+      ...(at === undefined ? {} : { at }),
     });
   }
 }
@@ -375,14 +381,14 @@ export class FieldGateway {
       const devices = await this.devices.list(this.tenantId, { protocols: fieldGatewayProtocols() });
       for (const device of devices) {
         try {
-          await this.context(device);
           const commands = await this.channel.pending(device.id);
+          if (commands.length === 0) continue;
           for (const command of commands) {
             let client: FieldClientLike | undefined;
             try {
               const context = await this.context(device);
               client = context.client;
-              await this.execute(device, context.client, context.profile, command);
+              await this.execute(device, context.client, context.profile, command, commands);
             } catch (error) {
               await client?.close().catch(() => undefined);
               this.clients.delete(device.id);
@@ -399,7 +405,11 @@ export class FieldGateway {
     }
   }
 
-  private async execute(device: Device, client: FieldClientLike, profile: FieldProfile, command: FieldCommand): Promise<void> {
+  private async execute(device: Device, client: FieldClientLike, profile: FieldProfile, command: FieldCommand, pending: FieldCommand[]): Promise<void> {
+    if (command.type === "PAUSE" || command.type === "RESUME") {
+      await this.executeLinkedControl(client, profile, command, pending);
+      return;
+    }
     // 作业联锁与电子围栏（B4）：作业类指令执行前先过安全校验，判不过直接失败收口，不碰硬件。
     // 控制类指令（急停/断电/暂停等）不受此约束——它们是对在途作业的处置动作，急停必须能下达。
     if (isJobCommandType(command.type)) {
@@ -442,6 +452,51 @@ export class FieldGateway {
     }
   }
 
+  private async executeLinkedControl(client: FieldClientLike, profile: FieldProfile, command: FieldCommand, pending: FieldCommand[]): Promise<void> {
+    const targetId = typeof command.parameters?.targetCommandId === "string" ? command.parameters.targetCommandId : "";
+    const target = pending.find((item) => item.id === targetId && item.deviceId === command.deviceId);
+    const expected = command.type === "PAUSE" ? ["SENT", "ACKED", "PAUSED"] : ["PAUSED", "ACKED"];
+    if (!target || !expected.includes(target.status)) {
+      await this.channel.receipt(command.id, "FAILED", `目标指令不存在或当前状态为 ${target?.status ?? "不存在"}，无法${command.type === "PAUSE" ? "暂停" : "恢复"}`);
+      return;
+    }
+    if (command.status === "QUEUED") await this.channel.dispatch(command.id);
+    if (command.status !== "QUEUED" && command.status !== "SENT" && command.status !== "ACKED") {
+      await this.channel.receipt(command.id, "FAILED", `联动指令状态 ${command.status} 不支持现场执行`);
+      return;
+    }
+
+    const previousAt = command.type === "PAUSE" ? target.resumedAt : target.pausedAt;
+    const previousMs = previousAt === undefined ? NaN : Date.parse(previousAt);
+    const state = this.jobs.get(targetId) ?? {
+      startedAtMs: startedAtMs(target),
+      pausedMs: 0,
+      pausedAtMs: command.type === "RESUME" && Number.isFinite(previousMs) ? previousMs : null,
+      baselineCounts: null,
+    };
+    this.jobs.set(targetId, state);
+    const atMs = Math.max(this.now(), Number.isFinite(previousMs) ? previousMs + 1 : 0);
+    const at = new Date(atMs).toISOString();
+    if (command.type === "PAUSE") {
+      await client.writeBoolean(profile.switchPoint, false);
+      if (state && state.pausedAtMs === null) state.pausedAtMs = atMs;
+      await this.channel.receipt(command.id, "DONE", "已关闭启停点位，暂停指令完成", undefined, at);
+      return;
+    }
+
+    if (await this.isFaulted(client, profile)) {
+      await client.writeBoolean(profile.switchPoint, false).catch(() => undefined);
+      await this.channel.receipt(command.id, "FAILED", `设备故障输入置位（${profile.faultLabel}），禁止恢复运行`);
+      return;
+    }
+    await client.writeBoolean(profile.switchPoint, true);
+    if (state.pausedAtMs !== null) {
+      state.pausedMs += Math.max(0, atMs - state.pausedAtMs);
+      state.pausedAtMs = null;
+    }
+    await this.channel.receipt(command.id, "DONE", "已写入启停点位，恢复指令完成", undefined, at);
+  }
+
   /** 第二步：写入启停点位，读一眼故障输入，没问题就报「设备已接收」 */
   private async startJob(client: FieldClientLike, profile: FieldProfile, command: FieldCommand, spec: JobSpec): Promise<void> {
     const on = !spec.stopOnly;
@@ -468,7 +523,7 @@ export class FieldGateway {
         throw error;
       }
     }
-    this.jobs.set(command.id, { startedAtMs: this.now(), baselineCounts });
+    this.jobs.set(command.id, { startedAtMs: this.now(), pausedMs: 0, pausedAtMs: null, baselineCounts });
     await this.channel.receipt(command.id, "ACKED", `已写入${on ? "启" : "停"}点位 ${profile.switchLabel}`);
   }
 
@@ -486,12 +541,16 @@ export class FieldGateway {
     if (faulted) {
       // 作业中出故障先关点位止损，再如实报失败：阀门挂在打开状态等人来关是最坏结果
       await client.writeBoolean(profile.switchPoint, false).catch(() => undefined);
+      this.jobs.delete(command.id);
       await this.channel.receipt(command.id, "FAILED", `作业中故障输入置位（${profile.faultLabel}），已关闭启停点位止损`);
       return;
     }
+    if (command.status === "PAUSED") return;
 
     const state = this.jobs.get(command.id);
-    const elapsedMin = Math.max(0, Math.round((this.now() - (state?.startedAtMs ?? startedAtMs(command))) / 60_000));
+    const nowMs = this.now();
+    const pausedMs = (state?.pausedMs ?? 0) + (state?.pausedAtMs === null || state?.pausedAtMs === undefined ? 0 : Math.max(0, nowMs - state.pausedAtMs));
+    const elapsedMin = Math.max(0, Math.round((nowMs - (state?.startedAtMs ?? startedAtMs(command)) - pausedMs) / 60_000));
     let measured: number | undefined;
     if (profile.meter && state) {
       try {

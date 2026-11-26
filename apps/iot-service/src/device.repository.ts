@@ -1,6 +1,7 @@
 import type { PrismaClientLike } from "@agri/db";
 import { keywordHits, likePattern, toIsoTimestamp, ulid } from "@agri/shared";
 
+import simulatorFixtures from "./device-simulator.config.json" with { type: "json" };
 import { DEFAULT_DEVICE_PROTOCOL, getDeviceProtocolDriver } from "./device-binding.js";
 import type { DeviceProtocol, ModbusBinding } from "./device-binding.js";
 import type { PlcDeviceConfig } from "./plc-binding.js";
@@ -133,6 +134,8 @@ export interface DeviceRepository {
   create(tenantId: string, input: CreateDeviceInput): Promise<Device>;
   /** 更新台账配置；设备不存在或不属于该租户返回 null */
   update(tenantId: string, id: string, input: UpdateDeviceInput): Promise<Device | null>;
+  /** 模拟设备心跳：上线同时记录真实上报时间，下线只改状态 */
+  recordHeartbeat(tenantId: string, id: string, status: DeviceStatus, at: string): Promise<boolean>;
 }
 
 function matchesFilter(device: Device, filter: DeviceFilter | undefined): boolean {
@@ -155,10 +158,20 @@ function byDeviceNo(a: Device, b: Device): number {
 
 const hoursAgo = (hours: number): string => new Date(Date.now() - hours * 3600000).toISOString();
 
+interface SimulatorFixture {
+  deviceId: string;
+  deviceNo: string;
+  name: string;
+  protocol: DeviceProtocol;
+  binding?: ModbusBinding;
+  plc?: PlcDeviceConfig;
+}
+
+const simulatorDevices = simulatorFixtures as SimulatorFixture[];
+
 /**
- * 演示台账：与迁移 014 注入的 12 台设备逐字段对齐，
- * 地块编码取自迁移 010 的示范田，气象站挂在首部而不落具体地块。
- * 迁移 035 之后这批设备归演示租户，跨租户部署时按调用方给的租户落位。
+ * 演示台账：迁移 014 的 12 台既有设备与迁移 089 的 7 台协议模拟设备。
+ * 地块编码取自迁移 010 的示范田；模拟设备不绑地块，便于独立调试。
  */
 export function demoDevices(tenantId: string = DEFAULT_TENANT): Device[] {
   const EAST_1 = "511723-000001-01-00001-0000-5";
@@ -183,21 +196,37 @@ export function demoDevices(tenantId: string = DEFAULT_TENANT): Device[] {
     ["device-drone-001", "DZ-D-001", "植保无人机 U01", "AGRICULTURAL_DRONE", "ONLINE", EAST_3, hoursAgo(3)],
     ["device-tractor-001", "DZ-T-001", "无人驾驶拖拉机 T01", "AUTO_TRACTOR", "OFFLINE", LINK_3, hoursAgo(6)],
   ];
-  return rows.map(([id, deviceNo, name, type, status, plotCode, lastSeenAt]) => ({
-    id,
-    tenantId,
-    deviceNo,
-    name,
-    type,
-    status,
-    ...(plotCode ? { plotCode } : {}),
-    // 演示拖拉机与迁移 074 一致，走 MQTT 直连；其余设备保持 HTTP 回调。
-    protocol: id === "device-tractor-001" ? "MQTT" : DEFAULT_DEVICE_PROTOCOL,
-    driverId: getDeviceProtocolDriver(id === "device-tractor-001" ? "MQTT" : DEFAULT_DEVICE_PROTOCOL).id,
-    lastSeenAt,
-    createdAt: lastSeenAt ?? now,
-    updatedAt: lastSeenAt ?? now,
-  }));
+  return [
+    ...rows.map(([id, deviceNo, name, type, status, plotCode, lastSeenAt]) => ({
+      id,
+      tenantId,
+      deviceNo,
+      name,
+      type,
+      status,
+      ...(plotCode ? { plotCode } : {}),
+      protocol: id === "device-tractor-001" ? "MQTT" : DEFAULT_DEVICE_PROTOCOL,
+      driverId: getDeviceProtocolDriver(id === "device-tractor-001" ? "MQTT" : DEFAULT_DEVICE_PROTOCOL).id,
+      lastSeenAt,
+      createdAt: lastSeenAt ?? now,
+      updatedAt: lastSeenAt ?? now,
+    })),
+    ...simulatorDevices.map((fixture) => ({
+      id: fixture.deviceId,
+      tenantId,
+      deviceNo: fixture.deviceNo,
+      name: fixture.name,
+      type: "IRRIGATION_PUMP" as const,
+      status: "OFFLINE" as const,
+      protocol: fixture.protocol,
+      driverId: getDeviceProtocolDriver(fixture.protocol).id,
+      ...(fixture.binding ? { binding: structuredClone(fixture.binding) } : {}),
+      ...(fixture.plc ? { plc: structuredClone(fixture.plc) } : {}),
+      lastSeenAt: null,
+      createdAt: now,
+      updatedAt: now,
+    })),
+  ];
 }
 
 export class InMemoryDeviceRepository implements DeviceRepository {
@@ -255,6 +284,19 @@ export class InMemoryDeviceRepository implements DeviceRepository {
     const updated = mergeDevice(this.devices[index]!, input, new Date().toISOString());
     this.devices.splice(index, 1, updated);
     return structuredClone(updated);
+  }
+
+  async recordHeartbeat(tenantId: string, id: string, status: DeviceStatus, at: string): Promise<boolean> {
+    const index = this.devices.findIndex((device) => device.tenantId === tenantId && device.id === id);
+    if (index < 0) return false;
+    const current = this.devices[index]!;
+    this.devices[index] = {
+      ...current,
+      status,
+      lastSeenAt: status === "ONLINE" ? at : current.lastSeenAt,
+      updatedAt: at,
+    };
+    return true;
   }
 }
 
@@ -457,5 +499,19 @@ export class SqlDeviceRepository implements DeviceRepository {
     );
     const row = rows[0];
     return row ? this.toDevice(row) : null;
+  }
+
+  async recordHeartbeat(tenantId: string, id: string, status: DeviceStatus, at: string): Promise<boolean> {
+    const rows = await this.client.$queryRawUnsafe<Record<string, unknown>[]>(
+      `UPDATE devices
+          SET status = $1, last_seen_at = CASE WHEN $1 = 'ONLINE' THEN $2::timestamptz ELSE last_seen_at END, updated_at = $2::timestamptz
+        WHERE tenant_id = $3 AND id = $4
+        RETURNING id`,
+      status,
+      at,
+      tenantId,
+      id,
+    );
+    return rows.length > 0;
   }
 }
