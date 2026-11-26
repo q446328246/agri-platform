@@ -152,6 +152,29 @@ services:
       start_period: 40s
     restart: unless-stopped
 
+  # 七协议模拟器与 app 共享 loopback，直接使用夹具中的 127.0.0.1 设备地址。
+  device-simulator:
+    image: agri-platform:local
+    profiles: ["app"]
+    command: ["node", "scripts/simulate-device-protocols.mjs", "--protocol=all", "--host=0.0.0.0", "--interval=100"]
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      NODE_ENV: production
+      IOT_SERVICE_URL: http://127.0.0.1:3003
+      CONTROL_SERVICE_URL: http://127.0.0.1:3008
+      TELEMETRY_SERVICE_URL: http://127.0.0.1:3004
+      MQTT_URL: mqtts://emqx:8883
+      MQTT_CA_PATH: /run/secrets/mqtt-ca.crt
+    volumes:
+      - ./emqx/certs/ca.crt:/run/secrets/mqtt-ca.crt:ro
+    network_mode: "service:app"
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
   # 边缘：HTTPS 终止 + 前端静态资源 + /api 反代到网关
   edge:
     build:
