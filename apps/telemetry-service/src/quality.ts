@@ -11,6 +11,13 @@ export const QUALITY_FLAGS = ["OUT_OF_RANGE", "STUCK_VALUE", "TIMESTAMP_ANOMALY"
 
 export type QualityFlag = (typeof QUALITY_FLAGS)[number];
 
+// 累计量停机不变、运转指标停机为零都属于正常设备状态。
+const CUMULATIVE_METRICS = new Set(["water_meter", "workingArea", "runningHours"]);
+const ZERO_IS_VALID_METRICS = new Set([
+  "flowRate", "pumpSpeed", "engineSpeed", "vehicleSpeed", "flightSpeed", "altitude",
+  "valveOpening", "rainfall", "windSpeed", "lightIntensity",
+]);
+
 /**
  * 指标物理量程（闭区间）。量程外的读数大概率是传感器故障或单位错报；
  * 未登记的指标不做量程判定，避免把新指标误伤成可疑。
@@ -56,7 +63,8 @@ export function detectQualityFlags(
   }
   // 含本次连续 STUCK_WINDOW 次同值：历史需凑满窗口减一条且全部与本次相等
   const window = recentValues.slice(0, STUCK_WINDOW - 1);
-  if (window.length >= STUCK_WINDOW - 1 && window.every((value) => value === input.value)) {
+  const validConstant = CUMULATIVE_METRICS.has(input.metric) || (input.value === 0 && ZERO_IS_VALID_METRICS.has(input.metric));
+  if (!validConstant && window.length >= STUCK_WINDOW - 1 && window.every((value) => value === input.value)) {
     flags.push("STUCK_VALUE");
   }
   const recordedMs = new Date(input.recordedAt).getTime();

@@ -6,6 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import simulatorFixtures from "../apps/iot-service/src/device-simulator.config.json" with { type: "json" };
+import { historyTimestamps, meterM3At, telemetryReadings } from "./device-telemetry.mjs";
 
 const PROTOCOLS = ["HTTP", "MODBUS_TCP", "MQTT", "PLC_MODBUS_TCP", "SIEMENS_S7", "MITSUBISHI_MC", "OPC_UA"];
 const MODBUS_WATER_POINTS = Object.freeze({ switchCoil: 0, runFeedbackInput: 0, faultInput: 1, meter: { address: 0, scale: 0.001 } });
@@ -17,7 +18,7 @@ const PLC_METER_SCALES = Object.freeze({
 });
 
 function usage() {
-  console.log(`真机协议模拟客户端\n\n用法: node scripts/simulate-device-protocols.mjs [选项]\n\n选项:\n  --protocol=all|${PROTOCOLS.join("|")}  选择协议，默认 all\n  --host=<地址>       协议服务监听地址，默认 DEVICE_SIM_HOST 或 0.0.0.0\n  --duration=<秒>     运行指定时间后自动退出，默认持续运行\n  --interval=<毫秒>   回调设备取指令与上报间隔，默认 1000\n  --speed=<倍率>      仅加速 HTTP/MQTT 模拟执行，默认 1\n  --fault-after=<毫秒> 任意设备启动后注入锁定故障，默认不注入\n  --mqtt-url=<URL>    默认 MQTT_URL 或 mqtt://127.0.0.1:1883\n  --help              显示帮助\n\n服务地址与凭据只从环境变量读取，不写入源码:\n  IOT_SERVICE_URL、CONTROL_SERVICE_URL、TELEMETRY_SERVICE_URL\n  TENANT_ID、DEVICE_CALLBACK_TOKEN\n  MQTT_URL、MQTT_DEVICE_USERNAME、MQTT_DEVICE_PASSWORD、MQTT_CA_PATH、MQTT_TOPIC_PREFIX\n  DEVICE_SIM_FLOW_M3H（模拟泵流量，默认 10 m³/h）\n\nDocker app 访问宿主模拟器时，--host 请用 0.0.0.0，设备连接地址改成 host.docker.internal。\n五类现场服务分别监听夹具中的 15020~15024 端口。`);
+  console.log(`真机协议模拟客户端\n\n用法: node scripts/simulate-device-protocols.mjs [选项]\n\n选项:\n  --protocol=all|${PROTOCOLS.join("|")}  选择协议，默认 all\n  --host=<地址>       协议服务监听地址，默认 DEVICE_SIM_HOST 或 0.0.0.0\n  --duration=<秒>     运行指定时间后自动退出，默认持续运行\n  --interval=<毫秒>   回调设备取指令间隔，默认 1000\n  --telemetry-interval=<毫秒> 实时遥测上报间隔，默认 10000\n  --history-hours=<小时> 启动时补发最近多少小时遥测，默认 24；0 表示不补发\n  --history-interval=<分钟> 历史遥测采样间隔，默认 15\n  --speed=<倍率>      仅加速 HTTP/MQTT 模拟执行，默认 1\n  --fault-after=<毫秒> 任意设备启动后注入锁定故障，默认不注入\n  --mqtt-url=<URL>    默认 MQTT_URL 或 mqtt://127.0.0.1:1883\n  --help              显示帮助\n\n服务地址与凭据只从环境变量读取，不写入源码:\n  IOT_SERVICE_URL、CONTROL_SERVICE_URL、TELEMETRY_SERVICE_URL\n  TENANT_ID、DEVICE_CALLBACK_TOKEN\n  MQTT_URL、MQTT_DEVICE_USERNAME、MQTT_DEVICE_PASSWORD、MQTT_CA_PATH、MQTT_TOPIC_PREFIX\n  DEVICE_SIM_FLOW_M3H（模拟泵流量，默认 10 m³/h）\n\nDocker app 访问宿主模拟器时，--host 请用 0.0.0.0，设备连接地址改成 host.docker.internal。\n五类现场服务分别监听夹具中的 15020~15024 端口。`);
 }
 
 function parseArgs(argv) {
@@ -26,6 +27,9 @@ function parseArgs(argv) {
     host: process.env.DEVICE_SIM_HOST?.trim() || "0.0.0.0",
     durationMs: 0,
     intervalMs: 1000,
+    telemetryIntervalMs: 10_000,
+    historyHours: 24,
+    historyIntervalMinutes: 15,
     speed: 1,
     faultAfterMs: 0,
     mqttUrl: process.env.MQTT_URL?.trim() || "mqtt://127.0.0.1:1883",
@@ -43,6 +47,9 @@ function parseArgs(argv) {
     } else if (key === "host") options.host = value.trim();
     else if (key === "duration") options.durationMs = positiveNumber(key, value) * 1000;
     else if (key === "interval") options.intervalMs = positiveNumber(key, value);
+    else if (key === "telemetry-interval") options.telemetryIntervalMs = positiveNumber(key, value);
+    else if (key === "history-hours") options.historyHours = nonNegativeNumber(key, value);
+    else if (key === "history-interval") options.historyIntervalMinutes = positiveNumber(key, value);
     else if (key === "speed") options.speed = positiveNumber(key, value);
     else if (key === "fault-after") options.faultAfterMs = positiveNumber(key, value);
     else if (key === "mqtt-url") options.mqttUrl = value.trim();
@@ -56,6 +63,12 @@ function parseArgs(argv) {
 function positiveNumber(key, value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) throw new Error(`--${key} 必须为正数`);
+  return number;
+}
+
+function nonNegativeNumber(key, value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) throw new Error(`--${key} 必须为非负数`);
   return number;
 }
 
@@ -114,19 +127,26 @@ function meterScale(fixture) {
 function createState(fixture, options) {
   const flow = Number(process.env.DEVICE_SIM_FLOW_M3H?.trim() || 10);
   if (!Number.isFinite(flow) || flow <= 0) throw new Error("DEVICE_SIM_FLOW_M3H 必须为正数");
+  const startedAt = Date.now();
   const state = {
     fixture,
     scale: meterScale(fixture),
     flowM3h: flow,
+    startedAt,
     switchOn: false,
     faulted: false,
     faultedMessage: "",
     counts: 0,
-    lastMeterAt: Date.now(),
+    lastMeterAt: startedAt,
     jobs: new Map(),
+    completedCommands: new Map(),
     faultTimer: null,
+    mqttClient: null,
+    mqttTelemetryTopic: "",
+    mqttCommandTimer: null,
     opcSwitchRequested: false,
   };
+  state.counts = Math.min(0xffffffff, meterM3At(state, startedAt) / state.scale);
   if (options.faultAfterMs > 0) {
     state.faultTimer = setTimeout(() => {
       stateFault(state, `模拟器在 ${options.faultAfterMs}ms 后注入锁定故障`);
@@ -292,16 +312,6 @@ async function tickCallback(state, options) {
         await postReceipt(state, callbackReceipt(state, command, "ACKED"));
       }
     }
-  }
-
-  if (Math.floor(Date.now() / options.intervalMs) % 5 === 0) {
-    await requestJson(process.env.TELEMETRY_SERVICE_URL?.trim() || "http://127.0.0.1:3004", "/api/v1/telemetry/report", {
-      deviceId: state.fixture.deviceId,
-      metric: "water_meter",
-      value: state.counts * state.scale,
-      unit: "m³",
-      at: new Date().toISOString(),
-    });
   }
 }
 
@@ -745,6 +755,15 @@ async function startOpcUa(state, options) {
   }
 }
 
+function publishMqttReceipt(state, client, topic, receipt) {
+  const payload = JSON.stringify(receipt);
+  if (["DONE", "FAILED", "CANCELLED"].includes(receipt.status)) {
+    state.completedCommands.set(receipt.commandId, payload);
+    if (state.completedCommands.size > 1000) state.completedCommands.delete(state.completedCommands.keys().next().value);
+  }
+  client.publish(topic, payload, { qos: 1 });
+}
+
 async function startMqtt(state, options) {
   const require = createRequire(new URL("../apps/iot-service/package.json", import.meta.url));
   const mqtt = require("mqtt");
@@ -776,35 +795,40 @@ async function startMqtt(state, options) {
     if (topic !== commandTopic) return;
     try {
       const command = normalizeCommand(JSON.parse(payload.toString("utf8")));
+      const completed = state.completedCommands.get(command.commandId);
+      if (completed !== undefined) {
+        client.publish(receiptTopic, completed, { qos: 1 });
+        return;
+      }
       const type = commandType(command);
       if (type === "PAUSE") {
         const target = state.jobs.get(command.parameters?.targetCommandId);
         if (!target) {
-          client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "FAILED", "目标指令不存在或已结束，无法暂停")), { qos: 1 });
+          publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "FAILED", "目标指令不存在或已结束，无法暂停"));
           return;
         }
         target.paused = true;
         target.pausedAt = Date.now();
         state.switchOn = false;
         state.jobs.set(command.commandId, createCallbackJob(state, command, true));
-        client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "ACKED")), { qos: 1 });
+        publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "ACKED"));
       } else if (type === "RESUME") {
         const target = state.jobs.get(command.parameters?.targetCommandId);
         if (!target || !target.paused) {
-          client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "FAILED", "目标指令不存在或未暂停，无法恢复")), { qos: 1 });
+          publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "FAILED", "目标指令不存在或未暂停，无法恢复"));
           return;
         }
         if (state.faulted) {
-          client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "FAILED", state.faultedMessage || "模拟设备报告硬件故障")), { qos: 1 });
+          publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "FAILED", state.faultedMessage || "模拟设备报告硬件故障"));
           return;
         }
         target.pausedMs += Date.now() - target.pausedAt;
         target.paused = false;
         applySwitch(state, true);
         state.jobs.set(command.commandId, createCallbackJob(state, command));
-        client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "ACKED")), { qos: 1 });
+        publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "ACKED"));
       } else if (state.faulted) {
-        client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "FAILED", state.faultedMessage || "模拟设备报告硬件故障")), { qos: 1 });
+        publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "FAILED", state.faultedMessage || "模拟设备报告硬件故障"));
       } else {
         const job = createCallbackJob(state, command);
         state.jobs.set(command.commandId, job);
@@ -813,10 +837,10 @@ async function startMqtt(state, options) {
             state.switchOn = false;
             stopOtherJobs(state, command.commandId);
           }
-          client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "DONE", "", callbackDone(state, job))), { qos: 1 });
+          publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "DONE", "", callbackDone(state, job)));
         } else {
           applySwitch(state, true);
-          client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "ACKED")), { qos: 1 });
+          publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "ACKED"));
         }
       }
     } catch (error) {
@@ -835,32 +859,104 @@ async function startMqtt(state, options) {
     });
   });
   log(`${fixture.deviceNo} MQTT 已连接 ${options.mqttUrl}，订阅 ${commandTopic}`);
-  state.mqttTimer = setInterval(() => {
+  state.mqttClient = client;
+  state.mqttTelemetryTopic = telemetryTopic;
+  state.mqttCommandTimer = setInterval(() => {
     advanceMeter(state);
     for (const job of state.jobs.values()) {
       const command = job.command;
       const type = commandType(command);
       if (type === "PAUSE" || type === "RESUME") {
-        client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "DONE")), { qos: 1 });
+        publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "DONE"));
         state.jobs.delete(command.commandId);
       } else if (state.faulted) {
         state.switchOn = false;
-        client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "FAILED", state.faultedMessage || "模拟设备报告硬件故障", callbackDone(state, job))), { qos: 1 });
+        publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "FAILED", state.faultedMessage || "模拟设备报告硬件故障", callbackDone(state, job)));
       } else if (type === "IRRIGATION" || type === "FERTILIZATION") {
         const elapsed = Date.now() - job.startedAt - job.pausedMs;
         if ((job.targetCounts > 0 && state.counts - job.baseline >= job.targetCounts) || (job.targetCounts === 0 && elapsed >= planOf(command).durationMs / options.speed)) {
           state.switchOn = false;
-          client.publish(receiptTopic, JSON.stringify(callbackReceipt(state, command, "DONE", "", callbackDone(state, job))), { qos: 1 });
+          publishMqttReceipt(state, client, receiptTopic, callbackReceipt(state, command, "DONE", "", callbackDone(state, job)));
         }
       }
     }
-    client.publish(telemetryTopic, JSON.stringify({ deviceId: fixture.deviceId, metric: "water_meter", value: state.counts * state.scale, unit: "m³", at: new Date().toISOString() }), { qos: 1 });
   }, options.intervalMs);
   return async () => {
-    clearInterval(state.mqttTimer);
-    state.mqttTimer = null;
+    clearInterval(state.mqttCommandTimer);
+    state.mqttCommandTimer = null;
+    state.mqttClient = null;
+    state.mqttTelemetryTopic = "";
     await new Promise((resolve) => client.end(false, {}, resolve));
   };
+}
+
+async function reportReadings(state, readings) {
+  if (state.fixture.protocol === "MQTT") {
+    for (const reading of readings) {
+      state.mqttClient.publish(state.mqttTelemetryTopic, JSON.stringify(reading), { qos: 1 });
+    }
+    return;
+  }
+  const telemetryUrl = process.env.TELEMETRY_SERVICE_URL?.trim() || "http://127.0.0.1:3004";
+  await Promise.all(readings.map((reading) => requestJson(telemetryUrl, "/api/v1/telemetry/report", reading)));
+}
+
+async function backfillTelemetry(states, options) {
+  const timestamps = historyTimestamps(Date.now(), options.historyHours, options.historyIntervalMinutes);
+  const tasks = [];
+  for (const state of states) {
+    const samples = timestamps.map((at) => telemetryReadings(state, at));
+    for (let index = 0; index < (samples[0]?.length ?? 0); index += 1) {
+      tasks.push(async () => {
+        for (const sample of samples) await reportReadings(state, [sample[index]]);
+      });
+    }
+  }
+  let cursor = 0;
+  let completed = 0;
+  let failure = null;
+  const worker = async () => {
+    while (!failure && cursor < tasks.length) {
+      const task = tasks[cursor++];
+      try {
+        await task();
+        completed += 1;
+      } catch (error) {
+        failure = error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, tasks.length) }, () => worker()));
+  if (failure) {
+    log(`历史遥测补发中断: ${failure.message}`);
+    return false;
+  }
+  log(`历史遥测补发完成: ${states.length} 台设备，${timestamps.length} 个采样点，${completed} 条指标序列`);
+  return true;
+}
+
+async function startTelemetryReporter(states, options) {
+  let reporting = false;
+  const report = async () => {
+    if (reporting) return;
+    reporting = true;
+    try {
+      const at = Date.now();
+      for (const state of states) {
+        try {
+          advanceMeter(state);
+          await reportReadings(state, telemetryReadings(state, at));
+        } catch (error) {
+          log(`${state.fixture.deviceNo} 实时遥测上报失败: ${error.message}`);
+        }
+      }
+    } finally {
+      reporting = false;
+    }
+  };
+  await report();
+  const timer = setInterval(() => void report(), options.telemetryIntervalMs);
+  return async () => clearInterval(timer);
 }
 
 async function heartbeat(state, status) {
@@ -890,7 +986,7 @@ async function main() {
     if (timer) clearTimeout(timer);
     for (const state of states) {
       clearTimeout(state.faultTimer);
-      if (state.mqttTimer) clearInterval(state.mqttTimer);
+      if (state.mqttCommandTimer) clearInterval(state.mqttCommandTimer);
       if (state.opcSyncTimer) clearInterval(state.opcSyncTimer);
     }
     for (const stop of stops.reverse()) await stop().catch((error) => log(`停止失败: ${error.message}`));
@@ -926,6 +1022,9 @@ async function main() {
       await heartbeat(state, "ONLINE");
     }
 
+    if (options.historyHours > 0) await backfillTelemetry(states, options);
+    stops.push(await startTelemetryReporter(states, options));
+
     const httpStates = states.filter((state) => state.fixture.protocol === "HTTP");
     if (httpStates.length > 0) {
       let running = false;
@@ -945,34 +1044,6 @@ async function main() {
       await tick();
       httpTimer = setInterval(tick, options.intervalMs);
       stops.push(async () => clearInterval(httpTimer));
-    }
-
-    const fieldStates = states.filter((state) => !["HTTP", "MQTT"].includes(state.fixture.protocol));
-    if (fieldStates.length > 0) {
-      let reporting = false;
-      const report = async () => {
-        if (stopping || reporting) return;
-        reporting = true;
-        try {
-          for (const state of fieldStates) {
-            advanceMeter(state);
-            await requestJson(process.env.TELEMETRY_SERVICE_URL?.trim() || "http://127.0.0.1:3004", "/api/v1/telemetry/report", {
-              deviceId: state.fixture.deviceId,
-              metric: "water_meter",
-              value: state.counts * state.scale,
-              unit: "m³",
-              at: new Date().toISOString(),
-            });
-          }
-        } catch (error) {
-          log(`现场模拟遥测异常: ${error.message}`);
-        } finally {
-          reporting = false;
-        }
-      };
-      await report();
-      const telemetryTimer = setInterval(() => void report(), options.intervalMs);
-      stops.push(async () => clearInterval(telemetryTimer));
     }
 
     log(`已启动 ${states.length} 个协议模拟设备；Ctrl+C 安全退出`);

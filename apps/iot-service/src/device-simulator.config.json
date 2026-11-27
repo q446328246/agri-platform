@@ -3,12 +3,14 @@
     "deviceId": "device-demo-sim-http",
     "deviceNo": "DZ-SIM-HTTP",
     "name": "HTTP 真机模拟灌溉泵",
+    "type": "IRRIGATION_PUMP",
     "protocol": "HTTP"
   },
   {
     "deviceId": "device-demo-sim-modbus",
     "deviceNo": "DZ-SIM-MODBUS",
     "name": "Modbus TCP 真机模拟灌溉泵",
+    "type": "IRRIGATION_PUMP",
     "protocol": "MODBUS_TCP",
     "binding": {
       "host": "127.0.0.1",
@@ -22,12 +24,14 @@
     "deviceId": "device-demo-sim-mqtt",
     "deviceNo": "DZ-SIM-MQTT",
     "name": "MQTT 真机模拟灌溉泵",
+    "type": "IRRIGATION_PUMP",
     "protocol": "MQTT"
   },
   {
     "deviceId": "device-demo-sim-plc-modbus",
     "deviceNo": "DZ-SIM-PLC-MB",
     "name": "PLC Modbus TCP 真机模拟灌溉泵",
+    "type": "IRRIGATION_PUMP",
     "protocol": "PLC_MODBUS_TCP",
     "plc": {
       "driverId": "PLC_MODBUS_TCP_GATEWAY",
@@ -46,6 +50,7 @@
     "deviceId": "device-demo-sim-s7",
     "deviceNo": "DZ-SIM-S7",
     "name": "Siemens S7 真机模拟灌溉泵",
+    "type": "IRRIGATION_PUMP",
     "protocol": "SIEMENS_S7",
     "plc": {
       "driverId": "SIEMENS_S7_DRIVER",
@@ -65,6 +70,7 @@
     "deviceId": "device-demo-sim-mc",
     "deviceNo": "DZ-SIM-MC",
     "name": "Mitsubishi MC 真机模拟灌溉泵",
+    "type": "IRRIGATION_PUMP",
     "protocol": "MITSUBISHI_MC",
     "plc": {
       "driverId": "MITSUBISHI_MC_DRIVER",
@@ -83,6 +89,7 @@
     "deviceId": "device-demo-sim-opcua",
     "deviceNo": "DZ-SIM-OPCUA",
     "name": "OPC UA 真机模拟灌溉泵",
+    "type": "IRRIGATION_PUMP",
     "protocol": "OPC_UA",
     "plc": {
       "driverId": "OPC_UA_CLIENT",

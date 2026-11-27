@@ -156,7 +156,7 @@ services:
   device-simulator:
     image: agri-platform:local
     profiles: ["app"]
-    command: ["node", "scripts/simulate-device-protocols.mjs", "--protocol=all", "--host=0.0.0.0", "--interval=100"]
+    command: ["node", "scripts/simulate-device-protocols.mjs", "--protocol=all", "--host=0.0.0.0", "--interval=100", "--telemetry-interval=10000", "--history-hours=24", "--history-interval=15"]
     env_file:
       - path: ../.env
         required: false
