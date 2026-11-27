@@ -68,7 +68,7 @@ export const DEVICE_TELEMETRY_PROFILES = Object.freeze({
   FERTILIZER_VALVE: [
     metric("flowRate", "m³/h", 8, 1.2, 2, 0, 30, "flow", { flowFactor: 0.8 }),
     metric("valveOpening", "%", 72, 10, 1, 0, 100, "opening"),
-    metric("linePressure", "MPa", 0.24, 0.025, 3, 0, 1, "operationalPressure"),
+    metric("linePressure", "MPa", 0.24, 0.025, 4, 0, 1, "operationalPressure"),
     metric("soilEc", "μS/cm", 1450, 160, 0, 200, 5000, "soilEc"),
     metric("solutionLevel", "%", 74, 2.5, 1, 0, 100, "solutionLevel"),
     metric("motorCurrent", "A", 3.8, 0.5, 2, 0, 15, "current"),
@@ -77,18 +77,18 @@ export const DEVICE_TELEMETRY_PROFILES = Object.freeze({
   IRRIGATION_VALVE: [
     metric("flowRate", "m³/h", 9, 1.4, 2, 0, 35, "flow", { flowFactor: 0.9 }),
     metric("valveOpening", "%", 76, 10, 1, 0, 100, "opening"),
-    metric("linePressure", "MPa", 0.22, 0.025, 3, 0, 1, "operationalPressure"),
+    metric("linePressure", "MPa", 0.22, 0.025, 4, 0, 1, "operationalPressure"),
     metric("soilMoisture", "%", 32, 2.8, 1, 8, 60, "soilMoisture"),
     metric("water_meter", "m³", 0, 0, 2, 0, Number.MAX_SAFE_INTEGER, "waterMeter"),
   ],
   IRRIGATION_PUMP: [
     metric("water_meter", "m³", 0, 0, 2, 0, Number.MAX_SAFE_INTEGER, "waterMeter"),
     metric("flowRate", "m³/h", 10, 1.1, 2, 0, 50, "flow"),
-    metric("outletPressure", "MPa", 0.32, 0.03, 3, 0, 1.2, "operationalPressure"),
+    metric("outletPressure", "MPa", 0.32, 0.03, 4, 0, 1.2, "operationalPressure"),
     metric("motorCurrent", "A", 11.5, 1.1, 2, 0, 40, "current"),
     metric("voltage", "V", 380, 3.5, 1, 340, 420),
     metric("motorTemperature", "°C", 32, 4, 1, 0, 95, "operationalTemperature", { activeHeat: 24 }),
-    metric("vibration", "mm/s", 1.15, 0.28, 2, 0, 10, "vibration"),
+    metric("vibration", "mm/s", 1.15, 0.28, 3, 0, 10, "vibration"),
     metric("pumpSpeed", "rpm", 1450, 35, 0, 0, 3000, "pumpSpeed"),
   ],
   AGRICULTURAL_DRONE: [
