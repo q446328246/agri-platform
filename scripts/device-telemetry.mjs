@@ -200,7 +200,7 @@ function operationalValue(state, definition, atMs, jitter) {
     case "operationalTemperature":
       return ambient + (running ? definition.activeHeat ?? 12 : 0) + definition.amplitude * jitter * 0.25 + (state.faulted ? 8 : 0);
     case "vibration":
-      return running ? definition.base + definition.amplitude * jitter : 0.06 + Math.abs(jitter) * 0.025;
+      return running ? definition.base + definition.amplitude * jitter : 0.05 + jitter * 0.04;
     case "pumpSpeed":
     case "engineSpeed":
       return running ? definition.base + definition.amplitude * jitter : 0;
