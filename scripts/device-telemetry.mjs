@@ -194,7 +194,7 @@ function operationalValue(state, definition, atMs, jitter) {
     case "opening":
       return running ? definition.base + definition.amplitude * jitter : 0;
     case "operationalPressure":
-      return running ? definition.base + definition.amplitude * jitter : definition.base * (definition.standbyFactor ?? 0.16);
+      return running ? definition.base + definition.amplitude * jitter : definition.base * (definition.standbyFactor ?? 0.16) * (0.96 + jitter * 0.04);
     case "current":
       return running ? definition.base + definition.amplitude * jitter : definition.base * (0.06 + Math.abs(jitter) * 0.015);
     case "operationalTemperature":
@@ -281,6 +281,19 @@ function valueOf(state, definition, atMs) {
       break;
     case "signal":
       value = definition.base + jitter * definition.amplitude;
+      break;
+    case "flow":
+    case "opening":
+    case "operationalPressure":
+    case "current":
+    case "operationalTemperature":
+    case "vibration":
+    case "pumpSpeed":
+    case "engineSpeed":
+    case "flightSpeed":
+    case "vehicleSpeed":
+    case "altitude":
+      value = operationalValue(state, definition, atMs, jitter);
       break;
     default:
       value = operationalValue(state, definition, atMs, jitter) + slow * definition.amplitude * 0.08;
